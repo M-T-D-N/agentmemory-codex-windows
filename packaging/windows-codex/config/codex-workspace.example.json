@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "workspace_root": "D:\\path\\to\\workspace",
+  "project_registry": "D:\\path\\to\\workspace\\.workspace\\config\\project-repositories.json"
+}

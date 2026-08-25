@@ -1,0 +1,77 @@
+name: Windows/Codex bug
+description: Report a reproducible problem in the supported downstream profile.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include secrets, private prompts, memory databases, full workspaces, or unredacted logs.
+        Security issues must use the private process in SECURITY.md.
+  - type: input
+    id: downstream-version
+    attributes:
+      label: Downstream version
+      placeholder: 0.1.0-preview.1
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex app or CLI version
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - Build
+        - Install or upgrade
+        - Managed hooks
+        - MCP
+        - Recall or project scope
+        - Local Qwen graph extraction
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest safe reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Paste only the minimum redacted error text or status output.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private prompts, personal paths, memory data, and unrelated logs.
+          required: true
+        - label: I confirmed this is not a vulnerability report.
+          required: true

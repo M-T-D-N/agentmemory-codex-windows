@@ -1,0 +1,15 @@
+{
+  "name": "agentmemory",
+  "version": "0.9.29",
+  "description": "AgentMemory compatibility plugin bundled with the independent Windows/Codex downstream. Technical Preview; see the repository support boundary before installing.",
+  "author": {
+    "name": "M-T-D-N",
+    "url": "https://github.com/M-T-D-N"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/M-T-D-N/agentmemory-codex-windows",
+  "repository": "https://github.com/M-T-D-N/agentmemory-codex-windows",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.codex.json"
+}

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private vulnerability reporting
+    url: https://github.com/M-T-D-N/agentmemory-codex-windows/security/advisories/new
+    about: Report security issues privately. Never open a public security issue.
+  - name: Upstream AgentMemory
+    url: https://github.com/rohitg00/agentmemory
+    about: Use upstream for behavior that reproduces without the Windows/Codex downstream.

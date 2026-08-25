@@ -1,0 +1,13 @@
+{
+  "name": "agentmemory",
+  "version": "0.9.29",
+  "description": "Upstream-compatible AgentMemory plugin bundled with the independent Windows/Codex downstream. 12 hooks, 56 MCP tools, 8 skills, real-time viewer.",
+  "author": {
+    "name": "M-T-D-N",
+    "url": "https://github.com/M-T-D-N"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/M-T-D-N/agentmemory-codex-windows",
+  "repository": "https://github.com/M-T-D-N/agentmemory-codex-windows",
+  "skills": ["./skills/"]
+}

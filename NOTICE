@@ -1,0 +1,12 @@
+AgentMemory for Codex on Windows
+Copyright 2026 M-T-D-N
+
+This product includes software developed by Rohit Ghumare and AgentMemory
+contributors in the AgentMemory project:
+
+    https://github.com/rohitg00/agentmemory
+
+The first downstream public preview is based on AgentMemory v0.9.29. Exact
+upstream source identity and integrity metadata are recorded in
+upstream-source.json. The upstream and downstream software are provided under
+the Apache License, Version 2.0, included in LICENSE.
