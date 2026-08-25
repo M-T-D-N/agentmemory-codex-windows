@@ -47,6 +47,14 @@ is 56 tools, 6 resources, and 3 prompts; it also has 133 endpoints on port 3111,
 12 portable hooks, and 17 skills. The supported Windows profile intentionally
 activates only the four managed hooks listed above.
 
+### Non-reinforcing retrieval
+
+`memory_recall`, `memory_smart_search`, and `memory_timeline` reinforce the
+access-based retention signal by default. Set `trackAccess` to `false` for
+administrative inspection, evaluation, reporting, previews, or other
+analytical reads that should not change that signal. This option does not
+bypass project scoping, agent isolation, result limits, or existing auditing.
+
 ## Version identities
 
 | Identity | Value | Meaning |

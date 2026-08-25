@@ -4,6 +4,14 @@ This file records public releases of **AgentMemory for Codex on Windows** only.
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+### Added
+
+- Opt-in non-reinforcing retrieval for administrative inspection, evaluation,
+  reporting, previews, and other analytical scans. Existing clients continue
+  to track access by default.
+
 ## 0.1.0-preview.1 — 2026-08-25
 
 Initial public source preview.

@@ -272,6 +272,32 @@ describe("Smart Search Function", () => {
     expect(log?.count).toBe(1);
   });
 
+  it("compact mode skips access reinforcement when trackAccess is false", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      trackAccess: false,
+    })) as { results: CompactSearchResult[] };
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(result.results.map((entry) => entry.obsId)).toEqual([
+      "obs_1",
+      "obs_2",
+    ]);
+    expect(await kv.get("mem:access", "obs_1")).toBeNull();
+    expect(await kv.get("mem:access", "obs_2")).toBeNull();
+  });
+
+  it("expand mode skips access reinforcement when trackAccess is false", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      expandIds: ["obs_1"],
+      trackAccess: false,
+    })) as { results: Array<{ obsId: string }> };
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(result.results.map((entry) => entry.obsId)).toEqual(["obs_1"]);
+    expect(await kv.get("mem:access", "obs_1")).toBeNull();
+  });
+
   describe("lesson inclusion (#lesson-visibility)", () => {
     it("compact mode returns lessons array alongside observation results", async () => {
       sdk.registerFunction("mem::lesson-recall", async (payload: any) => ({

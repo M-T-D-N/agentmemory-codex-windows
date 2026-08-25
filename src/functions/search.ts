@@ -380,6 +380,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       format?: string
       token_budget?: number
       agentId?: string
+      trackAccess?: boolean
     }) => {
       const idx = getSearchIndex()
 
@@ -596,10 +597,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         })
       }
 
-      void recordAccessBatch(
-        kv,
-        enriched.map((r) => r.observation.id),
-      )
+      if (data.trackAccess !== false) {
+        void recordAccessBatch(
+          kv,
+          enriched.map((r) => r.observation.id),
+        )
+      }
 
       const estimateTokens = (value: unknown): number =>
         Math.max(1, Math.ceil(JSON.stringify(value).length / 3))

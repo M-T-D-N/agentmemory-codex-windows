@@ -54,6 +54,22 @@ function parseStrictCsvList(value: unknown): string[] | null {
   return entries.every(Boolean) ? [...new Set(entries)] : null;
 }
 
+function parseTrackAccess(
+  value: unknown,
+):
+  | { valid: true; value: boolean }
+  | { valid: false; response: McpResponse } {
+  if (value === undefined) return { valid: true, value: true };
+  if (typeof value === "boolean") return { valid: true, value };
+  return {
+    valid: false,
+    response: {
+      status_code: 400,
+      body: { error: "trackAccess must be a boolean" },
+    },
+  };
+}
+
 function mcpToolResult(result: unknown, isError = false): McpResponse {
   return {
     status_code: 200,
@@ -144,6 +160,8 @@ export function registerMcpEndpoints(
                 body: { error: "token_budget must be a positive integer" },
               };
             }
+            const trackAccess = parseTrackAccess(args.trackAccess);
+            if (!trackAccess.valid) return trackAccess.response;
             // #817: forward agentId so mem::search applies the same
             // isolation filter smart-search uses. Default behavior is
             // unchanged (no agentId → falls back to env AGENT_ID when
@@ -159,6 +177,7 @@ export function registerMcpEndpoints(
               token_budget: tokenBudget,
               agentId: recallAgentId,
               project,
+              trackAccess: trackAccess.value,
             } });
             const text =
               format === "narrative" &&
@@ -327,6 +346,8 @@ export function registerMcpEndpoints(
             }
             const expandIds = parseCsvList(args.expandIds).slice(0, 20);
             const limit = Math.max(1, Math.min(100, asNumber(args.limit, 10) ?? 10));
+            const trackAccess = parseTrackAccess(args.trackAccess);
+            if (!trackAccess.valid) return trackAccess.response;
             const result = await sdk.trigger({
               function_id: "mem::smart-search",
               payload: {
@@ -334,6 +355,7 @@ export function registerMcpEndpoints(
                 expandIds,
                 limit,
                 project,
+                trackAccess: trackAccess.value,
               },
             });
             return {
@@ -379,11 +401,14 @@ export function registerMcpEndpoints(
                 body: { error: "anchor is required for memory_timeline" },
               };
             }
+            const trackAccess = parseTrackAccess(args.trackAccess);
+            if (!trackAccess.valid) return trackAccess.response;
             const result = await sdk.trigger({ function_id: "mem::timeline", payload: {
               anchor: args.anchor,
               project: (args.project as string) || undefined,
               before: (args.before as number) || 5,
               after: (args.after as number) || 5,
+              trackAccess: trackAccess.value,
             } });
             return {
               status_code: 200,

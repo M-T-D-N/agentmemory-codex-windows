@@ -33,6 +33,14 @@ upstream 호환 소스 surface에는 56 MCP tools, 6 resources, 3 prompts,
 port 3111의 133 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 지원 Windows 프로필은 위 네 개의 관리형 훅만 의도적으로 활성화합니다.
 
+### 비강화 조회
+
+`memory_recall`, `memory_smart_search`, `memory_timeline`은 기본적으로 조회된
+기억의 접근 기반 보존 신호를 강화합니다. 관리 점검, 평가, 보고서, 미리보기처럼
+그 신호를 바꾸지 않아야 하는 분석 조회에는 `trackAccess`를 `false`로 설정하세요.
+이 옵션은 프로젝트 범위, 에이전트 격리, 결과 제한, 기존 감사 동작을 우회하지
+않습니다.
+
 ## 버전 구분
 
 | 구분 | 값 | 의미 |
