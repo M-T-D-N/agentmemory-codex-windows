@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/rohitg00/agentmemory",
+  "tag": "v0.9.29",
+  "tag_object": "2d38dafede67d0d4ed920cde94d2106e98825b8a",
+  "commit": "2d38dafede67d0d4ed920cde94d2106e98825b8a",
+  "tree": "8160c1356ffe3c5457cead07d627893cb2572f12",
+  "npm_artifact": {
+    "filename": "agentmemory-0.9.29.tgz",
+    "size_bytes": 1354562,
+    "sha256": "31376EC03D9DFCCDC8F0A0BD357DE9600C13D3A41A8351B310F0EA5A78F06774",
+    "sha1": "800309CB9E83EE5EFC10739F8B481D79FA5544DF",
+    "integrity": "sha512-NGHEi563Ap6MDan19slUH47qrTHRRyLCsuEsa1tRZ0y3e4urJnxedLJR9/agp47P1nw6LiCEvNRvK4LfUWj9Gg=="
+  },
+  "build_runtime": {
+    "node": "24.19.0",
+    "package_manager": "pnpm@11.19.0"
+  }
+}

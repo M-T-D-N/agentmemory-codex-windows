@@ -1,0 +1,30 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+.claude/
+
+plugin/scripts/*.map
+plugin/scripts/*.d.mts
+data/
+!eval/data/
+!eval/data/**
+data-*/
+agentmemory-debug/
+.gstack/
+
+# This downstream build tracks pnpm-lock.yaml as a reproducibility input.
+package-lock.json
+yarn.lock
+integrations/hermes/__pycache__/
+
+# Eval reports (transient; published scorecards live in docs/benchmarks/)
+eval/reports/
+# LongMemEval download is 278MB; fetched on demand
+eval/data/longmemeval/

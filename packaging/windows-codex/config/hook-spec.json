@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "description": "AgentMemory official session lifecycle with raw normal prompt/final-response observation and bounded exact-project curation context. Loopback local Qwen is graph-only; remote LLM processing is disabled.",
+  "events": [
+    {
+      "name": "SessionStart",
+      "timeout_seconds": 3
+    },
+    {
+      "name": "UserPromptSubmit",
+      "timeout_seconds": 4,
+      "additional_context_limit": 2400
+    },
+    {
+      "name": "Stop",
+      "timeout_seconds": 4
+    },
+    {
+      "name": "SessionEnd",
+      "timeout_seconds": 3
+    }
+  ]
+}
