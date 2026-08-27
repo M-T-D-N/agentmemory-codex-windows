@@ -5,6 +5,8 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
+[![Windows용 Codex AgentMemory](../assets/social-preview.png)](../assets/social-preview.png)
+
 > [!IMPORTANT]
 > 이 저장소는 소스 전용 Technical Preview `0.1.0-preview.1`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
@@ -14,6 +16,10 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 
 개발 안내: 이 다운스트림은 AI가 생성하고 사용자가 시험했습니다. [전체
 고지](#ai-개발-고지)를 확인하세요.
+
+> **Windows에서 Codex로 평가하기**
+>
+> 네이티브 Windows에서 이 저장소를 Codex로 열고 [`INSTALL_FOR_AGENTS.md`](../INSTALL_FOR_AGENTS.md)를 따르도록 요청하세요. 이 실행 안내서는 고정된 네이티브 입력과 소스 체크아웃을 검증하고, 기본적으로 설치 프로그램을 dry-run/검증 전용 모드로 유지하며, 실제 cutover를 위해 `-Execute`를 추가하기 전 명시적 승인을 요구합니다. 해시, 소유권, 경로, 매니페스트 또는 이전 설치 상태가 일치하지 않으면 중단하세요.
 
 ## 이 공개판이 제공하는 것
 

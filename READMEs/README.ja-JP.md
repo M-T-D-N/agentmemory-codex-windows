@@ -5,6 +5,8 @@ AgentMemory ダウンストリームです。
 
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
+[![Windows向け Codex AgentMemory](../assets/social-preview.png)](../assets/social-preview.png)
+
 > [!IMPORTANT]
 > このリポジトリは、ソースのみを提供する Technical Preview
 > `0.1.0-preview.1` です。
@@ -17,6 +19,10 @@ AgentMemory ダウンストリームです。
 
 開発注記: このダウンストリームは AI 生成・ユーザーテスト済みです。[開示
 全文](#ai-開発に関する開示)を参照してください。
+
+> **Windows で Codex を使って評価する**
+>
+> ネイティブ Windows でこのリポジトリを Codex で開き、[`INSTALL_FOR_AGENTS.md`](../INSTALL_FOR_AGENTS.md) に従うよう依頼してください。このランブックは、固定されたネイティブ入力とソースチェックアウトを検証し、インストーラーを既定で dry-run／検証専用モードに保ち、実際の cutover のために `-Execute` を追加する前に明示的な承認を要求します。ハッシュ、所有権、パス、マニフェスト、または既存インストール状態に不一致があれば停止してください。
 
 ## このプレビューで提供するもの
 

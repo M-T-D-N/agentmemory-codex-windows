@@ -11,6 +11,8 @@ and Codex CLI.
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
+[![AgentMemory for Codex on Windows](assets/social-preview.png)](assets/social-preview.png)
+
 > [!IMPORTANT]
 > This is an independent source-only Technical Preview. It is based on
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`, but it is
@@ -21,6 +23,10 @@ and Codex CLI.
 
 Development note: this downstream is AI-generated and user-tested; [read the
 full disclosure](#ai-development-disclosure).
+
+> **Evaluate with Codex on Windows**
+>
+> Open this repository in Codex on native Windows and ask it to follow [`INSTALL_FOR_AGENTS.md`](INSTALL_FOR_AGENTS.md). The runbook verifies the pinned native input and source checkout, keeps the installer in dry-run/validation-only mode by default, and requires explicit approval before adding `-Execute` for an actual cutover. Stop on any hash, ownership, path, manifest, or predecessor mismatch.
 
 ## What this preview does
 
