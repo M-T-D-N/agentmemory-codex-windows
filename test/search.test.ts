@@ -119,6 +119,25 @@ describe("mem::search", () => {
     expect(result.results[0]?.project).toBe("demo");
   });
 
+  it("records access by default", async () => {
+    await sdk.trigger("mem::search", { query: "auth middleware" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const log = await kv.get<{ count: number }>("mem:access", "obs_a");
+    expect(log?.count).toBe(1);
+  });
+
+  it("returns results without reinforcing access when trackAccess is false", async () => {
+    const result = (await sdk.trigger("mem::search", {
+      query: "auth middleware",
+      trackAccess: false,
+    })) as { results: Array<{ observation: CompressedObservation }> };
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(result.results[0]?.observation.id).toBe("obs_a");
+    expect(await kv.get("mem:access", "obs_a")).toBeNull();
+  });
+
   it("returns compact format when requested", async () => {
     const result = (await sdk.trigger("mem::search", {
       query: "auth",

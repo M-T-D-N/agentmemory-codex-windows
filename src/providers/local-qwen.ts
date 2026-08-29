@@ -95,6 +95,60 @@ async function fetchJson(
   return response.json();
 }
 
+async function streamedChatContent(response: Response): Promise<string> {
+  if (!response.body) throw new Error("local_qwen_stream_missing_body");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let completed = false;
+
+  const consumeLine = (rawLine: string) => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith("data:")) return;
+    const data = line.slice(5).trim();
+    if (!data) return;
+    if (data === "[DONE]") {
+      completed = true;
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      throw new Error("local_qwen_stream_invalid_json");
+    }
+    const choices = objectValue(parsed)?.choices;
+    const choice = Array.isArray(choices) ? objectValue(choices[0]) : null;
+    const delta = objectValue(choice?.delta) ?? objectValue(choice?.message);
+    const chunk = delta?.content ?? delta?.reasoning_content ?? delta?.reasoning;
+    if (typeof chunk === "string") content += chunk;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        consumeLine(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+      }
+      if (done) break;
+    }
+    if (buffer) consumeLine(buffer);
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!completed) throw new Error("local_qwen_stream_incomplete");
+  return content;
+}
+
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -321,7 +375,7 @@ export class LocalQwenProvider implements MemoryProvider {
           model: info.model,
           max_tokens: maxTokens,
           temperature: 0,
-          stream: false,
+          stream: true,
           reasoning_effort: "none",
           chat_template_kwargs: { enable_thinking: false },
           messages: [
@@ -335,18 +389,7 @@ export class LocalQwenProvider implements MemoryProvider {
         const detail = (await response.text()).slice(0, 1000);
         throw new Error(`local_qwen_http_${response.status}:${detail}`);
       }
-      const data = (await response.json()) as {
-        choices?: Array<{
-          message?: {
-            content?: string;
-            reasoning?: string;
-            reasoning_content?: string;
-          };
-        }>;
-      };
-      const message = data.choices?.[0]?.message;
-      const content =
-        message?.content ?? message?.reasoning_content ?? message?.reasoning;
+      const content = await streamedChatContent(response);
       if (!content?.trim()) throw new Error("local_qwen_empty_response");
       return content;
     } catch (error) {

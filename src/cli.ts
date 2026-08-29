@@ -62,6 +62,10 @@ import { hydrateProcessEnvFromFile } from "./config.js";
 import { VERSION } from "./version.js";
 import { getAllTools, ESSENTIAL_TOOLS } from "./mcp/tools-registry.js";
 import { knownAgents } from "./cli/connect/index.js";
+import {
+  clearWorkerPidfile,
+  readWorkerPidfile,
+} from "./worker-pidfile.js";
 
 const ALL_TOOLS_COUNT = getAllTools().length;
 const CORE_TOOLS_COUNT = getAllTools().filter((t) => ESSENTIAL_TOOLS.has(t.name)).length;
@@ -612,26 +616,6 @@ function clearEnginePidfile(): void {
 // script). On the next start, the orphaned worker reconnects to the new
 // engine and shows up as a duplicate registration. We write the worker
 // pid from src/index.ts on boot so stop can find and reap it.
-function workerPidfilePath(): string {
-  return join(homedir(), ".agentmemory", "worker.pid");
-}
-
-function readWorkerPidfile(): number | null {
-  try {
-    const pidStr = readFileSync(workerPidfilePath(), "utf-8").trim();
-    const pid = parseInt(pidStr, 10);
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-function clearWorkerPidfile(): void {
-  try {
-    unlinkSync(workerPidfilePath());
-  } catch {}
-}
-
 function writeEngineState(state: EngineState): void {
   try {
     const statePath = engineStatePath();

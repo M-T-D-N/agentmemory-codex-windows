@@ -8,8 +8,8 @@ import type {
 } from "../types.js";
 import {
   isExcludedCodexAmbientSession,
-  sanitizeCodexAmbientObservation,
 } from "./observation-visibility.js";
+import { findVisibleObservation } from "./observation-access.js";
 
 export function registerVerifyFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::verify", 
@@ -38,7 +38,12 @@ export function registerVerifyFunction(sdk: ISdk, kv: StateKV): void {
         }> = [];
 
         for (const obsId of observationIds) {
-          const obs = await findObservation(kv, obsId, project, memory.sessionIds);
+          const obs = await findVisibleObservation(
+            kv,
+            obsId,
+            project,
+            memory.sessionIds,
+          );
           if (obs) {
             const session = await kv.get<Session>(KV.sessions, obs.sessionId);
             observations.push({ observation: obs, session: session || undefined });
@@ -74,7 +79,7 @@ export function registerVerifyFunction(sdk: ISdk, kv: StateKV): void {
         };
       }
 
-      const obs = await findObservation(kv, data.id, project);
+      const obs = await findVisibleObservation(kv, data.id, project);
       if (obs) {
         const session = await kv.get<Session>(KV.sessions, obs.sessionId);
         return {
@@ -125,42 +130,4 @@ async function memoryBelongsToProject(
       session.project === project &&
       !isExcludedCodexAmbientSession(session),
   );
-}
-
-async function findObservation(
-  kv: StateKV,
-  obsId: string,
-  project?: string,
-  hintSessionIds?: string[],
-): Promise<CompressedObservation | null> {
-  if (hintSessionIds) {
-    for (const sid of hintSessionIds) {
-      const session = await kv.get<Session>(KV.sessions, sid);
-      if (
-        !session ||
-        (project && session.project !== project) ||
-        isExcludedCodexAmbientSession(session)
-      ) continue;
-      const obs = await kv.get<CompressedObservation>(KV.observations(sid), obsId);
-      const visible =
-        obs?.sessionId === sid && sanitizeCodexAmbientObservation(obs);
-      if (visible) return visible;
-    }
-  }
-  const sessions = await kv.list<Session>(KV.sessions);
-  for (const session of sessions) {
-    if (hintSessionIds?.includes(session.id)) continue;
-    if (
-      (project && session.project !== project) ||
-      isExcludedCodexAmbientSession(session)
-    ) continue;
-    const obs = await kv.get<CompressedObservation>(
-      KV.observations(session.id),
-      obsId,
-    );
-    const visible =
-      obs?.sessionId === session.id && sanitizeCodexAmbientObservation(obs);
-    if (visible) return visible;
-  }
-  return null;
 }

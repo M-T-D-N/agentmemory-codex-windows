@@ -103,6 +103,37 @@ describe("Timeline Function", () => {
     expect(result.entries[4].observation.id).toBe("obs_5");
   });
 
+  it("records access by default", async () => {
+    await sdk.trigger("mem::timeline", {
+      anchor: "2026-02-01T12:00:00Z",
+      before: 0,
+      after: 0,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const log = await kv.get<{ count: number }>("mem:access", "obs_3");
+    expect(log?.count).toBe(1);
+  });
+
+  it("returns the timeline without reinforcing access when trackAccess is false", async () => {
+    const result = (await sdk.trigger("mem::timeline", {
+      anchor: "2026-02-01T12:00:00Z",
+      before: 1,
+      after: 1,
+      trackAccess: false,
+    })) as { entries: TimelineEntry[] };
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(result.entries.map((entry) => entry.observation.id)).toEqual([
+      "obs_2",
+      "obs_3",
+      "obs_4",
+    ]);
+    for (const id of ["obs_2", "obs_3", "obs_4"]) {
+      expect(await kv.get("mem:access", id)).toBeNull();
+    }
+  });
+
   it("relativePosition is correct relative to anchor", async () => {
     const result = (await sdk.trigger("mem::timeline", {
       anchor: "2026-02-01T12:00:00Z",

@@ -14,6 +14,7 @@ import type { Memory } from "../src/types.js";
 // frame limit even when the requested project's own slice fits.
 
 const SECRET = "mesh-test-secret";
+const readContext = async () => ({ context: "", blocks: 0, tokens: 0 });
 
 function mockKV(store = new Map<string, Map<string, unknown>>()) {
   return {
@@ -77,7 +78,7 @@ describe("api::mesh-export project scoping", () => {
     await kv.set(KV.memories, "m-alpha", memory("m-alpha", "alpha"));
     await kv.set(KV.memories, "m-beta", memory("m-beta", "beta"));
     const sdk = mockSdk();
-    registerApiTriggers(sdk as never, kv as never, SECRET);
+    registerApiTriggers(sdk as never, kv as never, readContext, SECRET);
 
     const res = await meshExport(sdk, "alpha");
 
@@ -92,7 +93,7 @@ describe("api::mesh-export project scoping", () => {
     await kv.set(KV.memories, "m-alpha", memory("m-alpha", "alpha"));
     await kv.set(KV.memories, "m-beta", memory("m-beta", "beta"));
     const sdk = mockSdk();
-    registerApiTriggers(sdk as never, kv as never, SECRET);
+    registerApiTriggers(sdk as never, kv as never, readContext, SECRET);
 
     const res = await meshExport(sdk);
 
@@ -111,7 +112,7 @@ describe("api::mesh-export project scoping", () => {
     );
     await kv.set(KV.memories, "m-alpha", memory("m-alpha", "alpha"));
     const sdk = mockSdk();
-    registerApiTriggers(sdk as never, kv as never, SECRET);
+    registerApiTriggers(sdk as never, kv as never, readContext, SECRET);
 
     // Scoped to alpha: the huge beta memory is filtered out before the frame
     // guard runs, so the request succeeds instead of 413-ing.

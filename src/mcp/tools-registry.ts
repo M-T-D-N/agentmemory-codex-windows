@@ -37,6 +37,11 @@ export const CORE_TOOLS: McpToolDef[] = [
           type: "number",
           description: "Optional token budget to trim returned results",
         },
+        trackAccess: {
+          type: "boolean",
+          description:
+            "Set to false for analytical reads that must not reinforce access-based retention (default true)",
+        },
       },
       required: ["query", "project"],
     },
@@ -147,6 +152,11 @@ export const CORE_TOOLS: McpToolDef[] = [
           description: "Comma-separated observation IDs to expand",
         },
         limit: { type: "number", description: "Max results (default 10)" },
+        trackAccess: {
+          type: "boolean",
+          description:
+            "Set to false for analytical reads that must not reinforce access-based retention (default true)",
+        },
       },
       required: ["query", "project"],
     },
@@ -184,6 +194,11 @@ export const CORE_TOOLS: McpToolDef[] = [
         after: {
           type: "number",
           description: "Observations after anchor (default 5)",
+        },
+        trackAccess: {
+          type: "boolean",
+          description:
+            "Set to false for analytical reads that must not reinforce access-based retention (default true)",
         },
       },
       required: ["anchor"],

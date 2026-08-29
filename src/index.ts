@@ -107,9 +107,7 @@ import { initMetrics, OTEL_CONFIG } from "./telemetry/setup.js";
 import { VERSION } from "./version.js";
 import type { ProviderRuntimeInfo } from "./types.js";
 import { bootLog } from "./logger.js";
-import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { clearWorkerPidfile, writeWorkerPidfile } from "./worker-pidfile.js";
 
 // #640 + #474: the worker process (this file) is spawned by iii-exec
 // inside the engine. When `agentmemory stop` kills only the engine pid,
@@ -117,24 +115,6 @@ import { homedir } from "node:os";
 // wrapper script keeps it running) and reconnects to the next engine as
 // a duplicate worker. Write the worker pid alongside iii.pid so
 // `agentmemory stop` can reap us too.
-function workerPidfilePath(): string {
-  return join(homedir(), ".agentmemory", "worker.pid");
-}
-function writeWorkerPidfile(): void {
-  try {
-    const p = workerPidfilePath();
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, `${process.pid}\n`, { encoding: "utf-8" });
-  } catch {
-    // best-effort; stop still has the engine pidfile + port scan fallback
-  }
-}
-function clearWorkerPidfile(): void {
-  try {
-    unlinkSync(workerPidfilePath());
-  } catch {}
-}
-
 function hasGetMeter(
   sdk: unknown,
 ): sdk is { getMeter: (name: string) => unknown } {
@@ -291,7 +271,7 @@ async function main() {
   registerDiskSizeManager(sdk, kv);
   registerCompressFunction(sdk, kv, provider, metricsStore);
   registerSearchFunction(sdk, kv);
-  registerContextFunction(sdk, kv, config.tokenBudget);
+  const readContext = registerContextFunction(sdk, kv, config.tokenBudget);
   registerSummarizeFunction(sdk, kv, provider, metricsStore);
   registerMigrateFunction(sdk, kv);
   registerFileIndexFunction(sdk, kv);
@@ -325,7 +305,7 @@ async function main() {
     `Knowledge graph: structural extraction on (LLM relations ${isGraphExtractionEnabled() ? "enabled" : "off"})`,
   );
   if (semanticGraphBacklogScheduler) {
-    bootLog("Semantic graph backlog: one fair project batch every 30s after a 15s Qwen readiness grace");
+    bootLog("Semantic graph backlog: bounded fair batches with a 30s cooldown after a 15s Qwen readiness grace");
   }
 
   registerConsolidationPipelineFunction(sdk, kv, provider);
@@ -442,8 +422,8 @@ async function main() {
   setHybridRanker(hybridRanker);
   registerRecentSearchesSweepFunction(sdk, kv);
 
-  registerApiTriggers(sdk, kv, secret, metricsStore, provider);
-  registerEventTriggers(sdk, kv);
+  registerApiTriggers(sdk, kv, readContext, secret, metricsStore, provider);
+  registerEventTriggers(sdk, kv, readContext);
   registerMcpEndpoints(sdk, kv, secret);
 
   const healthMonitor = registerHealthMonitor(sdk, kv);

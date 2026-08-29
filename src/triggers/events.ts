@@ -1,6 +1,6 @@
 import { TriggerAction, type ISdk } from "iii-sdk";
 import type { CompressedObservation, HookPayload, Session } from "../types.js";
-import { KV, STREAM } from "../state/schema.js";
+import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { isReflectEnabled } from "../functions/slots.js";
 import {
@@ -14,6 +14,7 @@ import {
 import { logger } from "../logger.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { prepareSessionStart } from "../functions/session-lifecycle.js";
+import type { ContextReader } from "../functions/context.js";
 import { selectSemanticGraphBatch } from "../functions/semantic-graph-backlog.js";
 
 // Global marker recording when corpus consolidation last ran, used to debounce
@@ -46,7 +47,11 @@ function consolidationDue(kv: StateKV): Promise<boolean> {
   return result;
 }
 
-export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
+export function registerEventTriggers(
+  sdk: ISdk,
+  kv: StateKV,
+  readContext: ContextReader,
+): void {
   sdk.registerFunction(
     "event::session::started",
     async (data: {
@@ -74,16 +79,10 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
       });
       if (!start.success) return start;
       const session = start.session;
-      const contextResult = await sdk.trigger<
-        { sessionId: string; project: string; agentId?: string },
-        { context: string }
-      >({
-        function_id: "mem::context",
-        payload: {
-          sessionId: data.sessionId,
-          project: data.project,
-          ...(session.agentId ? { agentId: session.agentId } : {}),
-        },
+      const contextResult = await readContext({
+        sessionId: data.sessionId,
+        project: data.project,
+        ...(session.agentId ? { agentId: session.agentId } : {}),
       });
       return { session, context: contextResult.context };
     },
@@ -211,43 +210,9 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
     config: { topic: "agentmemory.session.ended" },
   });
 
-  // React to observation count changes and emit a lightweight live event for dashboards/viewer.
-  sdk.registerFunction(
-    "event::session::observation-count-changed",
-    async (payload: {
-      key: string;
-      event_type: string;
-      old_value?: Session;
-      new_value?: Session;
-    }) => {
-      if (payload.event_type === "delete") return { skipped: true };
-      const oldCount = payload.old_value?.observationCount ?? 0;
-      const newCount = payload.new_value?.observationCount ?? 0;
-      if (newCount <= oldCount) return { skipped: true };
-
-      await sdk.trigger({
-        function_id: "stream::send",
-        payload: {
-          stream_name: STREAM.name,
-          group_id: STREAM.viewerGroup,
-          id: `session-activity-${payload.key}-${Date.now()}`,
-          type: "session.activity",
-          data: {
-            sessionId: payload.key,
-            observationCount: newCount,
-            delta: newCount - oldCount,
-            updatedAt: payload.new_value?.updatedAt ?? new Date().toISOString(),
-          },
-        },
-        action: TriggerAction.Void(),
-      });
-
-      return { emitted: true };
-    },
-  );
-  sdk.registerTrigger({
-    type: "state",
-    function_id: "event::session::observation-count-changed",
-    config: { scope: KV.sessions },
-  });
+  // Do not register an iii state trigger for session activity. The observation
+  // function writes the session row and waits for that state transaction; iii
+  // 0.11.2 dispatches a matching state callback to this same single worker,
+  // so even a side-effect-free callback cannot run until the waiting write
+  // returns. Raw and compressed observation streams already update the viewer.
 }

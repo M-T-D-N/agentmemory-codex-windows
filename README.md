@@ -11,8 +11,6 @@ and Codex CLI.
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
-[![AgentMemory for Codex on Windows](assets/social-preview.png)](assets/social-preview.png)
-
 > [!IMPORTANT]
 > This is an independent source-only Technical Preview. It is based on
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`, but it is
@@ -23,10 +21,6 @@ and Codex CLI.
 
 Development note: this downstream is AI-generated and user-tested; [read the
 full disclosure](#ai-development-disclosure).
-
-> **Evaluate with Codex on Windows**
->
-> Open this repository in Codex on native Windows and ask it to follow [`INSTALL_FOR_AGENTS.md`](INSTALL_FOR_AGENTS.md). The runbook verifies the pinned native input and source checkout, keeps the installer in dry-run/validation-only mode by default, and requires explicit approval before adding `-Execute` for an actual cutover. Stop on any hash, ownership, path, manifest, or predecessor mismatch.
 
 ## What this preview does
 
@@ -43,8 +37,13 @@ only canonical stores.
 - Supports bounded, source-labelled federated recall across projects without
   allowing wildcard writes.
 - Can use a credential-free, loopback-only local Qwen worker for typed graph
-  extraction. Every other AgentMemory LLM feature receives the noop provider;
-  external fallbacks remain disabled.
+  extraction. Graph completions use streamed SSE so long-running llama.cpp
+  responses remain live and incomplete streams fail closed. Every other
+  AgentMemory LLM feature receives the noop provider; external fallbacks remain
+  disabled.
+- Serves exact project, text, pagination, and bounded-walk graph reads from a
+  rebuildable sharded index. A dirty or unavailable index falls back to an
+  explicit bounded snapshot and never starts a full canonical graph scan.
 - Uses an authenticated loopback MCP endpoint for Codex and retains a packaged
   stdio launcher only as a compatibility path.
 
@@ -53,13 +52,21 @@ is 56 tools, 6 resources, and 3 prompts; it also has 133 endpoints on port 3111,
 12 portable hooks, and 17 skills. The supported Windows profile intentionally
 activates only the four managed hooks listed above.
 
+### Non-reinforcing retrieval
+
+`memory_recall`, `memory_smart_search`, and `memory_timeline` reinforce the
+access-based retention signal by default. Set `trackAccess` to `false` for
+administrative inspection, evaluation, reporting, previews, or other
+analytical reads that should not change that signal. This option does not
+bypass project scoping, agent isolation, result limits, or existing auditing.
+
 ## Version identities
 
 | Identity | Value | Meaning |
 |---|---:|---|
 | Downstream release | `0.1.0-preview.1` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
-| Qualification revision | `r32` | Internal build provenance, not a public version line |
+| Qualification revision | `r58` | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
 
 The exact upstream tag, commit, tree, and pristine package hash are recorded in

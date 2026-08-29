@@ -24,26 +24,49 @@ import {
   validateObservationProvenance,
   type ObservationSourceInput,
 } from "./provenance.js";
+import { sanitizeCodexAmbientObservation } from "./observation-visibility.js";
+import {
+  GRAPH_EDGE_TYPES,
+  GRAPH_NODE_TYPES,
+  graphXmlRepairPrompt,
+  parseGraphXml,
+  repairableGraphXmlError,
+} from "./graph-derivation.js";
+import {
+  DEFAULT_GRAPH_QUERY_LIMIT,
+  GRAPH_QUERY_INDEX_IO_BATCH,
+  GRAPH_QUERY_INDEX_MANIFEST_KEY,
+  GRAPH_QUERY_INDEX_SHARDS,
+  GRAPH_QUERY_INDEX_VERSION,
+  graphNodeProject,
+  graphQueryDocument,
+  graphQueryDocumentOrder,
+  graphQueryEdgeRef,
+  hydrateGraphEdges,
+  hydrateGraphNodes,
+  isVisibleAfterReset,
+  paginateFromSnapshot,
+  queryGraphFromSnapshotFallback,
+  queryGraphFromIndex,
+  queryIndexShardFor,
+  queryIndexShardKey,
+  readAllGraphQueryDocuments,
+  readGraphQueryEdgeRefs,
+  resolvePagination,
+  type GraphQueryEdgeRef,
+  type GraphQueryIndexDocument,
+  type GraphQueryIndexManifest,
+  type GraphQueryInput,
+} from "./graph-query-index.js";
 
 // #753: keep the response payload below the iii state channel ceiling.
 // 500 nodes + their incident edges hold well under the limit on the
 // reported 11k-node / 28k-edge corpus, and 5,000 is the upper bound a
 // caller can request explicitly. Tuned conservatively because edges
 // fan out faster than nodes.
-const DEFAULT_GRAPH_QUERY_LIMIT = 500;
-const MAX_GRAPH_QUERY_LIMIT = 5000;
 const MAX_GRAPH_PURGE_NODES = 500;
 const MAX_GRAPH_PURGE_EDGES = 1000;
 const GRAPH_WRITE_LOCK = "mem:graph-write";
-const GRAPH_NODE_TYPES = new Set<GraphNodeType>([
-  "file", "function", "concept", "error", "decision", "pattern", "library",
-  "person", "project", "preference", "location", "organization", "event",
-]);
-const GRAPH_EDGE_TYPES = new Set<GraphEdgeType>([
-  "uses", "imports", "modifies", "causes", "fixes", "depends_on",
-  "related_to", "works_at", "prefers", "blocked_by", "caused_by",
-  "optimizes_for", "rejected", "avoids", "located_in", "succeeded_by",
-]);
 
 // #814: the precomputed snapshot covers the top-degree subgraph used by
 // the empty-body / nodeType-only branch — the path the viewer hits on
@@ -78,6 +101,116 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
       },
     );
   });
+}
+
+function queryIndexMatchesSnapshot(
+  manifest: GraphQueryIndexManifest | null,
+  snapshot: GraphSnapshot,
+): manifest is GraphQueryIndexManifest {
+  return Boolean(
+    manifest &&
+      manifest.version === GRAPH_QUERY_INDEX_VERSION &&
+      manifest.shardCount === GRAPH_QUERY_INDEX_SHARDS &&
+      !manifest.dirty &&
+      manifest.totalNodes === snapshot.stats.totalNodes &&
+      manifest.totalEdges === snapshot.stats.totalEdges &&
+      manifest.updatedAt === snapshot.updatedAt &&
+      (manifest.resetAt ?? "") === (snapshot.resetAt ?? ""),
+  );
+}
+
+async function readGraphQueryIndexManifest(
+  kv: StateKV,
+): Promise<GraphQueryIndexManifest | null> {
+  const manifest = await kv.get<GraphQueryIndexManifest>(
+    KV.graphQueryManifest,
+    GRAPH_QUERY_INDEX_MANIFEST_KEY,
+  );
+  return manifest?.version === GRAPH_QUERY_INDEX_VERSION ? manifest : null;
+}
+
+async function runStateWrites(
+  writes: Array<() => Promise<unknown>>,
+): Promise<void> {
+  for (let i = 0; i < writes.length; i += GRAPH_QUERY_INDEX_IO_BATCH) {
+    await Promise.all(writes.slice(i, i + GRAPH_QUERY_INDEX_IO_BATCH).map((write) => write()));
+  }
+}
+
+async function buildGraphQueryIndex(
+  kv: StateKV,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  snapshot: GraphSnapshot,
+): Promise<GraphQueryIndexManifest> {
+  const liveNodes = nodes.filter((node) => isVisibleAfterReset(node, snapshot.resetAt));
+  const liveNodeIds = new Set(liveNodes.map((node) => node.id));
+  const liveEdges = edges.filter(
+    (edge) =>
+      isVisibleAfterReset(edge, snapshot.resetAt) &&
+      liveNodeIds.has(edge.sourceNodeId) &&
+      liveNodeIds.has(edge.targetNodeId),
+  );
+  const documentShards: GraphQueryIndexDocument[][] = Array.from(
+    { length: GRAPH_QUERY_INDEX_SHARDS },
+    () => [],
+  );
+  const adjacencyShards = Array.from(
+    { length: GRAPH_QUERY_INDEX_SHARDS },
+    () => ({} as Record<string, GraphQueryEdgeRef[]>),
+  );
+  for (const node of liveNodes) {
+    documentShards[queryIndexShardFor(node.id)]!.push(graphQueryDocument(node));
+  }
+  for (const edge of liveEdges) {
+    const ref = graphQueryEdgeRef(edge);
+    for (const nodeId of new Set([edge.sourceNodeId, edge.targetNodeId])) {
+      const shard = adjacencyShards[queryIndexShardFor(nodeId)]!;
+      (shard[nodeId] ??= []).push(ref);
+    }
+  }
+  const writes: Array<() => Promise<unknown>> = [];
+  for (let shard = 0; shard < GRAPH_QUERY_INDEX_SHARDS; shard++) {
+    const key = queryIndexShardKey(shard);
+    const documents = documentShards[shard]!;
+    const adjacency = adjacencyShards[shard]!;
+    writes.push(
+      () => kv.set(KV.graphQueryDocuments, key, documents),
+      () => kv.set(KV.graphQueryAdjacency, key, adjacency),
+    );
+  }
+  await runStateWrites(writes);
+  const manifest: GraphQueryIndexManifest = {
+    version: GRAPH_QUERY_INDEX_VERSION,
+    shardCount: GRAPH_QUERY_INDEX_SHARDS,
+    totalNodes: liveNodes.length,
+    totalEdges: liveEdges.length,
+    updatedAt: snapshot.updatedAt,
+    dirty: false,
+    ...(snapshot.resetAt ? { resetAt: snapshot.resetAt } : {}),
+  };
+  await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, manifest);
+  return manifest;
+}
+
+async function ensureGraphQueryIndex(
+  kv: StateKV,
+  snapshot: GraphSnapshot,
+): Promise<{
+  manifest: GraphQueryIndexManifest;
+  snapshot: GraphSnapshot;
+  rebuilt: boolean;
+} | null> {
+  const current = await readGraphQueryIndexManifest(kv);
+  if (queryIndexMatchesSnapshot(current, snapshot)) {
+    return { manifest: current, snapshot, rebuilt: false };
+  }
+  // Query handlers must remain read-bounded. A timeout around kv.list does not
+  // cancel the underlying iii state invocation, so even a small legacy corpus
+  // can wedge the shared worker when an index revision changes between reads.
+  // Exact indexes are maintained by graph writes and explicit lifecycle
+  // rebuilds; a missing or stale manifest degrades to the bounded snapshot.
+  return null;
 }
 
 function emptySnapshot(): GraphSnapshot {
@@ -169,42 +302,101 @@ function buildSnapshotFromArrays(
   };
 }
 
-function isVisibleAfterReset(
-  entry: { stale?: boolean; createdAt?: string },
-  resetAt?: string,
-): boolean {
-  if (entry.stale) return false;
-  if (!resetAt) return true;
-  return typeof entry.createdAt === "string" && entry.createdAt >= resetAt;
-}
-
-function paginateFromSnapshot(
-  snap: GraphSnapshot,
-  filterType: string | undefined,
-  limit: number,
-  offset: number,
-): GraphQueryResult {
-  const filteredNodes = filterType
-    ? snap.topNodes.filter((n) => n.type === filterType)
-    : snap.topNodes;
-  const total = filterType
-    ? snap.stats.nodesByType[filterType] ?? 0
-    : snap.stats.totalNodes;
-  const pageNodes = filteredNodes.slice(offset, offset + limit);
-  const pageIds = new Set(pageNodes.map((n) => n.id));
-  const pageEdges = snap.topEdges.filter(
-    (e) => pageIds.has(e.sourceNodeId) && pageIds.has(e.targetNodeId),
+async function buildSnapshotFromQueryIndexDelta(
+  kv: StateKV,
+  resetAt: string | undefined,
+  changedNodes: GraphNode[],
+  changedEdges: GraphEdge[],
+  previousEdges: GraphEdge[],
+  updatedAt: string,
+): Promise<{ snapshot: GraphSnapshot; degreeByNodeId: Map<string, number> }> {
+  const documentsById = new Map(
+    (await readAllGraphQueryDocuments(kv)).map((document) => [document.id, document]),
   );
+  for (const node of changedNodes) {
+    documentsById.delete(node.id);
+    if (isVisibleAfterReset(node, resetAt)) {
+      documentsById.set(node.id, graphQueryDocument(node));
+    }
+  }
+
+  const liveNodeIds = new Set(documentsById.keys());
+  const { refs: indexedRefs } = await readGraphQueryEdgeRefs(kv, liveNodeIds);
+  const refsById = new Map(indexedRefs.map((ref) => [ref.id, ref]));
+  for (const edge of [...previousEdges, ...changedEdges]) refsById.delete(edge.id);
+  for (const edge of new Map(changedEdges.map((edge) => [edge.id, edge])).values()) {
+    if (
+      isVisibleAfterReset(edge, resetAt) &&
+      liveNodeIds.has(edge.sourceNodeId) &&
+      liveNodeIds.has(edge.targetNodeId)
+    ) {
+      refsById.set(edge.id, graphQueryEdgeRef(edge));
+    }
+  }
+
+  const liveRefs = [...refsById.values()].filter(
+    (ref) => liveNodeIds.has(ref.sourceNodeId) && liveNodeIds.has(ref.targetNodeId),
+  );
+  const degreeByNodeId = new Map<string, number>();
+  for (const ref of liveRefs) {
+    degreeByNodeId.set(
+      ref.sourceNodeId,
+      (degreeByNodeId.get(ref.sourceNodeId) ?? 0) + 1,
+    );
+    degreeByNodeId.set(
+      ref.targetNodeId,
+      (degreeByNodeId.get(ref.targetNodeId) ?? 0) + 1,
+    );
+  }
+  const topDocuments = [...documentsById.values()]
+    .sort(
+      (a, b) =>
+        (degreeByNodeId.get(b.id) ?? 0) - (degreeByNodeId.get(a.id) ?? 0) ||
+        graphQueryDocumentOrder(a, b),
+    )
+    .slice(0, SNAPSHOT_TOP_NODES);
+  const topNodes = await hydrateGraphNodes(
+    kv,
+    topDocuments.map((document) => document.id),
+    resetAt,
+  );
+  const topNodeIds = new Set(topNodes.map((node) => node.id));
+  const topEdges = await hydrateGraphEdges(
+    kv,
+    liveRefs
+      .filter(
+        (ref) =>
+          topNodeIds.has(ref.sourceNodeId) && topNodeIds.has(ref.targetNodeId),
+      )
+      .map((ref) => ref.id),
+    resetAt,
+  );
+  const topDegrees: Record<string, number> = {};
+  for (const node of topNodes) topDegrees[node.id] = degreeByNodeId.get(node.id) ?? 0;
+  const nodesByType: Record<string, number> = {};
+  for (const document of documentsById.values()) {
+    nodesByType[document.type] = (nodesByType[document.type] ?? 0) + 1;
+  }
+  const edgesByType: Record<string, number> = {};
+  for (const ref of liveRefs) edgesByType[ref.type] = (edgesByType[ref.type] ?? 0) + 1;
+
   return {
-    nodes: pageNodes,
-    edges: pageEdges,
-    depth: 0,
-    totalNodes: total,
-    totalEdges: snap.stats.totalEdges,
-    truncated: total > pageNodes.length,
-    limit,
-    offset,
-    fromSnapshot: true,
+    snapshot: {
+      version: 1,
+      topNodes,
+      topEdges,
+      topDegrees,
+      stats: {
+        totalNodes: documentsById.size,
+        totalEdges: liveRefs.length,
+        nodesByType,
+        edgesByType,
+      },
+      updatedAt,
+      dirty: false,
+      ...(resetAt ? { resetAt } : {}),
+    },
+    degreeByNodeId,
   };
 }
 
@@ -221,6 +413,29 @@ const REBUILD_SAFE_NODE_CEILING = 25000;
 
 function nameIndexKey(type: string, name: string): string {
   return `${type}|${name}`;
+}
+
+const CASE_INSENSITIVE_GRAPH_NODE_TYPES = new Set([
+  "concept",
+  "error",
+  "decision",
+  "pattern",
+  "library",
+  "person",
+  "project",
+  "preference",
+  "location",
+  "organization",
+  "event",
+]);
+
+function canonicalGraphNodeName(type: string, name: string): string {
+  if (!CASE_INSENSITIVE_GRAPH_NODE_TYPES.has(type)) return name;
+  return name
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("en-US");
 }
 
 function edgeIndexKey(
@@ -360,17 +575,154 @@ function mergeEdge(
 }
 
 function scopedNameIndexKey(project: string, type: string, name: string): string {
+  return nameIndexKey(
+    type,
+    JSON.stringify([project, canonicalGraphNodeName(type, name)]),
+  );
+}
+
+function legacyScopedNameIndexKey(project: string, type: string, name: string): string {
   return nameIndexKey(type, JSON.stringify([project, name]));
 }
 
-function graphNodeProject(node: GraphNode): string | undefined {
-  if (typeof node.project === "string" && node.project) return node.project;
-  const legacyProject = node.properties?.project;
-  return typeof legacyProject === "string" && legacyProject ? legacyProject : undefined;
+async function prepareGraphQueryIndexUpdate(
+  kv: StateKV,
+  snapshot: GraphSnapshot,
+): Promise<GraphQueryIndexManifest | null> {
+  try {
+    const manifest = await readGraphQueryIndexManifest(kv);
+    if (!queryIndexMatchesSnapshot(manifest, snapshot)) return null;
+    await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, {
+      ...manifest,
+      dirty: true,
+    });
+    return manifest;
+  } catch (error) {
+    logger.warn("Graph query index could not enter write state", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+async function updateGraphQueryIndexDelta(
+  kv: StateKV,
+  priorManifest: GraphQueryIndexManifest | null,
+  snapshot: GraphSnapshot,
+  changedNodes: GraphNode[],
+  changedEdges: GraphEdge[],
+  previousEdges: GraphEdge[] = [],
+): Promise<void> {
+  if (!priorManifest) return;
+  try {
+    const documentShardIds = new Set(
+      changedNodes.map((node) => queryIndexShardFor(node.id)),
+    );
+    const documentShards = new Map<number, GraphQueryIndexDocument[]>();
+    await Promise.all(
+      [...documentShardIds].map(async (shard) => {
+        documentShards.set(
+          shard,
+          (await kv.get<GraphQueryIndexDocument[]>(
+            KV.graphQueryDocuments,
+            queryIndexShardKey(shard),
+          )) ?? [],
+        );
+      }),
+    );
+    for (const node of changedNodes) {
+      const shardId = queryIndexShardFor(node.id);
+      const shard = documentShards.get(shardId) ?? [];
+      const existingIndex = shard.findIndex((entry) => entry.id === node.id);
+      if (existingIndex !== -1) shard.splice(existingIndex, 1);
+      if (isVisibleAfterReset(node, snapshot.resetAt)) {
+        shard.push(graphQueryDocument(node));
+      }
+      documentShards.set(shardId, shard);
+    }
+
+    const adjacencyShardIds = new Set<number>();
+    for (const edge of [...previousEdges, ...changedEdges]) {
+      adjacencyShardIds.add(queryIndexShardFor(edge.sourceNodeId));
+      adjacencyShardIds.add(queryIndexShardFor(edge.targetNodeId));
+    }
+    const adjacencyShards = new Map<
+      number,
+      Record<string, GraphQueryEdgeRef[]>
+    >();
+    await Promise.all(
+      [...adjacencyShardIds].map(async (shard) => {
+        adjacencyShards.set(
+          shard,
+          (await kv.get<Record<string, GraphQueryEdgeRef[]>>(
+            KV.graphQueryAdjacency,
+            queryIndexShardKey(shard),
+          )) ?? {},
+        );
+      }),
+    );
+    const removeEdgeRef = (edge: GraphEdge): void => {
+      for (const nodeId of new Set([edge.sourceNodeId, edge.targetNodeId])) {
+        const shardId = queryIndexShardFor(nodeId);
+        const shard = adjacencyShards.get(shardId) ?? {};
+        const refs = (shard[nodeId] ?? []).filter((ref) => ref.id !== edge.id);
+        if (refs.length > 0) shard[nodeId] = refs;
+        else delete shard[nodeId];
+        adjacencyShards.set(shardId, shard);
+      }
+    };
+    for (const edge of [...previousEdges, ...changedEdges]) removeEdgeRef(edge);
+    const finalEdges = new Map(changedEdges.map((edge) => [edge.id, edge]));
+    for (const edge of finalEdges.values()) {
+      if (!isVisibleAfterReset(edge, snapshot.resetAt)) continue;
+      const ref = graphQueryEdgeRef(edge);
+      for (const nodeId of new Set([edge.sourceNodeId, edge.targetNodeId])) {
+        const shardId = queryIndexShardFor(nodeId);
+        const shard = adjacencyShards.get(shardId) ?? {};
+        (shard[nodeId] ??= []).push(ref);
+        adjacencyShards.set(shardId, shard);
+      }
+    }
+
+    const writes: Array<() => Promise<unknown>> = [];
+    for (const [shard, documents] of documentShards) {
+      writes.push(() =>
+        kv.set(KV.graphQueryDocuments, queryIndexShardKey(shard), documents),
+      );
+    }
+    for (const [shard, adjacency] of adjacencyShards) {
+      writes.push(() =>
+        kv.set(KV.graphQueryAdjacency, queryIndexShardKey(shard), adjacency),
+      );
+    }
+    await runStateWrites(writes);
+    await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, {
+      version: GRAPH_QUERY_INDEX_VERSION,
+      shardCount: GRAPH_QUERY_INDEX_SHARDS,
+      totalNodes: snapshot.stats.totalNodes,
+      totalEdges: snapshot.stats.totalEdges,
+      updatedAt: snapshot.updatedAt,
+      dirty: false,
+      ...(snapshot.resetAt ? { resetAt: snapshot.resetAt } : {}),
+    } satisfies GraphQueryIndexManifest);
+  } catch (error) {
+    logger.warn("Graph query index delta failed; next safe read will rebuild it", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    try {
+      await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, {
+        ...priorManifest,
+        dirty: true,
+      });
+    } catch {
+      // Canonical graph writes remain authoritative. The missing / stale
+      // derived manifest makes indexed reads fail closed into rebuild/fallback.
+    }
+  }
 }
 
 function scopedNodeIdentity(project: string, type: string, name: string): string {
-  return JSON.stringify([project, type, name]);
+  return JSON.stringify([project, type, canonicalGraphNodeName(type, name)]);
 }
 
 function cleanGraphProperties(
@@ -647,6 +999,7 @@ async function purgeProjectGraph(
         );
       }
       await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, finalSnapshot);
+      await buildGraphQueryIndex(kv, remainingNodes, remainingEdges, finalSnapshot);
       await kv.set(KV.audit, audit.id, {
         ...audit,
         details: {
@@ -778,10 +1131,32 @@ async function upsertManualGraph(
     }
 
     const snap = (await readSnapshot(kv)) ?? emptySnapshot();
+    const queryIndexManifest = await prepareGraphQueryIndexUpdate(kv, snap);
     const capturedAt = new Date().toISOString();
     snap.dirty = true;
     await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
-    const storedNodes = await kv.list<GraphNode>(KV.graphNodes);
+    const requestedIdentities = new Set(
+      normalizedNodes.map((node) => scopedNodeIdentity(project, node.type, node.name)),
+    );
+    const storedNodes = queryIndexManifest
+      ? await hydrateGraphNodes(
+          kv,
+          [
+            ...new Set(
+              (await readAllGraphQueryDocuments(kv))
+                .filter(
+                  (document) =>
+                    document.project === project &&
+                    requestedIdentities.has(
+                      scopedNodeIdentity(project, document.type, document.name),
+                    ),
+                )
+                .map((document) => document.id),
+            ),
+          ],
+          snap.resetAt,
+        )
+      : await kv.list<GraphNode>(KV.graphNodes);
     const candidatesByIdentity = new Map<string, GraphNode[]>();
     for (const node of storedNodes) {
       const nodeProject = graphNodeProject(node);
@@ -799,6 +1174,9 @@ async function upsertManualGraph(
     let newEdgeCount = 0;
     let mergedEdgeCount = 0;
     const edgeIds: string[] = [];
+    const changedNodes: GraphNode[] = [];
+    const changedEdges: GraphEdge[] = [];
+    const previousEdges: GraphEdge[] = [];
 
     for (const input of normalizedNodes) {
       const indexKey = scopedNameIndexKey(project, input.type, input.name);
@@ -837,7 +1215,7 @@ async function upsertManualGraph(
             ],
             stale: false,
           };
-          await kv.set(KV.graphNodes, duplicate.id, {
+          const supersededDuplicate: GraphNode = {
             ...duplicate,
             stale: true,
             updatedAt: capturedAt,
@@ -845,7 +1223,9 @@ async function upsertManualGraph(
               ...(duplicate.properties ?? {}),
               supersededBy: existing.id,
             },
-          });
+          };
+          await kv.set(KV.graphNodes, duplicate.id, supersededDuplicate);
+          changedNodes.push(supersededDuplicate);
           nodeRedirects.set(duplicate.id, existing.id);
         }
         const merged: GraphNode = {
@@ -857,6 +1237,7 @@ async function upsertManualGraph(
           stale: false,
         };
         await kv.set(KV.graphNodes, existing.id, merged);
+        changedNodes.push(merged);
         await kv.set(KV.graphNameIndex, indexKey, existing.id);
         const topIdx = snap.topNodes.findIndex((node) => node.id === existing!.id);
         if (topIdx !== -1) snap.topNodes[topIdx] = merged;
@@ -867,6 +1248,7 @@ async function upsertManualGraph(
         await kv.set(KV.graphNodes, incoming.id, incoming);
         await kv.set(KV.graphNameIndex, indexKey, incoming.id);
         await kv.set(KV.graphNodeDegree, incoming.id, 0);
+        changedNodes.push(incoming);
         snap.stats.totalNodes++;
         snap.stats.nodesByType[incoming.type] =
           (snap.stats.nodesByType[incoming.type] ?? 0) + 1;
@@ -905,6 +1287,7 @@ async function upsertManualGraph(
         createdAt: capturedAt,
       };
       if (existing) {
+        previousEdges.push(existing);
         const merged: GraphEdge = {
           ...mergeEdge(existing, incoming, capturedAt),
           weight: incoming.weight,
@@ -917,12 +1300,14 @@ async function upsertManualGraph(
           updatedAt: capturedAt,
         };
         await kv.set(KV.graphEdges, existing.id, merged);
+        changedEdges.push(merged);
         edgeIds.push(existing.id);
         const topIdx = snap.topEdges.findIndex((edge) => edge.id === existing!.id);
         if (topIdx !== -1) snap.topEdges[topIdx] = merged;
         mergedEdgeCount++;
       } else {
         await kv.set(KV.graphEdges, incoming.id, incoming);
+        changedEdges.push(incoming);
         edgeIds.push(incoming.id);
         await kv.set(KV.graphEdgeKey, indexKey, incoming.id);
         snap.stats.totalEdges++;
@@ -936,7 +1321,15 @@ async function upsertManualGraph(
     }
 
     if (nodeRedirects.size > 0) {
-      const storedEdges = await kv.list<GraphEdge>(KV.graphEdges);
+      const storedEdges = queryIndexManifest
+        ? await hydrateGraphEdges(
+            kv,
+            (await readGraphQueryEdgeRefs(kv, nodeRedirects.keys())).refs.map(
+              (ref) => ref.id,
+            ),
+            snap.resetAt,
+          )
+        : await kv.list<GraphEdge>(KV.graphEdges);
       for (const edge of storedEdges) {
         if (edge.stale) continue;
         const sourceNodeId = nodeRedirects.get(edge.sourceNodeId) ?? edge.sourceNodeId;
@@ -950,6 +1343,7 @@ async function upsertManualGraph(
           ? await kv.get<GraphEdge>(KV.graphEdges, indexedId)
           : null;
         if (indexed && !indexed.stale) {
+          previousEdges.push(indexed, edge);
           const merged: GraphEdge = {
             ...mergeEdge(indexed, edge, capturedAt),
             properties: { ...(edge.properties ?? {}), ...(indexed.properties ?? {}) },
@@ -964,14 +1358,23 @@ async function upsertManualGraph(
             updatedAt: capturedAt,
           };
           await kv.set(KV.graphEdges, indexed.id, merged);
-          await kv.set(KV.graphEdges, edge.id, {
+          const supersededEdge: GraphEdge = {
             ...edge,
             stale: true,
             updatedAt: capturedAt,
             properties: { ...(edge.properties ?? {}), supersededBy: indexed.id },
-          });
+          };
+          await kv.set(KV.graphEdges, edge.id, supersededEdge);
+          await deleteIndexIfOwned(
+            kv,
+            KV.graphEdgeKey,
+            edgeIndexKey(edge.sourceNodeId, edge.targetNodeId, edge.type),
+            edge.id,
+          );
+          changedEdges.push(merged, supersededEdge);
           edgeIds.push(indexed.id);
         } else {
+          previousEdges.push(edge);
           const redirected: GraphEdge = {
             ...edge,
             sourceNodeId,
@@ -981,6 +1384,13 @@ async function upsertManualGraph(
             updatedAt: capturedAt,
           };
           await kv.set(KV.graphEdges, edge.id, redirected);
+          changedEdges.push(redirected);
+          await deleteIndexIfOwned(
+            kv,
+            KV.graphEdgeKey,
+            edgeIndexKey(edge.sourceNodeId, edge.targetNodeId, edge.type),
+            edge.id,
+          );
           await kv.set(KV.graphEdgeKey, redirectedKey, edge.id);
           edgeIds.push(edge.id);
         }
@@ -988,16 +1398,52 @@ async function upsertManualGraph(
     }
 
     for (const edge of newEdgesForTopCheck) snapshotPushEdgeIfBothInTop(snap, edge);
-    const finalSnapshot = nodeRedirects.size > 0
-      ? buildSnapshotFromArrays(
+    let finalSnapshot = snap;
+    if (nodeRedirects.size > 0) {
+      if (queryIndexManifest) {
+        const rebuilt = await buildSnapshotFromQueryIndexDelta(
+          kv,
+          snap.resetAt,
+          changedNodes,
+          changedEdges,
+          previousEdges,
+          capturedAt,
+        );
+        finalSnapshot = rebuilt.snapshot;
+        const affectedNodeIds = new Set<string>([
+          ...changedNodes.map((node) => node.id),
+          ...previousEdges.flatMap((edge) => [edge.sourceNodeId, edge.targetNodeId]),
+          ...changedEdges.flatMap((edge) => [edge.sourceNodeId, edge.targetNodeId]),
+        ]);
+        await runStateWrites(
+          [...affectedNodeIds].map(
+            (nodeId) => () =>
+              kv.set(
+                KV.graphNodeDegree,
+                nodeId,
+                rebuilt.degreeByNodeId.get(nodeId) ?? 0,
+              ),
+          ),
+        );
+      } else {
+        finalSnapshot = buildSnapshotFromArrays(
           await kv.list<GraphNode>(KV.graphNodes),
           await kv.list<GraphEdge>(KV.graphEdges),
           snap.resetAt,
-        )
-      : snap;
+        );
+      }
+    }
     finalSnapshot.updatedAt = capturedAt;
     finalSnapshot.dirty = false;
     await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, finalSnapshot);
+    await updateGraphQueryIndexDelta(
+      kv,
+      queryIndexManifest,
+      finalSnapshot,
+      changedNodes,
+      changedEdges,
+      previousEdges,
+    );
     await safeAudit(kv, "observe", "mem::graph-upsert", [
       ...Object.values(nodeIds),
       ...edgeIds,
@@ -1025,219 +1471,6 @@ async function upsertManualGraph(
   }
 }
 
-function resolvePagination(
-  rawLimit: number | undefined,
-  rawOffset: number | undefined,
-): { limit: number; offset: number } {
-  const requested = typeof rawLimit === "number" && Number.isFinite(rawLimit)
-    ? Math.floor(rawLimit)
-    : DEFAULT_GRAPH_QUERY_LIMIT;
-  const limit = Math.max(1, Math.min(requested, MAX_GRAPH_QUERY_LIMIT));
-  const offset = Math.max(
-    0,
-    typeof rawOffset === "number" && Number.isFinite(rawOffset)
-      ? Math.floor(rawOffset)
-      : 0,
-  );
-  return { limit, offset };
-}
-
-function paginate(
-  nodes: GraphNode[],
-  allEdges: GraphEdge[],
-  depth: number,
-  limit: number,
-  offset: number,
-): GraphQueryResult {
-  const totalNodes = nodes.length;
-  const pageNodes = nodes.slice(offset, offset + limit);
-  const pageNodeIds = new Set(pageNodes.map((n) => n.id));
-  // Edges restricted to the page so the response payload scales with
-  // `limit`, not with the global edge count. An edge is included only
-  // when BOTH endpoints land in the page — half-edges to nodes outside
-  // the page would render as dangling links in the viewer.
-  const pageEdges = allEdges.filter(
-    (e) => pageNodeIds.has(e.sourceNodeId) && pageNodeIds.has(e.targetNodeId),
-  );
-  // Total edges (for the same node universe). Counted unbounded so the
-  // viewer can show "showing X of Y" without re-querying.
-  const universeIds = new Set(nodes.map((n) => n.id));
-  const totalEdges = allEdges.reduce(
-    (count, e) =>
-      universeIds.has(e.sourceNodeId) && universeIds.has(e.targetNodeId)
-        ? count + 1
-        : count,
-    0,
-  );
-  return {
-    nodes: pageNodes,
-    edges: pageEdges,
-    depth,
-    totalNodes,
-    totalEdges,
-    truncated: totalNodes > pageNodes.length,
-    limit,
-    offset,
-  };
-}
-
-// Parse all key="value" pairs from a tag's attribute string, in any
-// order. The previous parser hard-coded attribute order
-// (type before name on <entity>, type/source/target/weight on
-// <relationship>) and silently dropped nodes/edges when the upstream
-// LLM emitted attributes in a different order — Codex in particular
-// likes to lead with `name=` (#635).
-function parseAttrs(raw: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
-  const attrRegex = /([A-Za-z_][\w:-]*)="([^"]*)"/g;
-  let m;
-  while ((m = attrRegex.exec(raw)) !== null) {
-    attrs[m[1]] = m[2];
-  }
-  return attrs;
-}
-
-function parseGraphXml(
-  xml: string,
-  observationIds: string[],
-): {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-} {
-  const nodes: GraphNode[] = [];
-  const edges: GraphEdge[] = [];
-  const now = new Date().toISOString();
-  if (!/<entities\b[^>]*>[\s\S]*<\/entities>/.test(xml) || !/<relationships\b[^>]*>[\s\S]*<\/relationships>/.test(xml)) {
-    throw new Error("graph response is missing the required XML roots");
-  }
-  const allowedObservationIds = new Set(observationIds);
-  const nodeByReference = new Map<string, GraphNode>();
-
-  const citedObservationIds = (
-    attrs: Record<string, string>,
-    label: string,
-  ): string[] => {
-    const values = (attrs["source_observation_ids"] ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    const unique = [...new Set(values)];
-    if (unique.length === 0) {
-      if (allowedObservationIds.size === 1) {
-        return [...allowedObservationIds];
-      }
-      throw new Error(`${label} is missing source_observation_ids`);
-    }
-    const invalid = unique.find((id) => !allowedObservationIds.has(id));
-    if (invalid) {
-      throw new Error(`${label} cites an observation outside the input batch: ${invalid}`);
-    }
-    return unique;
-  };
-
-  // Two passes because <entity> can be self-closing or have a body
-  // (<property> children). The self-closing form needs `[^>]*[^/]` on
-  // the attr group so the trailing `/` isn't swallowed into the match
-  // (root cause of #494). The explicit-close form picks up the
-  // property block.
-  const entitySelfClose = /<entity\b([^>]*?)\/>/g;
-  const entityWithBody = /<entity\b([^>]*[^/])>([\s\S]*?)<\/entity>/g;
-
-  const addEntity = (rawAttrs: string, propsBlock = ""): void => {
-    const attrs = parseAttrs(rawAttrs);
-    const type = attrs["type"] as GraphNode["type"] | undefined;
-    const name = attrs["name"]?.trim();
-    const reference = attrs["key"]?.trim() || name;
-    if (!type || !GRAPH_NODE_TYPES.has(type) || !name || !reference) {
-      throw new Error("entity contains an invalid key, type, or name");
-    }
-    if (name.length > 1000 || reference.length > 256) {
-      throw new Error("entity key or name is too long");
-    }
-    if (nodeByReference.has(reference)) {
-      throw new Error(`duplicate entity key: ${reference}`);
-    }
-    const properties: Record<string, string> = {};
-    const propRegex = /<property\s+key="([^"]+)">([^<]*)<\/property>/g;
-    let propMatch;
-    while ((propMatch = propRegex.exec(propsBlock)) !== null) {
-      if (Object.keys(properties).length >= 32) {
-        throw new Error("entity contains too many properties");
-      }
-      if (!propMatch[1].trim() || propMatch[1].length > 80 || propMatch[2].length > 2000) {
-        throw new Error("entity contains an invalid property");
-      }
-      properties[propMatch[1]] = propMatch[2];
-    }
-    const node: GraphNode = {
-      id: generateId("gn"),
-      type,
-      name,
-      properties,
-      sourceObservationIds: citedObservationIds(attrs, `entity ${reference}`),
-      createdAt: now,
-    };
-    nodes.push(node);
-    nodeByReference.set(reference, node);
-    if (!nodeByReference.has(name)) nodeByReference.set(name, node);
-  };
-
-  let match;
-  while ((match = entitySelfClose.exec(xml)) !== null) {
-    addEntity(match[1]);
-  }
-  while ((match = entityWithBody.exec(xml)) !== null) {
-    addEntity(match[1], match[2]);
-  }
-
-  const relRegex = /<relationship\b([^>]*?)\/>/g;
-  while ((match = relRegex.exec(xml)) !== null) {
-    const attrs = parseAttrs(match[1]);
-    const type = attrs["type"] as GraphEdge["type"] | undefined;
-    const sourceReference = attrs["source"];
-    const targetReference = attrs["target"];
-    if (!type || !GRAPH_EDGE_TYPES.has(type) || !sourceReference || !targetReference) {
-      throw new Error("relationship contains an invalid type, source, or target");
-    }
-    const parsedWeight = parseFloat(attrs["weight"] ?? "");
-    const weight = Number.isFinite(parsedWeight) ? parsedWeight : 0.5;
-
-    const sourceNode = nodeByReference.get(sourceReference);
-    const targetNode = nodeByReference.get(targetReference);
-    if (!sourceNode || !targetNode) {
-      throw new Error("relationship references an unknown entity key");
-    }
-    edges.push({
-      id: generateId("ge"),
-      type,
-      sourceNodeId: sourceNode.id,
-      targetNodeId: targetNode.id,
-      weight: Math.max(0, Math.min(1, weight)),
-      sourceObservationIds: citedObservationIds(
-        attrs,
-        `relationship ${sourceReference}->${targetReference}`,
-      ),
-      createdAt: now,
-    });
-  }
-
-  return { nodes, edges };
-}
-
-function repairableGraphXmlError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /missing the required XML roots|entity contains|relationship contains|unknown entity key|source_observation_ids|duplicate entity key/i.test(message);
-}
-
-function graphXmlRepairPrompt(
-  response: string,
-  error: unknown,
-  observationIds: string[],
-): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return `Repair the candidate below. Return only valid <entities>...</entities><relationships>...</relationships> XML, with no markdown or prose. Preserve only supported entity and relationship types. Every entity and relationship must cite one or more of these exact source_observation_ids: ${observationIds.join(",")}. Parser error: ${message}\n<CANDIDATE>\n${response.slice(0, 12_000)}\n</CANDIDATE>`;
-}
-
 const HEURISTIC_EDGE_WEIGHT = 0.4;
 const MAX_HEURISTIC_EDGES_PER_OBS = 12;
 
@@ -1257,7 +1490,7 @@ export function extractGraphHeuristics(
   ): GraphNode | null => {
     const trimmed = name.trim();
     if (!trimmed) return null;
-    const key = `${type} ${trimmed.toLowerCase()}`;
+    const key = `${type}\u0000${trimmed.toLowerCase()}`;
     let node = nodeByKey.get(key);
     if (!node) {
       node = {
@@ -1348,6 +1581,7 @@ export async function persistGraphDelta(
   context: GraphPersistenceContext = {},
 ): Promise<{ newNodeCount: number; newEdgeCount: number }> {
   const snap = (await readSnapshot(kv)) ?? emptySnapshot();
+  const queryIndexManifest = await prepareGraphQueryIndexUpdate(kv, snap);
   const capturedAt = new Date().toISOString();
   let newNodeCount = 0;
   let newEdgeCount = 0;
@@ -1355,6 +1589,8 @@ export async function persistGraphDelta(
   // changing the counts; track that separately so the snapshot still persists.
   let snapMutated = false;
   const newEdgesForTopCheck: GraphEdge[] = [];
+  const changedNodes: GraphNode[] = [];
+  const changedEdges: GraphEdge[] = [];
   // When a freshly-minted node merges into an existing row via the name
   // index, edges in the same batch still reference the fresh id. Remap edge
   // endpoints to the persisted ids so edges never dangle and re-runs hit the
@@ -1376,7 +1612,14 @@ export async function persistGraphDelta(
     const indexKey = project
       ? scopedNameIndexKey(project, node.type, node.name)
       : nameIndexKey(node.type, node.name);
-    const existingId = await kv.get<string>(KV.graphNameIndex, indexKey);
+    let existingId = await kv.get<string>(KV.graphNameIndex, indexKey);
+    if (!existingId && project) {
+      const legacyIndexKey = legacyScopedNameIndexKey(project, node.type, node.name);
+      if (legacyIndexKey !== indexKey) {
+        existingId = await kv.get<string>(KV.graphNameIndex, legacyIndexKey);
+        if (existingId) await kv.set(KV.graphNameIndex, indexKey, existingId);
+      }
+    }
 
     let existing: GraphNode | null = null;
     if (existingId) {
@@ -1395,6 +1638,7 @@ export async function persistGraphDelta(
       idRemap.set(node.id, existing.id);
       const merged = mergeNode(existing, node, capturedAt);
       await kv.set(KV.graphNodes, existing.id, merged);
+      changedNodes.push(merged);
       // Update topNodes entry if present so a stale clone isn't
       // returned from the snapshot fast path.
       const topIdx = snap.topNodes.findIndex((n) => n.id === existing!.id);
@@ -1406,6 +1650,7 @@ export async function persistGraphDelta(
       await kv.set(KV.graphNodes, node.id, node);
       await kv.set(KV.graphNameIndex, indexKey, node.id);
       await kv.set(KV.graphNodeDegree, node.id, 0);
+      changedNodes.push(node);
       snap.stats.totalNodes += 1;
       snap.stats.nodesByType[node.type] =
         (snap.stats.nodesByType[node.type] ?? 0) + 1;
@@ -1447,6 +1692,7 @@ export async function persistGraphDelta(
     if (existing) {
       const merged = mergeEdge(existing, edge, capturedAt);
       await kv.set(KV.graphEdges, existing.id, merged);
+      changedEdges.push(merged);
       // Replace cached topEdges entry too if present.
       const topIdx = snap.topEdges.findIndex((e) => e.id === existing!.id);
       if (topIdx !== -1) {
@@ -1456,6 +1702,7 @@ export async function persistGraphDelta(
     } else {
       await kv.set(KV.graphEdges, edge.id, edge);
       await kv.set(KV.graphEdgeKey, eKey, edge.id);
+      changedEdges.push(edge);
       snap.stats.totalEdges += 1;
       snap.stats.edgesByType[edge.type] =
         (snap.stats.edgesByType[edge.type] ?? 0) + 1;
@@ -1477,6 +1724,13 @@ export async function persistGraphDelta(
     snap.updatedAt = capturedAt;
     snap.dirty = false;
     await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
+    await updateGraphQueryIndexDelta(
+      kv,
+      queryIndexManifest,
+      snap,
+      changedNodes,
+      changedEdges,
+    );
   }
 
   return { newNodeCount, newEdgeCount };
@@ -1526,55 +1780,68 @@ export function registerGraphFunction(
             error: "project and sessionId must be supplied together",
           };
         }
-        try {
-          await validateObservationProvenance(kv, {
-            project,
-            sources: [{
-              sessionId,
-              observationIds: data.observations.map((observation) => observation.id),
-            }],
-          });
-          const official = await Promise.all(
-            data.observations.map((observation) =>
-              kv.get<CompressedObservation>(
-                KV.observations(sessionId),
-                observation.id,
-              ),
-            ),
-          );
-          if (official.some((observation) => !observation)) {
-            throw new Error("official observation disappeared during graph extraction");
-          }
-          observations = official as CompressedObservation[];
-          const session = await kv.get<Session>(KV.sessions, sessionId);
-          const cursorMode = data.cursorMode === "bootstrap_backfill"
-            ? "bootstrap_backfill"
-            : "forward";
-          const through = cursorMode === "bootstrap_backfill"
-            ? session?.semanticGraphBackfillThroughObservationId
-            : session?.semanticGraphThroughObservationId;
-          if (through) {
-            const throughIndex = observations.findIndex(
-              (observation) => observation.id === through,
-            );
-            if (throughIndex >= 0) observations = observations.slice(throughIndex + 1);
-          }
-          if (observations.length === 0) {
-            return { success: true, skipped: "already_processed" };
-          }
-          await kv.update(KV.sessions, sessionId, [
-            {
-              type: "set",
-              path: "semanticGraphLastAttemptAt",
-              value: new Date().toISOString(),
-            },
-          ]);
-        } catch (error) {
-          return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-          };
-        }
+        const preparationResult = await withKeyedLock(
+          `mem:session-lifecycle:${sessionId}`,
+          async () => {
+            try {
+              await validateObservationProvenance(kv, {
+                project,
+                sources: [{
+                  sessionId,
+                  observationIds: data.observations.map((observation) => observation.id),
+                }],
+              });
+              const official = await Promise.all(
+                data.observations.map((observation) =>
+                  kv.get<CompressedObservation>(
+                    KV.observations(sessionId),
+                    observation.id,
+                  ),
+                ),
+              );
+              if (official.some((observation) => !observation)) {
+                throw new Error("official observation disappeared during graph extraction");
+              }
+              const sanitized = (official as CompressedObservation[]).map(
+                (observation) => sanitizeCodexAmbientObservation(observation),
+              );
+              if (sanitized.some((observation) => !observation)) {
+                throw new Error("official observation became ineligible during graph extraction");
+              }
+              observations = sanitized as CompressedObservation[];
+              const session = await kv.get<Session>(KV.sessions, sessionId);
+              const cursorMode = data.cursorMode === "bootstrap_backfill"
+                ? "bootstrap_backfill"
+                : "forward";
+              const through = cursorMode === "bootstrap_backfill"
+                ? session?.semanticGraphBackfillThroughObservationId
+                : session?.semanticGraphThroughObservationId;
+              if (through) {
+                const throughIndex = observations.findIndex(
+                  (observation) => observation.id === through,
+                );
+                if (throughIndex >= 0) observations = observations.slice(throughIndex + 1);
+              }
+              if (observations.length === 0) {
+                return { success: true, skipped: "already_processed" };
+              }
+              await kv.update(KV.sessions, sessionId, [
+                {
+                  type: "set",
+                  path: "semanticGraphLastAttemptAt",
+                  value: new Date().toISOString(),
+                },
+              ]);
+              return null;
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+          },
+        );
+        if (preparationResult) return preparationResult;
       }
 
       const obsIds = observations.map((observation) => observation.id);
@@ -1640,7 +1907,7 @@ export function registerGraphFunction(
               GRAPH_EXTRACTION_SYSTEM,
               graphXmlRepairPrompt(response, parseError, obsIds),
             );
-            parsed = parseGraphXml(repaired, obsIds);
+            parsed = parseGraphXml(repaired, obsIds, true);
           }
           nodes = nodes.concat(parsed.nodes.map((node) => ({
             ...node,
@@ -1665,102 +1932,148 @@ export function registerGraphFunction(
         }
       }
 
-      try {
-        const persisted = nodes.length > 0 || edges.length > 0
-          ? await persistGraphDelta(kv, nodes, edges, obsIds, {
-              ...(project ? { project } : {}),
-              ...(sessionId ? { sourceSessionIds: [sessionId] } : {}),
-            })
-          : { newNodeCount: 0, newEdgeCount: 0 };
-        const { newNodeCount, newEdgeCount } = persisted;
+      const persistExtraction = async () => {
+        try {
+          const persisted = nodes.length > 0 || edges.length > 0
+            ? await persistGraphDelta(kv, nodes, edges, obsIds, {
+                ...(project ? { project } : {}),
+                ...(sessionId ? { sourceSessionIds: [sessionId] } : {}),
+              })
+            : { newNodeCount: 0, newEdgeCount: 0 };
+          const { newNodeCount, newEdgeCount } = persisted;
 
-        if (sessionId && llmEnabled) {
-          if (semanticCompleted) {
-            const runtime = provider.getRuntimeInfo?.();
-            const cursorMode = data.cursorMode === "bootstrap_backfill"
-              ? "bootstrap_backfill"
-              : "forward";
-            const updates: Array<{ type: "set"; path: string; value: unknown }> = [
-              {
-                type: "set",
-                path: cursorMode === "bootstrap_backfill"
-                  ? "semanticGraphBackfillThroughObservationId"
-                  : "semanticGraphThroughObservationId",
-                value: obsIds[obsIds.length - 1],
-              },
-              {
-                type: "set",
-                path: "semanticGraphAnalyzer",
-                value: runtime?.fingerprint ?? provider.name,
-              },
-              {
-                type: "set",
-                path: "semanticGraphStatus",
-                value: data.semanticHasMore ? "pending" : "complete",
-              },
-              { type: "set", path: "semanticGraphLastError", value: "" },
-            ];
-            if (cursorMode === "bootstrap_backfill" && data.semanticBootstrapDone) {
-              updates.push({
-                type: "set",
-                path: "semanticGraphBootstrapSkipped",
-                value: 0,
-              });
-            } else if (cursorMode === "forward" && data.bootstrapSkipped !== undefined) {
-              updates.push({
-                type: "set",
-                path: "semanticGraphBootstrapSkipped",
-                value: Math.max(0, Math.floor(data.bootstrapSkipped)),
-              });
+          if (sessionId && llmEnabled) {
+            if (semanticCompleted) {
+              const runtime = provider.getRuntimeInfo?.();
+              const cursorMode = data.cursorMode === "bootstrap_backfill"
+                ? "bootstrap_backfill"
+                : "forward";
+              const updates: Array<{ type: "set"; path: string; value: unknown }> = [
+                {
+                  type: "set",
+                  path: cursorMode === "bootstrap_backfill"
+                    ? "semanticGraphBackfillThroughObservationId"
+                    : "semanticGraphThroughObservationId",
+                  value: obsIds[obsIds.length - 1],
+                },
+                {
+                  type: "set",
+                  path: "semanticGraphAnalyzer",
+                  value: runtime?.fingerprint ?? provider.name,
+                },
+                {
+                  type: "set",
+                  path: "semanticGraphStatus",
+                  value: data.semanticHasMore ? "pending" : "complete",
+                },
+                { type: "set", path: "semanticGraphLastError", value: "" },
+              ];
+              if (cursorMode === "bootstrap_backfill" && data.semanticBootstrapDone) {
+                updates.push({
+                  type: "set",
+                  path: "semanticGraphBootstrapSkipped",
+                  value: 0,
+                });
+              } else if (
+                cursorMode === "forward" &&
+                data.bootstrapSkipped !== undefined
+              ) {
+                updates.push({
+                  type: "set",
+                  path: "semanticGraphBootstrapSkipped",
+                  value: Math.max(0, Math.floor(data.bootstrapSkipped)),
+                });
+              }
+              await kv.update(KV.sessions, sessionId, updates);
+            } else {
+              await kv.update(KV.sessions, sessionId, [
+                { type: "set", path: "semanticGraphStatus", value: "deferred" },
+                {
+                  type: "set",
+                  path: "semanticGraphLastError",
+                  value: (
+                    llmError ?? "semantic graph extraction did not complete"
+                  ).slice(0, 1000),
+                },
+              ]);
             }
-            await kv.update(KV.sessions, sessionId, updates);
-          } else {
-            await kv.update(KV.sessions, sessionId, [
-              { type: "set", path: "semanticGraphStatus", value: "deferred" },
-              {
-                type: "set",
-                path: "semanticGraphLastError",
-                value: (llmError ?? "semantic graph extraction did not complete").slice(0, 1000),
-              },
-            ]);
           }
+
+          await recordAudit(kv, "observe", "mem::graph-extract", obsIds, {
+            ...(project ? { project } : {}),
+            ...(sessionId ? { sessionId } : {}),
+            nodesExtracted: nodes.length,
+            edgesExtracted: edges.length,
+            semanticCompleted,
+            semanticRepairAttempted,
+            ...(llmError ? { semanticError: llmError.slice(0, 1000) } : {}),
+            ...(provider.getRuntimeInfo?.()
+              ? { providerRuntime: provider.getRuntimeInfo?.() }
+              : {}),
+          });
+
+          logger.info("Graph extraction complete", {
+            nodes: nodes.length,
+            edges: edges.length,
+            newNodes: newNodeCount,
+            newEdges: newEdgeCount,
+            llm: llmEnabled && !llmError,
+          });
+          return {
+            success:
+              semanticCompleted || !llmEnabled || nodes.length > 0 || edges.length > 0,
+            nodesAdded: nodes.length,
+            edgesAdded: edges.length,
+            newNodes: newNodeCount,
+            newEdges: newEdgeCount,
+            semanticCompleted,
+            semanticRepairAttempted,
+            ...(llmError ? { semanticError: llmError } : {}),
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error("Graph extraction failed", { error: msg });
+          return { success: false, error: msg };
         }
+      };
 
-        await recordAudit(kv, "observe", "mem::graph-extract", obsIds, {
-          ...(project ? { project } : {}),
-          ...(sessionId ? { sessionId } : {}),
-          nodesExtracted: nodes.length,
-          edgesExtracted: edges.length,
-          semanticCompleted,
-          semanticRepairAttempted,
-          ...(llmError ? { semanticError: llmError.slice(0, 1000) } : {}),
-          ...(provider.getRuntimeInfo?.()
-            ? { providerRuntime: provider.getRuntimeInfo?.() }
-            : {}),
-        });
+      if (!sessionId) return persistExtraction();
 
-        logger.info("Graph extraction complete", {
-          nodes: nodes.length,
-          edges: edges.length,
-          newNodes: newNodeCount,
-          newEdges: newEdgeCount,
-          llm: llmEnabled && !llmError,
-        });
-        return {
-          success: semanticCompleted || !llmEnabled || nodes.length > 0 || edges.length > 0,
-          nodesAdded: nodes.length,
-          edgesAdded: edges.length,
-          newNodes: newNodeCount,
-          newEdges: newEdgeCount,
-          semanticCompleted,
-          semanticRepairAttempted,
-          ...(llmError ? { semanticError: llmError } : {}),
-        };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error("Graph extraction failed", { error: msg });
-        return { success: false, error: msg };
-      }
+      return withKeyedLock(
+        `mem:session-lifecycle:${sessionId}`,
+        async () => {
+          const currentSession = await kv.get<Session>(KV.sessions, sessionId);
+          const currentObservations = await Promise.all(
+            obsIds.map((observationId) =>
+              kv.get<CompressedObservation>(
+                KV.observations(sessionId),
+                observationId,
+              ),
+            ),
+          );
+          if (
+            !currentSession ||
+            currentSession.project !== project ||
+            currentObservations.some((observation) => !observation)
+          ) {
+            logger.info("Graph extraction discarded after source deletion", {
+              sessionId,
+              observations: obsIds.length,
+            });
+            return {
+              success: true,
+              skipped: "source_deleted",
+              nodesAdded: 0,
+              edgesAdded: 0,
+              newNodes: 0,
+              newEdges: 0,
+              semanticCompleted: false,
+              semanticRepairAttempted,
+            };
+          }
+          return persistExtraction();
+        },
+      );
       }),
   );
 
@@ -1771,16 +2084,7 @@ export function registerGraphFunction(
   // rejected it with HTTP 500 "Invocation stopped", leaving the viewer
   // graph tab silently blank.
   sdk.registerFunction("mem::graph-query",
-    async (data: {
-      startNodeId?: string;
-      nodeType?: string;
-      maxDepth?: number;
-      query?: string;
-      queries?: string[];
-      project?: string;
-      limit?: number;
-      offset?: number;
-    }): Promise<GraphQueryResult> => {
+    async (data: GraphQueryInput): Promise<GraphQueryResult> => {
       const maxDepth = Math.min(data.maxDepth || 3, 5);
       const { limit, offset } = resolvePagination(data.limit, data.offset);
       const requestedProject =
@@ -1821,152 +2125,57 @@ export function registerGraphFunction(
         };
       }
 
-      // Query / startNodeId paths still need broader access. Race the
-      // live enumeration against a wall-clock budget so a long
-      // kv.list doesn't block the worker indefinitely. On timeout the
-      // caller gets a snapshot-backed approximation instead of a 500.
-      let allNodes: GraphNode[];
-      let allEdges: GraphEdge[];
-      try {
-        const [rawNodes, rawEdges] = await withTimeout(
-          Promise.all([
-            kv.list<GraphNode>(KV.graphNodes),
-            kv.list<GraphEdge>(KV.graphEdges),
-          ]),
-          LIVE_ENUMERATION_BUDGET_MS,
-          "graph-query enumeration",
-        );
-        allNodes = rawNodes
-          .filter((node) => isVisibleAfterReset(node, snapshot?.resetAt))
-          .filter(
-            (n) =>
-              !project ||
-              (n.project !== undefined
-                ? n.project === project
-                : n.properties?.project === project),
-          );
-        const projectNodeIds = new Set(allNodes.map((node) => node.id));
-        allEdges = rawEdges
-          .filter((edge) => isVisibleAfterReset(edge, snapshot?.resetAt))
-          .filter(
-            (e) =>
-              !project ||
-              (projectNodeIds.has(e.sourceNodeId) &&
-                projectNodeIds.has(e.targetNodeId) &&
-                (e.project === undefined || e.project === project)),
-          );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.warn("Graph query enumeration timed out, using snapshot", {
-          error: msg,
-        });
-        if (project) {
-          return {
-            nodes: [],
-            edges: [],
-            depth: 0,
-            totalNodes: 0,
-            totalEdges: 0,
-            truncated: false,
-            limit,
-            offset,
-            warning:
-              "Project-filtered graph enumeration exceeded budget; refusing an unscoped snapshot fallback.",
-          };
+      if (snapshot) {
+        try {
+          const indexed = await ensureGraphQueryIndex(kv, snapshot);
+          if (indexed) {
+            return queryGraphFromIndex(
+              kv,
+              data,
+              indexed.snapshot,
+              project,
+              maxDepth,
+              limit,
+              offset,
+              indexed.rebuilt,
+            );
+          }
+        } catch (error) {
+          logger.warn("Graph query index unavailable; using bounded legacy path", {
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
-        if (snapshot) {
-          return {
-            ...paginateFromSnapshot(snapshot, data.nodeType, limit, offset),
-            warning:
-              "Live graph enumeration exceeded budget. Query / " +
-              "startNodeId paths degrade on >25K-node corpora until a " +
-              "per-node edge index lands. Result reflects top-degree " +
-              "snapshot, not the requested walk.",
-          };
-        }
-        return {
-          nodes: [],
-          edges: [],
-          depth: 0,
-          totalNodes: 0,
-          totalEdges: 0,
-          truncated: false,
+      }
+
+      // The timeout around kv.list never cancelled the underlying state
+      // invocation. On large corpora that orphaned enumeration can wedge the
+      // iii channel after the caller has already received a fallback. The
+      // derived query index is now the only exact read path; while it is dirty
+      // or unavailable, degrade from the bounded snapshot without touching
+      // canonical graph scopes.
+      if (snapshot) {
+        return queryGraphFromSnapshotFallback(
+          data,
+          snapshot,
+          project,
+          maxDepth,
           limit,
           offset,
-          warning:
-            "Graph enumeration exceeded budget and no snapshot is available.",
-        };
-      }
-
-      const queryTerms = [
-        ...(typeof data.query === "string" && data.query.trim() ? [data.query.trim()] : []),
-        ...(Array.isArray(data.queries) ? data.queries : []),
-      ].map((query) => query.toLowerCase());
-      if (queryTerms.length > 0) {
-        const matchingNodes = allNodes.filter(
-          (n) =>
-            queryTerms.some((lower) =>
-              n.name.toLowerCase().includes(lower) ||
-              Object.values(n.properties).some(
-                (v) => typeof v === "string" && v.toLowerCase().includes(lower),
-              ),
-            ),
         );
-        return paginate(matchingNodes, allEdges, 0, limit, offset);
       }
-
-      if (data.startNodeId) {
-        const visited = new Set<string>();
-        const visitedEdges = new Set<string>();
-        const resultNodes: GraphNode[] = [];
-        const resultEdges: GraphEdge[] = [];
-        const queue: Array<{ nodeId: string; depth: number }> = [
-          { nodeId: data.startNodeId, depth: 0 },
-        ];
-
-        while (queue.length > 0) {
-          const { nodeId, depth } = queue.shift()!;
-          if (visited.has(nodeId) || depth > maxDepth) continue;
-          visited.add(nodeId);
-
-          const node = allNodes.find((n) => n.id === nodeId);
-          if (node) {
-            if (!data.nodeType || node.type === data.nodeType) {
-              resultNodes.push(node);
-            }
-          }
-
-          const neighborEdges = allEdges.filter(
-            (e) => e.sourceNodeId === nodeId || e.targetNodeId === nodeId,
-          );
-          for (const edge of neighborEdges) {
-            if (!visitedEdges.has(edge.id)) {
-              visitedEdges.add(edge.id);
-              resultEdges.push(edge);
-            }
-            const nextId =
-              edge.sourceNodeId === nodeId
-                ? edge.targetNodeId
-                : edge.sourceNodeId;
-            if (!visited.has(nextId)) {
-              queue.push({ nodeId: nextId, depth: depth + 1 });
-            }
-          }
-        }
-
-        return paginate(resultNodes, resultEdges, maxDepth, limit, offset);
-      }
-
-      // Unreachable — noWalk branch handles the rest.
-      return paginate(
-        data.nodeType
-          ? allNodes.filter((node) => node.type === data.nodeType)
-          : allNodes,
-        allEdges,
-        0,
+      return {
+        nodes: [],
+        edges: [],
+        depth: 0,
+        totalNodes: 0,
+        totalEdges: 0,
+        truncated: false,
         limit,
         offset,
-      );
+        warning:
+          "No graph snapshot or exact query index is available; refusing to " +
+          "perform canonical graph enumeration.",
+      };
     },
   );
 
@@ -2147,12 +2356,14 @@ export function registerGraphFunction(
         existingSnapshot?.resetAt,
       );
       await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
+      await buildGraphQueryIndex(kv, nodes, edges, snap);
       const tookMs = Date.now() - started;
       logger.info("Graph snapshot rebuilt", {
         totalNodes: snap.stats.totalNodes,
         totalEdges: snap.stats.totalEdges,
         topNodes: snap.topNodes.length,
         topEdges: snap.topEdges.length,
+        queryIndexShards: GRAPH_QUERY_INDEX_SHARDS,
         tookMs,
       });
       return {
@@ -2160,6 +2371,7 @@ export function registerGraphFunction(
         ...snap.stats,
         topNodes: snap.topNodes.length,
         topEdges: snap.topEdges.length,
+        queryIndexShards: GRAPH_QUERY_INDEX_SHARDS,
         updatedAt: snap.updatedAt,
         tookMs,
       };
@@ -2206,8 +2418,18 @@ export function registerGraphFunction(
         resetAt: new Date().toISOString(),
       };
       await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, resetSnapshot);
+      await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, {
+        version: GRAPH_QUERY_INDEX_VERSION,
+        shardCount: GRAPH_QUERY_INDEX_SHARDS,
+        totalNodes: 0,
+        totalEdges: 0,
+        updatedAt: resetSnapshot.updatedAt,
+        dirty: false,
+        resetAt: resetSnapshot.resetAt,
+      } satisfies GraphQueryIndexManifest);
       const counts: Record<string, number> = {
         [KV.graphSnapshot]: 1,
+        [KV.graphQueryManifest]: 1,
       };
       const tookMs = Date.now() - started;
       logger.info("Graph state reset", { counts, tookMs });

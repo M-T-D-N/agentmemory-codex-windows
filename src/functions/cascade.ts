@@ -106,6 +106,10 @@ export function registerCascadeFunction(sdk: ISdk, kv: StateKV): void {
           }
           snapshot.updatedAt = now;
           await kv.set(KV.graphSnapshot, "current", snapshot);
+          // The query index is derived. Cascade can stale arbitrary legacy
+          // rows, so invalidate its manifest and let the next bounded read
+          // rebuild from the authoritative graph rather than serve stale hits.
+          await kv.delete(KV.graphQueryManifest, "current");
         }
         });
       }

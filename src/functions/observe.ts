@@ -18,6 +18,7 @@ import {
   isCodexInternalAmbientText,
   isExcludedCodexAmbientSession,
 } from "./observation-visibility.js";
+import { safeAudit } from "./audit.js";
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -85,6 +86,7 @@ export function registerObserveFunction(
       const obsId = generateId("obs");
 
       let dedupHash: string | undefined;
+      let dedupDetected = false;
       if (dedupMap) {
         const dataIsObject =
           typeof payload.data === "object" && payload.data !== null;
@@ -114,9 +116,7 @@ export function registerObserveFunction(
           toolName,
           dedupInput,
         );
-        if (dedupMap.isDuplicate(dedupHash)) {
-          return { deduplicated: true, sessionId: payload.sessionId };
-        }
+        dedupDetected = dedupMap.isDuplicate(dedupHash);
       }
 
       let sanitizedRaw: unknown = payload.data;
@@ -191,13 +191,26 @@ export function registerObserveFunction(
             error: `Session project mismatch: ${existingSession.project} != ${requestedProject}`,
           };
         }
-        if (isExcludedCodexAmbientSession(existingSession)) {
+        const excludedSession = isExcludedCodexAmbientSession(existingSession);
+        const normalPromptReactivatesSession =
+          excludedSession &&
+          payload.hookType === "prompt_submit" &&
+          typeof raw.userPrompt === "string" &&
+          raw.userPrompt.trim().length > 0;
+        if (excludedSession && !normalPromptReactivatesSession) {
           return {
             success: true,
             skipped: true,
             captureExcluded: true,
             sessionId: payload.sessionId,
           };
+        }
+        // A normal prompt is authoritative evidence that an ambient-only
+        // classification was provisional. Capture it even when the same
+        // text is still inside the dedup window so the session cannot remain
+        // poisoned solely because the recovery prompt was repeated.
+        if (dedupDetected && !normalPromptReactivatesSession) {
+          return { deduplicated: true, sessionId: payload.sessionId };
         }
         if (maxObservationsPerSession && maxObservationsPerSession > 0) {
           const existing = await kv.list(KV.observations(payload.sessionId));
@@ -309,7 +322,32 @@ export function registerObserveFunction(
               });
             }
           }
+          if (normalPromptReactivatesSession) {
+            const trimmed = raw.userPrompt?.replace(/\s+/g, " ").trim() ?? "";
+            updates.push(
+              { type: "set", path: "captureExcluded", value: false },
+              { type: "set", path: "captureExclusionReason", value: "" },
+            );
+            if (
+              trimmed.length > 0 &&
+              (!session.firstPrompt || isCodexInternalAmbientText(session.firstPrompt))
+            ) {
+              updates.push({
+                type: "set",
+                path: "firstPrompt",
+                value: trimmed.slice(0, 200),
+              });
+            }
+          }
           await kv.update(KV.sessions, payload.sessionId, updates);
+          if (normalPromptReactivatesSession) {
+            await safeAudit(kv, "observe", "mem::observe", [payload.sessionId], {
+              action: "session_capture_reactivated",
+              project: session.project,
+              previousReason: session.captureExclusionReason,
+              observationId: obsId,
+            });
+          }
         } else if (
           typeof payload.project === "string" &&
           payload.project.trim().length > 0 &&

@@ -562,21 +562,6 @@ async function getJson(path, timeout = 1200) {
   return response.json();
 }
 
-async function currentSessionIsExcluded(sessionId, project) {
-  try {
-    const result = await getJson(
-      `/agentmemory/sessions?project=${encodeURIComponent(project)}&sessionId=${encodeURIComponent(sessionId)}&includeExcluded=true&limit=1`,
-      1500,
-    );
-    const session = result?.sessions?.find((candidate) => candidate?.id === sessionId);
-    return isExcludedSession(session);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`[agentmemory] Session capture state unavailable: ${message}\n`);
-    throw error;
-  }
-}
-
 async function markSessionExcluded(sessionId, project, cwd, reason) {
   const response = await post("/agentmemory/session/exclude", {
     sessionId,
@@ -585,8 +570,11 @@ async function markSessionExcluded(sessionId, project, cwd, reason) {
     reason,
   }, 1500);
   const result = await response.json();
-  if (result?.success !== true || result?.captureExcluded !== true) {
-    throw new Error("/agentmemory/session/exclude did not confirm exclusion");
+  if (
+    result?.success !== true ||
+    (result?.captureExcluded !== true && result?.preservedActiveSession !== true)
+  ) {
+    throw new Error("/agentmemory/session/exclude did not confirm a capture policy");
   }
 }
 
@@ -659,11 +647,12 @@ async function queryGraph(project, queries) {
 }
 
 async function graphContext(prompt, project) {
-  const requests = [{ label: project, promise: queryGraph(project) }];
   const federatedTokens = graphTokens(prompt).slice(0, MAX_FEDERATED_GRAPH_QUERIES);
-  if (federatedTokens.length > 0) {
-    requests.push({ label: "*:tokens", promise: queryGraph("*", federatedTokens) });
-  }
+  if (federatedTokens.length === 0) return null;
+  const requests = [
+    { label: `${project}:tokens`, promise: queryGraph(project, federatedTokens) },
+    { label: "*:tokens", promise: queryGraph("*", federatedTokens) },
+  ];
   const settled = await Promise.allSettled(requests.map((request) => request.promise));
   const graphs = [];
   settled.forEach((result, index) => {
@@ -768,7 +757,6 @@ async function handleTurn(event, eventName) {
     }
     return;
   }
-  if (await currentSessionIsExcluded(sessionId, project)) return;
   if (!text) return;
 
   const observedAt = new Date().toISOString();
@@ -794,6 +782,7 @@ async function handleTurn(event, eventName) {
   if (observeResult?.success === false || observeResult?.error) {
     throw new Error(`/agentmemory/observe failed: ${observeResult.error || "unknown error"}`);
   }
+  if (observeResult?.skipped === true) return;
   if (!observeResult?.observationId && observeResult?.deduplicated !== true) {
     throw new Error("/agentmemory/observe did not return an observation ID or deduplication result");
   }

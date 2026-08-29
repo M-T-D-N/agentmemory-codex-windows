@@ -95,6 +95,19 @@ describe("Tools Registry", () => {
       expect(tool.inputSchema.properties).toBeDefined();
     }
   });
+
+  it("declares trackAccess as a boolean on reinforcing retrieval tools", () => {
+    for (const name of [
+      "memory_recall",
+      "memory_smart_search",
+      "memory_timeline",
+    ]) {
+      const tool = getAllTools().find((candidate) => candidate.name === name);
+      expect(tool?.inputSchema.properties.trackAccess).toMatchObject({
+        type: "boolean",
+      });
+    }
+  });
 });
 
 describe("InMemoryKV", () => {

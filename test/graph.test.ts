@@ -10,6 +10,7 @@ vi.mock("../src/config.js", async (importOriginal) => {
 });
 
 import { registerGraphFunction } from "../src/functions/graph.js";
+import { registerRememberFunction } from "../src/functions/remember.js";
 import type {
   CompressedObservation,
   GraphNode,
@@ -196,6 +197,103 @@ describe("Graph Functions", () => {
       });
   });
 
+  it("does not resurrect a session forgotten during provider inference", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    let signalProviderStarted: () => void = () => {};
+    let releaseProvider: () => void = () => {};
+    const providerStarted = new Promise<void>((resolve) => {
+      signalProviderStarted = resolve;
+    });
+    const providerRelease = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const provider = {
+      name: "test",
+      compress: vi.fn(async () => {
+        signalProviderStarted();
+        await providerRelease;
+        return `<entities>
+<entity key="decision" type="decision" name="Keep lifecycle atomic" source_observation_ids="obs_1"/>
+</entities>
+<relationships></relationships>`;
+      }),
+      summarize: vi.fn(),
+    };
+    await localKv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    registerRememberFunction(localSdk as never, localKv as never);
+
+    const extraction = localSdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [testObs],
+    }) as Promise<Record<string, unknown>>;
+    await providerStarted;
+
+    const forgotten = await localSdk.trigger("mem::forget", {
+      sessionId: "ses_1",
+    }) as { success: boolean; deleted: number };
+    releaseProvider();
+    const result = await extraction;
+
+    expect(forgotten).toMatchObject({ success: true, deleted: 3 });
+    expect(result).toMatchObject({
+      success: true,
+      skipped: "source_deleted",
+      nodesAdded: 0,
+      edgesAdded: 0,
+      semanticCompleted: false,
+    });
+    expect(await localKv.get("mem:sessions", "ses_1")).toBeNull();
+    expect(await localKv.list("mem:obs:ses_1")).toEqual([]);
+    expect(await localKv.list("mem:graph:nodes")).toEqual([]);
+    expect(await localKv.list("mem:graph:edges")).toEqual([]);
+    const audits = await localKv.list<{ functionId?: string }>("mem:audit");
+    expect(audits.filter((row) => row.functionId === "mem::graph-extract"))
+      .toEqual([]);
+  });
+
+  it("sends only sanitized official narrative to the graph provider", async () => {
+    const ambientObs: CompressedObservation = {
+      ...testObs,
+      narrative: '<panel source="ambient-ui-state">transient UI secret</panel>Kept user decision',
+    };
+    await kv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_1", "obs_1", ambientObs);
+    mockProvider.compress.mockResolvedValueOnce(
+      "<entities></entities><relationships></relationships>",
+    );
+
+    const result = await sdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [ambientObs],
+    }) as { success: boolean; semanticCompleted: boolean };
+
+    expect(result).toMatchObject({ success: true, semanticCompleted: true });
+    const prompt = String(mockProvider.compress.mock.calls[0]?.[1]);
+    expect(prompt).toContain("Kept user decision");
+    expect(prompt).not.toContain("transient UI secret");
+    expect(await kv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
+      .toMatchObject({ semanticGraphThroughObservationId: "obs_1" });
+  });
+
   it("repairs one malformed local-Qwen XML response and advances only after valid provenance", async () => {
     const localSdk = mockSdk();
     const localKv = mockKV();
@@ -232,11 +330,287 @@ describe("Graph Functions", () => {
       semanticRepairAttempted: true,
     });
     expect(provider.compress).toHaveBeenCalledTimes(2);
+    expect(String(provider.compress.mock.calls[1]?.[1]))
+      .toContain("at most 12 entities and 16 relationships");
     expect(await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
       .toMatchObject({
         semanticGraphThroughObservationId: "obs_1",
         semanticGraphStatus: "complete",
       });
+  });
+
+  it("repairs relationships whose endpoints are absent from the repaired entity set", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const provider = {
+      name: "local-qwen",
+      compress: vi.fn()
+        .mockResolvedValueOnce(`<entities>
+<entity key="decision" type="decision" name="Grounded decision" source_observation_ids="obs_1"/>
+</entities>
+<relationships>
+<relationship type="depends_on" source="decision" target="missing" source_observation_ids="obs_1"/>
+</relationships>`)
+        .mockResolvedValueOnce(`<entities>
+<entity key="decision" type="decision" name="Grounded decision" source_observation_ids="obs_1"/>
+</entities>
+<relationships>
+<relationship type="depends_on" source="decision" target="missing" source_observation_ids="obs_1"/>
+</relationships>`),
+      summarize: vi.fn(),
+      getRuntimeInfo: () => null,
+    };
+    await localKv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+
+    const result = await localSdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [testObs],
+    }) as { semanticCompleted: boolean; semanticRepairAttempted: boolean };
+
+    expect(result).toMatchObject({
+      semanticCompleted: true,
+      semanticRepairAttempted: true,
+    });
+    expect(provider.compress).toHaveBeenCalledTimes(2);
+    expect(String(provider.compress.mock.calls[1]?.[1]))
+      .toContain("Every relationship source and target must exactly match an entity key");
+    expect(await localKv.list<GraphEdge>("mem:graph:edges")).toEqual([]);
+    expect(await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
+      .toMatchObject({
+        semanticGraphThroughObservationId: "obs_1",
+        semanticGraphStatus: "complete",
+      });
+  });
+
+  it("keeps repaired entity provenance fail-closed while omitting orphan relationships", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const provider = {
+      name: "local-qwen",
+      compress: vi.fn()
+        .mockResolvedValueOnce("invalid graph envelope")
+        .mockResolvedValueOnce(`<entities>
+<entity key="decision" type="decision" name="Ungrounded decision" source_observation_ids="obs_outside"/>
+</entities>
+<relationships>
+<relationship type="depends_on" source="decision" target="missing" source_observation_ids="obs_outside"/>
+</relationships>`),
+      summarize: vi.fn(),
+      getRuntimeInfo: () => null,
+    };
+    await localKv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+
+    const result = await localSdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [testObs],
+    }) as { semanticCompleted: boolean; semanticError: string };
+
+    expect(result.semanticCompleted).toBe(false);
+    expect(result.semanticError).toContain("outside the input batch");
+    expect(await localKv.list<GraphNode>("mem:graph:nodes")).toEqual([]);
+    expect((await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
+      ?.semanticGraphThroughObservationId).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "prose outside the two roots",
+      `answer follows\n<entities><entity key="n1" type="concept" name="Graph" source_observation_ids="obs_1"/></entities><relationships></relationships>`,
+    ],
+    [
+      "an unparsed malformed property",
+      `<entities><entity key="n1" type="concept" name="Graph" source_observation_ids="obs_1"><property key="valid">kept</property><property key="broken">unterminated</entity></entities><relationships></relationships>`,
+    ],
+    [
+      "duplicate attributes",
+      `<entities><entity key="n1" type="concept" type="error" name="Graph" source_observation_ids="obs_1"/></entities><relationships></relationships>`,
+    ],
+    [
+      "an unparsed attribute fragment",
+      `<entities><entity key="n1" type="concept" ignored-fragment name="Graph" source_observation_ids="obs_1"/></entities><relationships></relationships>`,
+    ],
+    [
+      "an unknown XML entity",
+      `<entities><entity key="n1" type="concept" name="Graph &unknown; value" source_observation_ids="obs_1"/></entities><relationships></relationships>`,
+    ],
+  ])("fails closed when repaired graph XML contains %s", async (_label, malformedXml) => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const provider = {
+      name: "local-qwen",
+      compress: vi.fn().mockResolvedValue(malformedXml),
+      summarize: vi.fn(),
+      getRuntimeInfo: () => null,
+    };
+    await localKv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+
+    const result = await localSdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [testObs],
+    }) as { semanticCompleted: boolean; semanticError: string };
+
+    expect(result.semanticCompleted).toBe(false);
+    expect(result.semanticError).toMatch(/XML|attribute|property/i);
+    expect(provider.compress).toHaveBeenCalledTimes(2);
+    expect(await localKv.list<GraphNode>("mem:graph:nodes")).toEqual([]);
+    expect((await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
+      ?.semanticGraphThroughObservationId).toBeUndefined();
+  });
+
+  it("keeps the repaired total relationship bound when every endpoint is orphaned", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const orphanRelationships = Array.from({ length: 33 }, (_, index) =>
+      `<relationship type="related_to" source="missing_${index}" target="also_missing_${index}" source_observation_ids="obs_1"/>`,
+    ).join("\n");
+    const provider = {
+      name: "local-qwen",
+      compress: vi.fn()
+        .mockResolvedValueOnce("invalid graph envelope")
+        .mockResolvedValueOnce(`<entities></entities><relationships>${orphanRelationships}</relationships>`),
+      summarize: vi.fn(),
+      getRuntimeInfo: () => null,
+    };
+    await localKv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+
+    const result = await localSdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [testObs],
+    }) as { semanticCompleted: boolean; semanticError: string };
+
+    expect(result.semanticCompleted).toBe(false);
+    expect(result.semanticError).toContain("bounded relationship limit");
+    expect(await localKv.list<GraphEdge>("mem:graph:edges")).toEqual([]);
+    expect((await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
+      ?.semanticGraphThroughObservationId).toBeUndefined();
+  });
+
+  it("repairs raw XML metacharacters and decodes escaped graph values", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const provider = {
+      name: "local-qwen",
+      compress: vi.fn()
+        .mockResolvedValueOnce(`<entities>
+<entity key="location" type="location" name="%TEMP%\\Pilot-<timestamp>" source_observation_ids="obs_1"/>
+</entities>
+<relationships></relationships>`)
+        .mockResolvedValueOnce(`<entities>
+<entity key="location" type="location" name="%TEMP%\\Pilot-&lt;timestamp&gt; &amp; evidence" source_observation_ids="obs_1">
+<property key="comparison">A &lt; B &amp; C</property>
+</entity>
+</entities>
+<relationships></relationships>`),
+      summarize: vi.fn(),
+      getRuntimeInfo: () => null,
+    };
+    await localKv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+
+    const result = await localSdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [testObs],
+    }) as { semanticCompleted: boolean; semanticRepairAttempted: boolean };
+
+    expect(result).toMatchObject({
+      semanticCompleted: true,
+      semanticRepairAttempted: true,
+    });
+    expect(String(provider.compress.mock.calls[1]?.[1]))
+      .toContain("XML-escape attribute and property values");
+    expect(await localKv.list<GraphNode>("mem:graph:nodes"))
+      .toContainEqual(expect.objectContaining({
+        name: "%TEMP%\\Pilot-<timestamp> & evidence",
+        properties: expect.objectContaining({ comparison: "A < B & C" }),
+      }));
+  });
+
+  it("fails closed and repairs when the provider exceeds the bounded graph size", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const oversizedEntities = Array.from({ length: 25 }, (_, index) =>
+      `<entity key="n${index}" type="concept" name="Concept ${index}" source_observation_ids="obs_1"/>`,
+    ).join("\n");
+    const provider = {
+      name: "local-qwen",
+      compress: vi.fn()
+        .mockResolvedValueOnce(`<entities>${oversizedEntities}</entities><relationships></relationships>`)
+        .mockResolvedValueOnce("<entities></entities><relationships></relationships>"),
+      summarize: vi.fn(),
+      getRuntimeInfo: () => null,
+    };
+    await localKv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T10:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+
+    const result = await localSdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_1",
+      observations: [testObs],
+    }) as { semanticCompleted: boolean; semanticRepairAttempted: boolean };
+
+    expect(result).toMatchObject({
+      semanticCompleted: true,
+      semanticRepairAttempted: true,
+    });
+    expect(provider.compress).toHaveBeenCalledTimes(2);
+    expect(await localKv.list<GraphNode>("mem:graph:nodes")).toEqual([]);
   });
 
   it("keeps the semantic cursor unchanged when foreground Qwen preempts extraction", async () => {
@@ -524,7 +898,7 @@ describe("Graph Functions", () => {
     await kv.set("mem:graph:nodes", "gn_duplicate", {
       id: "gn_duplicate",
       type: "event",
-      name: "Canonical event",
+      name: "canonical event",
       project: "/app",
       properties: { project: "/app", duplicate: "absorbed" },
       sourceObservationIds: ["obs_duplicate"],
@@ -552,6 +926,16 @@ describe("Graph Functions", () => {
       createdAt: "2026-01-02T00:00:00Z",
       weight: 0.5,
     } satisfies GraphEdge);
+    await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+
+    const originalList = kv.list.bind(kv);
+    let canonicalGraphListCalls = 0;
+    kv.list = async <T>(scope: string): Promise<T[]> => {
+      if (scope === "mem:graph:nodes" || scope === "mem:graph:edges") {
+        canonicalGraphListCalls++;
+      }
+      return originalList<T>(scope);
+    };
 
     const result = (await sdk.trigger("mem::graph-upsert", {
       project: "/app",
@@ -559,12 +943,13 @@ describe("Graph Functions", () => {
       nodes: [{
         key: "canonical",
         type: "event",
-        name: "Canonical event",
+        name: "CANONICAL EVENT",
         properties: { current: "verified" },
       }],
     })) as { success: boolean; nodeIds: Record<string, string>; nodesMerged: number };
 
     expect(result).toMatchObject({ success: true, nodesMerged: 1 });
+    expect(canonicalGraphListCalls).toBe(0);
     expect(result.nodeIds.canonical).toBe("gn_legacy");
     const canonical = await kv.get<GraphNode>("mem:graph:nodes", "gn_legacy");
     const duplicate = await kv.get<GraphNode>("mem:graph:nodes", "gn_duplicate");
@@ -590,16 +975,53 @@ describe("Graph Functions", () => {
       sourceNodeId: "gn_legacy",
       targetNodeId: "gn_target",
     });
+    expect(await kv.get("mem:graph:edge-key", "gn_duplicate|gn_target|related_to"))
+      .toBeNull();
+    expect(await kv.get("mem:graph:edge-key", "gn_legacy|gn_target|related_to"))
+      .toBe("ge_duplicate");
+    expect(await kv.get("mem:graph:node-degree", "gn_legacy")).toBe(1);
+    expect(await kv.get("mem:graph:node-degree", "gn_duplicate")).toBe(0);
     const query = (await sdk.trigger("mem::graph-query", {
       project: "/app",
       query: "Canonical event",
     })) as GraphQueryResult;
+    expect(query.fromIndex).toBe(true);
     expect(query.nodes.map((node) => node.id)).toEqual(["gn_legacy"]);
     const snapshot = await kv.get<{ stats: { totalNodes: number; totalEdges: number } }>(
       "mem:graph:snapshot",
       "current",
     );
     expect(snapshot?.stats).toMatchObject({ totalNodes: 2, totalEdges: 1 });
+  });
+
+  it("manual upsert preserves case-distinct file and function identities", async () => {
+    await kv.set("mem:sessions", "ses_case", {
+      id: "ses_case",
+      project: "/app",
+      cwd: "/app",
+      startedAt: "2026-01-03T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_case", "obs_case", {
+      ...testObs,
+      id: "obs_case",
+      sessionId: "ses_case",
+    });
+
+    const result = (await sdk.trigger("mem::graph-upsert", {
+      project: "/app",
+      sources: [{ sessionId: "ses_case", observationIds: ["obs_case"] }],
+      nodes: [
+        { key: "file_upper", type: "file", name: "Foo.ts" },
+        { key: "file_lower", type: "file", name: "foo.ts" },
+        { key: "function_upper", type: "function", name: "Parse" },
+        { key: "function_lower", type: "function", name: "parse" },
+      ],
+    })) as { success: boolean; nodesCreated: number; nodeIds: Record<string, string> };
+
+    expect(result).toMatchObject({ success: true, nodesCreated: 4 });
+    expect(new Set(Object.values(result.nodeIds))).toHaveLength(4);
   });
 
   it.each([
@@ -967,6 +1389,22 @@ describe("Graph Functions", () => {
       }
     }
 
+    async function seedProject(nodeCount: number, project = "/large") {
+      for (let i = 0; i < nodeCount; i++) {
+        await kv.set("mem:graph:nodes", `pn_${i}`, {
+          id: `pn_${i}`,
+          type: "concept",
+          name: `project-node-${i}`,
+          project,
+          properties: { project, ordinal: String(i) },
+          sourceObservationIds: [`obs_${i}`],
+          sourceSessionIds: [`ses_${i}`],
+          createdAt: `2026-01-01T00:${String(Math.floor(i / 60) % 60).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`,
+          stale: false,
+        } satisfies GraphNode);
+      }
+    }
+
     it("snapshot-rebuild persists top-degree subgraph + aggregate stats", async () => {
       await seed(50, 100);
       const result = (await sdk.trigger("mem::graph-snapshot-rebuild", { force: true })) as {
@@ -1059,6 +1497,142 @@ describe("Graph Functions", () => {
       for (const n of fileQuery.nodes) {
         expect(n.type).toBe("file");
       }
+    });
+
+    it("project query pages beyond 500 from shards without graph enumeration", async () => {
+      await seedProject(1201);
+      await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+      let listCalls = 0;
+      const baseList = kv.list;
+      kv.list = async <T,>(scope: string): Promise<T[]> => {
+        listCalls += 1;
+        return baseList.call(kv, scope) as Promise<T[]>;
+      };
+
+      const page = (await sdk.trigger("mem::graph-query", {
+        project: "/large",
+        limit: 500,
+        offset: 1000,
+      })) as GraphQueryResult;
+      expect(page).toMatchObject({
+        fromIndex: true,
+        totalNodes: 1201,
+        limit: 500,
+        offset: 1000,
+        truncated: false,
+      });
+      expect(page.nodes).toHaveLength(201);
+
+      const searched = (await sdk.trigger("mem::graph-query", {
+        project: "/large",
+        query: "project-node-1199",
+      })) as GraphQueryResult;
+      expect(searched.fromIndex).toBe(true);
+      expect(searched.nodes.map((node) => node.id)).toEqual(["pn_1199"]);
+      expect(listCalls).toBe(0);
+    });
+
+    it("missing query index falls back without bootstrapping from canonical scopes", async () => {
+      await seedProject(40, "/missing-index");
+      await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+      await kv.delete("mem:graph:query-manifest", "current");
+      let listCalls = 0;
+      const baseList = kv.list;
+      kv.list = async <T,>(scope: string): Promise<T[]> => {
+        listCalls += 1;
+        return baseList.call(kv, scope) as Promise<T[]>;
+      };
+
+      const result = (await sdk.trigger("mem::graph-query", {
+        project: "/missing-index",
+        query: "project-node-3",
+      })) as GraphQueryResult;
+      expect(result.fromSnapshot).toBe(true);
+      expect(result.fromIndex).toBeUndefined();
+      expect(result.queryIndexRebuilt).toBeUndefined();
+      expect(result.nodes.map((node) => node.id)).toContain("pn_3");
+      expect(result.warning).toMatch(/without enumerating canonical graph state/);
+      expect(listCalls).toBe(0);
+    });
+
+    it("indexed BFS uses adjacency shards and preserves bounded traversal", async () => {
+      await seed(12, 11);
+      await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+      let listCalls = 0;
+      const baseList = kv.list;
+      kv.list = async <T,>(scope: string): Promise<T[]> => {
+        listCalls += 1;
+        return baseList.call(kv, scope) as Promise<T[]>;
+      };
+      const walked = (await sdk.trigger("mem::graph-query", {
+        project: "*",
+        startNodeId: "n_0",
+        maxDepth: 2,
+      })) as GraphQueryResult;
+      expect(walked.fromIndex).toBe(true);
+      expect(walked.nodes.map((node) => node.id)).toEqual(["n_0", "n_1", "n_2"]);
+      expect(walked.edges).toHaveLength(2);
+      expect(listCalls).toBe(0);
+    });
+
+    it("dirty query index falls back to the bounded snapshot without enumeration", async () => {
+      await seedProject(40, "/dirty-index");
+      await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+      const snapshot = await kv.get<GraphSnapshot>("mem:graph:snapshot", "current");
+      expect(snapshot).not.toBeNull();
+      await kv.set("mem:graph:snapshot", "current", {
+        ...snapshot!,
+        dirty: true,
+      });
+      const manifest = await kv.get<Record<string, unknown>>(
+        "mem:graph:query-manifest",
+        "current",
+      );
+      expect(manifest).not.toBeNull();
+      await kv.set("mem:graph:query-manifest", "current", {
+        ...manifest!,
+        dirty: true,
+      });
+      let listCalls = 0;
+      const baseList = kv.list;
+      kv.list = async <T,>(scope: string): Promise<T[]> => {
+        listCalls += 1;
+        return baseList.call(kv, scope) as Promise<T[]>;
+      };
+
+      const result = (await sdk.trigger("mem::graph-query", {
+        project: "/dirty-index",
+        query: "project-node-3",
+      })) as GraphQueryResult;
+
+      expect(result.fromSnapshot).toBe(true);
+      expect(result.nodes.map((node) => node.id)).toContain("pn_3");
+      expect(result.warning).toMatch(/without enumerating canonical graph state/);
+      expect(listCalls).toBe(0);
+    });
+
+    it("missing snapshot refuses canonical graph enumeration", async () => {
+      await seedProject(5, "/legacy-query");
+      let listCalls = 0;
+      const baseList = kv.list;
+      kv.list = async <T,>(scope: string): Promise<T[]> => {
+        listCalls += 1;
+        return baseList.call(kv, scope) as Promise<T[]>;
+      };
+
+      const result = (await sdk.trigger("mem::graph-query", {
+        project: "/legacy-query",
+        query: "project-node",
+      })) as GraphQueryResult;
+
+      expect(result).toMatchObject({
+        nodes: [],
+        edges: [],
+        totalNodes: 0,
+        totalEdges: 0,
+      });
+      expect(result.warning).toMatch(/canonical graph enumeration/);
+      expect(listCalls).toBe(0);
     });
 
     it("graph-stats returns from snapshot when not dirty", async () => {
@@ -1238,57 +1812,97 @@ describe("Graph Functions", () => {
     });
   });
 
-  // CodeRabbit feedback: cover the timeout-budget fallback path and
-  // the oversized-corpus rebuild refusal. The hot path never enumerates
-  // any more, but the rebuild endpoint AND the BFS / query branches
-  // still call kv.list — both need explicit failure-mode tests.
+  it("automatic scoped extraction merges case-only semantic node variants", async () => {
+    const firstObs = {
+      ...testObs,
+      id: "obs_case_1",
+      sessionId: "ses_case_1",
+      narrative: "Qwen is the selected local model",
+    };
+    const secondObs = {
+      ...testObs,
+      id: "obs_case_2",
+      sessionId: "ses_case_2",
+      narrative: "QWEN completed the bounded task",
+    };
+    for (const [sessionId, observation] of [
+      ["ses_case_1", firstObs],
+      ["ses_case_2", secondObs],
+    ] as const) {
+      await kv.set("mem:sessions", sessionId, {
+        id: sessionId,
+        project: "/project-a",
+        cwd: "/project-a",
+        startedAt: "2026-02-01T10:00:00Z",
+        status: "completed",
+        observationCount: 1,
+      });
+      await kv.set(`mem:obs:${sessionId}`, observation.id, observation);
+    }
+    await kv.set("mem:graph:nodes", "gn_legacy_qwen", {
+      id: "gn_legacy_qwen",
+      type: "concept",
+      name: "Qwen",
+      project: "/project-a",
+      properties: { project: "/project-a" },
+      sourceObservationIds: [],
+      sourceSessionIds: [],
+      createdAt: "2026-01-01T00:00:00Z",
+    } satisfies GraphNode);
+    await kv.set(
+      "mem:graph:name-index",
+      `concept|${JSON.stringify(["/project-a", "Qwen"])}`,
+      "gn_legacy_qwen",
+    );
+    mockProvider.compress
+      .mockResolvedValueOnce(`<entities>
+<entity key="qwen" type="concept" name="Qwen" source_observation_ids="obs_case_1"/>
+</entities>
+<relationships></relationships>`)
+      .mockResolvedValueOnce(`<entities>
+<entity key="qwen" type="concept" name="QWEN" source_observation_ids="obs_case_2"/>
+</entities>
+<relationships></relationships>`);
+
+    await sdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_case_1",
+      observations: [firstObs],
+    });
+    await sdk.trigger("mem::graph-extract", {
+      project: "/project-a",
+      sessionId: "ses_case_2",
+      observations: [secondObs],
+    });
+
+    const nodes = await kv.list<GraphNode>("mem:graph:nodes");
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toMatchObject({
+      id: "gn_legacy_qwen",
+      name: "Qwen",
+      project: "/project-a",
+      sourceObservationIds: ["obs_case_1", "obs_case_2"],
+      sourceSessionIds: ["ses_case_1", "ses_case_2"],
+    });
+  });
+
+  // The hot query path must never enumerate canonical graph scopes. Only the
+  // explicit snapshot rebuild endpoint may do so, behind its size guards.
   describe("budget + tooLarge guards (#814 v2)", () => {
-    function slowKV(delayMs: number) {
+    it("graph-query startNodeId refuses enumeration when no index exists", async () => {
       const base = mockKV();
-      return {
+      let listCalls = 0;
+      const guarded = {
         ...base,
         list: async <T>(scope: string): Promise<T[]> => {
-          await new Promise((r) => setTimeout(r, delayMs));
+          listCalls += 1;
           return base.list<T>(scope);
         },
       };
-    }
-
-    it("graph-query startNodeId returns warning envelope when enumeration exceeds budget", async () => {
-      const slow = slowKV(7000); // > LIVE_ENUMERATION_BUDGET_MS (6000ms)
-      const localSdk = mockSdk();
-      registerGraphFunction(localSdk as never, slow as never, mockProvider as never);
-
-      const result = (await localSdk.trigger("mem::graph-query", {
-        startNodeId: "n_missing",
-      })) as GraphQueryResult;
-
-      expect(result.warning).toBeTruthy();
-      expect(result.warning).toMatch(/budget|enumeration/i);
-    }, 10000);
-
-    // CodeRabbit raised that slowKV(setTimeout) doesn't simulate a
-    // blocked event loop. The real production failure is iii rejecting
-    // the trigger with "Invocation stopped" after the worker dies
-    // (heartbeat starvation). A rejecting kv.list mock covers that
-    // catch-path directly without introducing a busy-wait that would
-    // also starve the budget timer and produce a flaky test.
-    function rejectingKV() {
-      const base = mockKV();
-      return {
-        ...base,
-        list: async <T>(_scope: string): Promise<T[]> => {
-          throw new Error("Invocation stopped");
-        },
-      };
-    }
-
-    it("graph-query rejects-from-engine path returns warning envelope (worker-death simulation)", async () => {
-      const rejector = rejectingKV();
       const localSdk = mockSdk();
       registerGraphFunction(
         localSdk as never,
-        rejector as never,
+        guarded as never,
         mockProvider as never,
       );
 
@@ -1297,7 +1911,9 @@ describe("Graph Functions", () => {
       })) as GraphQueryResult;
 
       expect(result.warning).toBeTruthy();
+      expect(result.warning).toMatch(/enumeration/i);
       expect(result.nodes).toEqual([]);
+      expect(listCalls).toBe(0);
     });
 
     it("graph-snapshot-rebuild refuses corpora past REBUILD_SAFE_NODE_CEILING", async () => {

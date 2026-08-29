@@ -529,12 +529,14 @@ test("live official hooks preserve raw turns, exclude internal turns, and catch 
   const sourceSession = `${nonce}-source`;
   const nextSession = `${nonce}-next`;
   const internalSession = `${nonce}-internal`;
+  const recoveredSession = `${nonce}-recovered`;
   const activitySession = `${nonce}-activity-update`;
   const subagentSession = `${nonce}-subagent`;
   const userToken = `USER_${randomUUID().replaceAll("-", "")}`;
   const secondUserToken = `USER_SECOND_${randomUUID().replaceAll("-", "")}`;
   const assistantToken = `ASSIST_${randomUUID().replaceAll("-", "")}`;
   const internalToken = `INTERNAL_${randomUUID().replaceAll("-", "")}`;
+  const recoveredToken = `RECOVERED_${randomUUID().replaceAll("-", "")}`;
   const activityToken = `ACTIVITY_${randomUUID().replaceAll("-", "")}`;
   const descriptiveAssignment = "password=descriptive-not-a-secret-value";
   const sharedPromptPrefix = "same-session-prefix ".repeat(40);
@@ -634,6 +636,35 @@ test("live official hooks preserve raw turns, exclude internal turns, and catch 
   const sessions = mcpTextJson(await callOfficialMcp("memory_sessions", {})).sessions ?? [];
   const internal = sessions.find((session) => session.id === internalSession);
   assert.equal(internal, undefined);
+
+  await callOfficialHook({ hook_event_name: "SessionStart", session_id: recoveredSession, cwd: linkedWorktreeCwd });
+  await callOfficialHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: recoveredSession,
+    cwd: linkedWorktreeCwd,
+    prompt: `You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt. Return JSON containing ${internalToken}.`,
+  });
+  await callOfficialHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: recoveredSession,
+    cwd: linkedWorktreeCwd,
+    prompt: `${recoveredToken} 정상 사용자 프롬프트`,
+  });
+  await callOfficialHook({
+    hook_event_name: "Stop",
+    session_id: recoveredSession,
+    cwd: linkedWorktreeCwd,
+    last_assistant_message: `${recoveredToken} 정상 응답`,
+  });
+  await callOfficialHook({ hook_event_name: "SessionEnd", session_id: recoveredSession, cwd: linkedWorktreeCwd });
+  const recoveredRecall = mcpTextJson(await callOfficialMcp("memory_recall", {
+    query: recoveredToken,
+    project: "example-project",
+    limit: 10,
+    format: "full",
+  }));
+  assert.equal(recallObservations(recoveredRecall)
+    .filter((observation) => observation.narrative?.includes(recoveredToken)).length, 2);
 
   await callOfficialHook({ hook_event_name: "SessionStart", session_id: activitySession, cwd: linkedWorktreeCwd });
   await callOfficialHook({

@@ -1,10 +1,10 @@
-import type { CompressedObservation, Session } from "../types.js";
+import type { Session } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import {
   isExcludedCodexAmbientSession,
-  sanitizeCodexAmbientObservation,
 } from "./observation-visibility.js";
+import { readVisibleObservation } from "./observation-access.js";
 
 export interface ObservationSourceInput {
   sessionId: string;
@@ -52,15 +52,8 @@ async function requireObservation(
   sessionId: string,
   observationId: string,
 ): Promise<void> {
-  const observation = await kv.get<CompressedObservation>(
-    KV.observations(sessionId),
-    observationId,
-  );
-  if (
-    !observation ||
-    observation.sessionId !== sessionId ||
-    !sanitizeCodexAmbientObservation(observation)
-  ) {
+  const observation = await readVisibleObservation(kv, sessionId, observationId);
+  if (!observation) {
     throw new Error(`unknown source observation: ${observationId}`);
   }
 }
@@ -141,16 +134,13 @@ export async function validateObservationProvenance(
       const candidates = [...unresolved];
       const observations = await Promise.all(
         candidates.map((observationId) =>
-          kv.get<CompressedObservation>(KV.observations(session.id), observationId),
+          readVisibleObservation(kv, session.id, observationId)
         ),
       );
       for (let index = 0; index < candidates.length; index++) {
         const observationId = candidates[index];
         const observation = observations[index];
-        if (
-          observation?.sessionId === session.id &&
-          sanitizeCodexAmbientObservation(observation)
-        ) {
+        if (observation) {
           sourceSessionIds.push(session.id);
           sourceObservationIds.push(observationId);
           unresolved.delete(observationId);

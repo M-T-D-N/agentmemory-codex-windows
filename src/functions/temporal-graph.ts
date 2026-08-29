@@ -257,6 +257,10 @@ export function registerTemporalGraphFunctions(
           existingEdges.push(edge);
         }
 
+        if (nodes.length > 0 || edges.length > 0) {
+          await kv.delete(KV.graphQueryManifest, "current");
+        }
+
         logger.info("Temporal graph extraction complete", {
           nodes: nodes.length,
           edges: edges.length,

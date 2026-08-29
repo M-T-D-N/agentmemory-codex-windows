@@ -20,6 +20,7 @@ export function registerTimelineFunction(sdk: ISdk, kv: StateKV): void {
       project?: string;
       before?: number;
       after?: number;
+      trackAccess?: boolean;
     }) => {
       const before = Math.max(0, Math.floor(data.before ?? 5));
       const after = Math.max(0, Math.floor(data.after ?? 5));
@@ -99,10 +100,12 @@ export function registerTimelineFunction(sdk: ISdk, kv: StateKV): void {
         });
       }
 
-      void recordAccessBatch(
-        kv,
-        entries.map((e) => e.observation.id),
-      );
+      if (data.trackAccess !== false) {
+        void recordAccessBatch(
+          kv,
+          entries.map((e) => e.observation.id),
+        );
+      }
 
       logger.info("Timeline retrieved", {
         anchor: data.anchor,

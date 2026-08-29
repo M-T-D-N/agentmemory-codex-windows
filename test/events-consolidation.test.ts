@@ -18,7 +18,7 @@ vi.mock("../src/functions/slots.js", () => ({
   isReflectEnabled: vi.fn(() => false),
 }));
 
-import { registerEventTriggers } from "../src/triggers/events.js";
+import { registerEventTriggers as registerEventTriggersImpl } from "../src/triggers/events.js";
 import {
   isConsolidationEnabled,
   isGraphExtractionEnabled,
@@ -27,6 +27,16 @@ import {
 } from "../src/config.js";
 import { isReflectEnabled } from "../src/functions/slots.js";
 import { logger } from "../src/logger.js";
+
+const defaultContextReader = async () => ({ context: "", blocks: 0, tokens: 0 });
+
+function registerEventTriggers(
+  sdk: never,
+  kv: never,
+  readContext = defaultContextReader,
+): void {
+  registerEventTriggersImpl(sdk, kv, readContext);
+}
 
 // event::session::stopped is the single source of truth for consolidation.
 // It fans out mem::summarize (awaited) plus fire-and-forget void triggers for
@@ -54,6 +64,7 @@ type StoppedHandler = (data: {
 // in which case they reject (to exercise fireVoid's .catch()).
 function mockSdk(opts?: { rejectFor?: string }) {
   const handlers = new Map<string, StoppedHandler>();
+  const registerTrigger = vi.fn();
   const trigger = vi.fn(
     async (input: { function_id: string; payload?: unknown; action?: unknown }) => {
       if (opts?.rejectFor && input.function_id === opts.rejectFor) {
@@ -68,10 +79,11 @@ function mockSdk(opts?: { rejectFor?: string }) {
   return {
     sdk: {
       registerFunction: (id: string, handler: StoppedHandler) => handlers.set(id, handler),
-      registerTrigger: () => {},
+      registerTrigger,
       trigger,
     },
     handlers,
+    registerTrigger,
     trigger,
   };
 }
@@ -270,6 +282,50 @@ describe("event::session::stopped consolidation fan-out", () => {
       "mem::consolidate-pipeline trigger failed",
       expect.objectContaining({ sessionId: "ses_1" }),
     );
+  });
+});
+
+describe("session observation activity fan-out", () => {
+  it("does not register a same-worker state trigger for session writes", () => {
+    const { sdk, handlers, registerTrigger, trigger } = mockSdk();
+    registerEventTriggers(sdk as never, mockKV() as never);
+
+    expect(handlers.has("event::session::observation-count-changed")).toBe(false);
+    expect(
+      registerTrigger.mock.calls.some(
+        ([registration]) =>
+          (registration as { type?: string }).type === "state",
+      ),
+    ).toBe(false);
+    expect(trigger).not.toHaveBeenCalled();
+  });
+});
+
+describe("session start context dispatch", () => {
+  it("calls the context reader directly without re-entering the worker", async () => {
+    const directReader = vi.fn(async () => ({
+      context: "direct-context",
+      blocks: 1,
+      tokens: 1,
+    }));
+    const { sdk, handlers, trigger } = mockSdk();
+    registerEventTriggers(sdk as never, mockKV() as never, directReader);
+    const started = handlers.get("event::session::started") as unknown as (
+      data: { sessionId: string; project: string; cwd: string },
+    ) => Promise<{ context: string }>;
+
+    const result = await started({
+      sessionId: "ses_start",
+      project: "project-a",
+      cwd: "/project-a",
+    });
+
+    expect(result.context).toBe("direct-context");
+    expect(directReader).toHaveBeenCalledWith({
+      sessionId: "ses_start",
+      project: "project-a",
+    });
+    expect(functionIds(trigger)).not.toContain("mem::context");
   });
 });
 

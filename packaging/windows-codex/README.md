@@ -11,11 +11,41 @@
 
 This directory is the source authority for the Windows/Codex adapter around the
 upstream AgentMemory TypeScript package. The adapter keeps iii-engine,
-AgentMemory's official state scopes, and the normal memory/lesson/graph
-lifecycle. It does not introduce another database or queue. Revision r32 keeps
-the loopback-only, graph-scoped local-Qwen provider, adds bounded fair recovery
-of deferred graph batches, and federates relevant read context across projects;
-every other LLM-backed function continues to receive the noop provider.
+AgentMemory's official state scopes, and the normal memory, lesson, graph,
+audit, and provenance lifecycles. It introduces no secondary database or queue.
+
+Internal qualification revision `r58` consolidates the supported behavior into
+clearer boundaries without changing the upstream-compatible API or data model:
+
+- four managed Codex hooks capture normal main-task prompts and final responses
+  while excluding ambient UI, host, fork, and subagent traffic;
+- durable writes remain exact-project and provenance-checked, while bounded,
+  source-labelled reads may federate relevant context across projects;
+- optional Local Qwen remains credential-free, loopback-only, and restricted to
+  typed graph extraction. Its graph completions use streamed SSE so long-running
+  llama.cpp responses remain live and incomplete streams fail closed; every
+  other LLM-backed function receives the noop provider;
+- graph derivation, query-index access, canonical persistence, and official
+  lifecycle handling are separate code responsibilities. Sixty-four
+  rebuildable index shards accelerate project, text, pagination, and bounded
+  walk queries. If that derived index is temporarily unavailable, reads return
+  an explicitly bounded snapshot instead of launching a non-cancellable full
+  graph enumeration; canonical AgentMemory graph scopes remain authoritative;
+- graph output, deadlines, retries, parser bounds, relationship endpoints, and
+  observation provenance are bounded and fail closed without advancing a
+  failed source cursor;
+- MCP and REST authentication, observation visibility, hook runtime settings,
+  token estimates, and worker pidfile handling each have one shared
+  implementation so entrypoints cannot silently drift;
+- REST and durable session-start paths call the registered context
+  implementation directly, avoiding same-worker iii re-entry while preserving
+  the upstream context contract and state stores; and
+- session forget and semantic graph persistence share a keyed lifecycle
+  boundary, so completed background inference cannot recreate a deleted source
+  session or advance its graph cursor after deletion.
+
+The detailed failure lessons later in this guide explain why these constraints
+exist. They are operational history, not additional product surfaces.
 
 ## AI development disclosure and validation limits
 
@@ -37,8 +67,10 @@ The current evidence is deliberately narrower than a production guarantee:
 - provider-backed summary, consolidation, reflection, crystallization, and
   compression are intentionally disabled in the supported profile;
 - upstream updates require source-level review and renewed qualification;
-- `src/functions/graph.ts` and the Windows `codex-turn.mjs` adapter remain
-  candidates for limited medium-term refactoring; and
+- large upstream-compatible CLI and API registration surfaces remain close to
+  upstream structure and have not received an independent manual code audit;
+  the Windows `codex-turn.mjs` payload deliberately remains self-contained for
+  single-file deployment; and
 - this remains a Technical Preview, not a general production-readiness claim.
 
 ## Preview scope
@@ -51,11 +83,19 @@ The preview is intentionally narrow:
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
   downstream release version.
-- `r32` is internal qualification provenance, not a public version line.
+- `r58` is internal qualification provenance, not a public version line.
+  Release revisions are path-safe build identifiers rather than a numeric-only
+  version sequence, so a source identity suffix can be used without inventing a
+  new public release.
 - Source tags and generated release-folder names use the downstream version.
   The installed runtime directory and CLI still use AgentMemory compatibility
   version `0.9.29` so existing data and integrations are not relabelled.
 - Native Windows and Codex are the supported downstream host profile.
+- Reinstalling different contents under the same internal revision first stops
+  the owned runtime and moves the predecessor package into the timestamped
+  release backup. The installer then copies and verifies the replacement; a
+  failed cutover restores the predecessor package. Canonical `data` is never
+  replaced by this workflow.
 - Existing AgentMemory memory, lesson, graph, audit, and provenance stores stay
   authoritative.
 - Local Qwen is optional and capability-scoped to typed graph extraction over
@@ -156,11 +196,17 @@ lesson, and manual graph tools. Local Qwen may add graph entities and relations
 only after validating the exact project, session, and observation provenance.
 Summary, consolidation, reflection, crystallization, and automatic compression
 stay disabled. Deterministic structural graph extraction remains available
-when Qwen is busy or unavailable. A single background scheduler waits for a
-stable Qwen runtime, processes at most one oldest project batch per tick, and
-keeps forward and r30-prefix backfill cursors separate. Foreground Qwen markers
-abort background work without advancing either cursor; malformed graph XML gets
-one bounded repair attempt.
+when Qwen is busy or unavailable. The existing local-AI launcher atomically
+updates `data/qwen-coordination/qwen-ready.json` after exact owned readiness.
+The Windows watcher accepts the final filename and the atomic writer's
+`qwen-ready.json.tmp-*`/`.bak-*` filenames, because `fs.watch` may report only
+an intermediate rename during `File.Replace`.
+That event starts a 15-second stability check and bounded four-batch drains;
+full batches may continue after a 30-second cooldown, while a 15-minute probe is
+retained only for missed events and AgentMemory restarts. Every batch still
+selects the least-recently-serviced project and keeps forward and r30-prefix
+backfill cursors separate. Foreground Qwen markers abort background work without
+advancing either cursor; malformed graph XML gets one bounded repair attempt.
 
 ## Failure history and lessons
 
@@ -215,6 +261,62 @@ every lesson was extracted automatically by AgentMemory.
 15. **Large indexes:** Parallel writes of large BM25 shards with short timeouts
     destabilized the worker. Shard writes are serialized and bounded timeouts
     are sized for the actual index.
+16. **Ambient-session poisoning:** A single internal host prompt could mark an
+    established Codex session capture-excluded and silently suppress later
+    normal prompts and final responses. Session-wide exclusion is now limited
+    to sessions without normal capture, a later normal prompt reactivates a
+    provisional exclusion, and the prompt hook no longer spends its timeout on
+    a redundant capture-state lookup.
+17. **Idle Qwen polling:** A 30-second runtime probe kept waking the service even
+    when Qwen was normally off, while short availability windows still drained
+    too little backlog. Exact launcher readiness now emits an advisory file
+    event, the worker revalidates the live runtime before bounded draining, and
+    a 15-minute probe remains only as a missed-event safety net.
+18. **Truncated graph XML:** A real four-observation response opened both XML
+    roots but exhausted the 2,048-token output budget before closing
+    `relationships`; the repair attempt had the same budget and could not make
+    the cursor advance. The Windows graph profile now allows 4,096 output tokens
+    and a three-minute background deadline, while schema-only prompting,
+    provenance validation, cursor fail-closed behavior, and foreground
+    preemption remain unchanged.
+19. **Ready-event grace reuse:** Windows delivered every atomic ready-file
+    event, but a launcher signal for an already known model fingerprint did not
+    restart the stability grace. The drain could therefore overlap the
+    launcher's foreground-protection window or be absorbed by an earlier timer.
+    Every accepted ready signal now resets the grace timestamp and schedules the
+    existing bounded drain after that grace, without adding Qwen polling.
+20. **Service-side event loss:** A standalone Windows watcher observed all
+    atomic replacement filenames, while the long-lived worker still produced no
+    drain on the same launcher event. The ready subscriber now deduplicates by
+    final-file mtime and size and adds a five-second metadata-only fallback. It
+    does not call the Qwen API, load a model, or replace the 15-minute runtime
+    safety probe.
+21. **Unknown repair endpoints:** A real single-observation response and its
+    repair both emitted a relationship to an entity key absent from the same
+    XML output. The parser correctly failed closed but deterministic retries
+    could repeat forever. The repair contract now requires both endpoints to
+    match emitted entity keys and directs Qwen to omit an ungrounded
+    relationship instead of weakening parser validation.
+22. **Prompt-only endpoint repair was insufficient:** Live r47 qualification
+    showed that Qwen could truncate an entity during repair yet retain one
+    relationship to that removed key despite the explicit repair instruction.
+    Only the repaired response may now deterministically omit such orphan
+    relationships. The initial response remains strict, omitted relationships
+    are never persisted, and XML shape, allowed types, provenance, and total
+    relationship bounds still fail closed before the semantic cursor advances.
+23. **Partial XML parsing was not fail-closed:** Adversarial r48 tests proved
+    that prose outside the two roots, malformed property tails, duplicate or
+    bare attributes, and unknown XML entities could be ignored while a cursor
+    still advanced. The bounded parser now consumes the complete envelope and
+    every supported child and attribute exactly once; malformed repaired output
+    remains deferred with no semantic cursor advance.
+24. **Equal nested deadlines hid provider timeouts:** Live r49 draining showed
+    `mem::graph-backlog-step` timing out at the same 180-second boundary as the
+    Local-Qwen request, before the provider failure could return and enter the
+    existing single-observation retry path. Only the two internal graph trigger
+    calls now receive bounded 30-second layers of headroom; the provider
+    deadline, fail-closed parser, cursor rules, and every non-graph invocation
+    remain unchanged.
 
 ## Release retention and cleanup
 

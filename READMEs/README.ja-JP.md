@@ -5,8 +5,6 @@ AgentMemory ダウンストリームです。
 
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
-[![Windows向け Codex AgentMemory](../assets/social-preview.png)](../assets/social-preview.png)
-
 > [!IMPORTANT]
 > このリポジトリは、ソースのみを提供する Technical Preview
 > `0.1.0-preview.1` です。
@@ -19,10 +17,6 @@ AgentMemory ダウンストリームです。
 
 開発注記: このダウンストリームは AI 生成・ユーザーテスト済みです。[開示
 全文](#ai-開発に関する開示)を参照してください。
-
-> **Windows で Codex を使って評価する**
->
-> ネイティブ Windows でこのリポジトリを Codex で開き、[`INSTALL_FOR_AGENTS.md`](../INSTALL_FOR_AGENTS.md) に従うよう依頼してください。このランブックは、固定されたネイティブ入力とソースチェックアウトを検証し、インストーラーを既定で dry-run／検証専用モードに保ち、実際の cutover のために `-Execute` を追加する前に明示的な承認を要求します。ハッシュ、所有権、パス、マニフェスト、または既存インストール状態に不一致があれば停止してください。
 
 ## このプレビューで提供するもの
 
@@ -37,6 +31,9 @@ AgentMemory ダウンストリームです。
 - 任意で、認証情報を必要としない loopback 専用のローカル Qwen を typed graph
   抽出だけに使用できます。その他の LLM 機能は noop provider を使用し、外部
   fallback は無効のままです。
+- project、text、pagination、bounded walk の graph 読み取りは、再構築可能な
+  shard index で処理します。index が dirty または利用不能な場合は明示的な
+  bounded snapshot に縮退し、正規 graph 全体の列挙は開始しません。
 - サポート対象プロファイルは認証済み loopback MCP endpoint を使用します。
   stdio launcher は互換性経路としてのみパッケージに含まれます。
 
@@ -51,7 +48,7 @@ portable hooks、17個の skills があります。サポート対象の Windows
 |---|---:|---|
 | 公開ダウンストリーム版 | `0.1.0-preview.1` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
-| 検証リビジョン | `r32` | 内部 build provenance。公開バージョン系列ではありません |
+| 検証リビジョン | `r58` | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
 
 正確なアップストリームの tag、commit、tree、元の package hash は

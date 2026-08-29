@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [Parameter(Mandatory = $true)][string]$IiiEnginePath,
     [string]$NodePath = '',
-    [string]$ReleaseRevision = 'r32',
+    [string]$ReleaseRevision = 'r58',
     [switch]$SkipTests
 )
 
@@ -65,8 +65,8 @@ $downstreamVersion = [string]$packageJson.agentmemoryDownstream.version
 if ($downstreamVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
     throw 'package.json agentmemoryDownstream.version must be a semantic version.'
 }
-if ($ReleaseRevision -notmatch '^r[1-9][0-9]*$') {
-    throw 'ReleaseRevision must use the form r1, r2, and so on.'
+if ($ReleaseRevision -notmatch '^[0-9A-Za-z](?:[0-9A-Za-z._-]{0,62}[0-9A-Za-z])?$') {
+    throw 'ReleaseRevision must be a 1-64 character path-safe identifier using letters, digits, dot, underscore, or hyphen, and must begin and end with a letter or digit.'
 }
 $runtimeRelease = "$version-codex-$ReleaseRevision"
 $releaseRoot = Join-Path $outputRoot "agentmemory-codex-windows-$downstreamVersion"

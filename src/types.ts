@@ -504,13 +504,18 @@ export interface GraphQueryResult {
   limit?: number;
   offset?: number;
   // #814: indicates the response came from the precomputed top-degree
-  // snapshot rather than a live kv.list enumeration. Set only on the
-  // empty-body / nodeType-only branch on large corpora where the
-  // unbounded enumeration would exceed the iii invocation timeout.
+  // snapshot rather than the exact query index. This is also the bounded
+  // fail-closed path while the derived index is dirty or unavailable.
   fromSnapshot?: boolean;
-  // #814: when the snapshot is stale or absent and the live fallback
-  // also failed, expose an explanatory note so the viewer can surface
-  // an actionable banner instead of a blank graph.
+  // Downstream large-corpus path: the result was selected from the bounded,
+  // rebuildable query shards and then hydrated by exact node / edge IDs. No
+  // canonical graph scope enumeration occurred for this request.
+  fromIndex?: boolean;
+  // True only for the first safe query after upgrading a bounded legacy
+  // corpus, when the derived query shards were bootstrapped once.
+  queryIndexRebuilt?: boolean;
+  // #814: when the exact index is unavailable, expose an explanatory note
+  // so clients can distinguish a bounded snapshot from an exact result.
   warning?: string;
 }
 

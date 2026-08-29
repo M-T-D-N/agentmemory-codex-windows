@@ -2,6 +2,7 @@ import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
 import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary } from "../types.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { prepareSessionStart } from "../functions/session-lifecycle.js";
+import type { ContextReader } from "../functions/context.js";
 import { safeAudit } from "../functions/audit.js";
 import type { ObservationSourceInput } from "../functions/provenance.js";
 import { KV } from "../state/schema.js";
@@ -11,12 +12,18 @@ import { getLatestHealth } from "../health/monitor.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { VERSION } from "../version.js";
 import { timingSafeCompare } from "../auth.js";
+import {
+  asNonEmptyString,
+  checkBearerAuth as checkAuth,
+  type HttpResponse as Response,
+} from "../http.js";
 import { isSlotsEnabled, isReflectEnabled } from "../functions/slots.js";
 import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
 import {
+  isCodexInternalAmbientText,
   isExcludedCodexAmbientSession,
   sanitizeCodexAmbientObservation,
 } from "../functions/observation-visibility.js";
@@ -32,12 +39,6 @@ import {
   loadConfig,
 } from "../config.js";
 
-type Response = {
-  status_code: number;
-  headers?: Record<string, string>;
-  body: unknown;
-};
-
 function parseOptionalInt(raw: unknown): number | undefined {
   if (raw === undefined || raw === null || raw === "") return undefined;
   const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
@@ -48,21 +49,6 @@ function normalizeReadProject(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const project = raw.trim();
   return project && project.length <= 512 ? project : null;
-}
-
-function checkAuth(
-  req: ApiRequest,
-  secret: string | undefined,
-): Response | null {
-  if (!secret) return null;
-  const auth = req.headers?.["authorization"] || req.headers?.["Authorization"];
-  if (
-    typeof auth !== "string" ||
-    !timingSafeCompare(auth, `Bearer ${secret}`)
-  ) {
-    return { status_code: 401, body: { error: "unauthorized" } };
-  }
-  return null;
 }
 
 function requireConfiguredSecret(
@@ -124,12 +110,6 @@ function reflectDisabledResponse(): Response {
   });
 }
 
-function asNonEmptyString(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
 function parseOptionalFiniteNumber(value: unknown): number | undefined | null {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -152,6 +132,7 @@ function parseOptionalPositiveInt(value: unknown): number | undefined | null {
 export function registerApiTriggers(
   sdk: ISdk,
   kv: StateKV,
+  readContext: ContextReader,
   secret?: string,
   metricsStore?: MetricsStore,
   provider?: { name?: string; circuitState?: unknown },
@@ -397,7 +378,7 @@ export function registerApiTriggers(
       if (budget !== undefined) payload.budget = budget;
       const agentId = bodyAgentId ?? queryAgentId;
       if (agentId !== undefined) payload.agentId = agentId;
-      const result = await sdk.trigger({ function_id: "mem::context", payload });
+      const result = await readContext(payload);
       return { status_code: 200, body: result };
     },
   );
@@ -653,16 +634,10 @@ export function registerApiTriggers(
         return { status_code: 409, body: start };
       }
       const session = start.session;
-      const contextResult = await sdk.trigger<
-        { sessionId: string; project: string; agentId?: string },
-        { context: string }
-      >({
-        function_id: "mem::context",
-        payload: {
-          sessionId,
-          project,
-          ...(session.agentId ? { agentId: session.agentId } : {}),
-        },
+      const contextResult = await readContext({
+        sessionId,
+        project,
+        ...(session.agentId ? { agentId: session.agentId } : {}),
       });
       return {
         status_code: 200,
@@ -703,7 +678,7 @@ export function registerApiTriggers(
         };
       }
 
-      const result = await withKeyedLock(`session:${sessionId}`, async () => {
+      const result = await withKeyedLock(`obs:${sessionId}`, async () => {
         const existing = await kv.get<Session>(KV.sessions, sessionId);
         if (!existing) {
           return { status_code: 404, body: { error: "session not found" } };
@@ -722,6 +697,23 @@ export function registerApiTriggers(
               captureExcluded: true,
               sessionId,
               alreadyExcluded: true,
+            },
+          };
+        }
+
+        const hasNormalCapture =
+          existing.observationCount > 0 ||
+          (typeof existing.firstPrompt === "string" &&
+            existing.firstPrompt.trim().length > 0 &&
+            !isCodexInternalAmbientText(existing.firstPrompt));
+        if (hasNormalCapture) {
+          return {
+            status_code: 200,
+            body: {
+              success: true,
+              captureExcluded: false,
+              sessionId,
+              preservedActiveSession: true,
             },
           };
         }

@@ -9,19 +9,13 @@ import type {
   GraphEdge,
 } from "../types.js";
 import { getVisibleTools } from "./tools-registry.js";
-import { timingSafeCompare } from "../auth.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
 import { isExcludedCodexAmbientSession } from "../functions/observation-visibility.js";
-
-type McpResponse = {
-  status_code: number;
-  headers?: Record<string, string>;
-  body: unknown;
-};
-
-function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
+import {
+  asNonEmptyString,
+  checkBearerAuth as checkAuth,
+  type HttpResponse as McpResponse,
+} from "../http.js";
 
 function asNumber(value: unknown, fallback?: number): number | undefined {
   const n = Number(value);
@@ -54,6 +48,22 @@ function parseStrictCsvList(value: unknown): string[] | null {
   return entries.every(Boolean) ? [...new Set(entries)] : null;
 }
 
+function parseTrackAccess(
+  value: unknown,
+):
+  | { valid: true; value: boolean }
+  | { valid: false; response: McpResponse } {
+  if (value === undefined) return { valid: true, value: true };
+  if (typeof value === "boolean") return { valid: true, value };
+  return {
+    valid: false,
+    response: {
+      status_code: 400,
+      body: { error: "trackAccess must be a boolean" },
+    },
+  };
+}
+
 function mcpToolResult(result: unknown, isError = false): McpResponse {
   return {
     status_code: 200,
@@ -69,19 +79,6 @@ export function registerMcpEndpoints(
   kv: StateKV,
   secret?: string,
 ): void {
-  function checkAuth(
-    req: ApiRequest,
-    sec: string | undefined,
-  ): McpResponse | null {
-    if (!sec) return null;
-    const auth =
-      req.headers?.["authorization"] || req.headers?.["Authorization"];
-    if (typeof auth !== "string" || !timingSafeCompare(auth, `Bearer ${sec}`)) {
-      return { status_code: 401, body: { error: "unauthorized" } };
-    }
-    return null;
-  }
-
   sdk.registerFunction("mcp::tools::list", 
     async (req: ApiRequest): Promise<McpResponse> => {
       const authErr = checkAuth(req, secret);
@@ -144,6 +141,8 @@ export function registerMcpEndpoints(
                 body: { error: "token_budget must be a positive integer" },
               };
             }
+            const trackAccess = parseTrackAccess(args.trackAccess);
+            if (!trackAccess.valid) return trackAccess.response;
             // #817: forward agentId so mem::search applies the same
             // isolation filter smart-search uses. Default behavior is
             // unchanged (no agentId → falls back to env AGENT_ID when
@@ -159,6 +158,7 @@ export function registerMcpEndpoints(
               token_budget: tokenBudget,
               agentId: recallAgentId,
               project,
+              trackAccess: trackAccess.value,
             } });
             const text =
               format === "narrative" &&
@@ -327,6 +327,8 @@ export function registerMcpEndpoints(
             }
             const expandIds = parseCsvList(args.expandIds).slice(0, 20);
             const limit = Math.max(1, Math.min(100, asNumber(args.limit, 10) ?? 10));
+            const trackAccess = parseTrackAccess(args.trackAccess);
+            if (!trackAccess.valid) return trackAccess.response;
             const result = await sdk.trigger({
               function_id: "mem::smart-search",
               payload: {
@@ -334,6 +336,7 @@ export function registerMcpEndpoints(
                 expandIds,
                 limit,
                 project,
+                trackAccess: trackAccess.value,
               },
             });
             return {
@@ -379,11 +382,14 @@ export function registerMcpEndpoints(
                 body: { error: "anchor is required for memory_timeline" },
               };
             }
+            const trackAccess = parseTrackAccess(args.trackAccess);
+            if (!trackAccess.valid) return trackAccess.response;
             const result = await sdk.trigger({ function_id: "mem::timeline", payload: {
               anchor: args.anchor,
               project: (args.project as string) || undefined,
               before: (args.before as number) || 5,
               after: (args.after as number) || 5,
+              trackAccess: trackAccess.value,
             } });
             return {
               status_code: 200,

@@ -37,6 +37,50 @@ describe("Verify Function", () => {
     expect(result.error).toBe("not found");
   });
 
+  it("bounds concurrent observation lookup across a large session set", async () => {
+    for (let index = 0; index < 121; index++) {
+      await kv.set("mem:sessions", `ses_${index}`, {
+        id: `ses_${index}`,
+        project: "/test/project",
+        cwd: "/test",
+        startedAt: "2026-03-01T00:00:00Z",
+        status: "completed",
+        observationCount: 0,
+      } satisfies Session);
+    }
+
+    const originalGet = kv.get.bind(kv);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let observationGets = 0;
+    const instrumentedKv = {
+      ...kv,
+      get: async <T>(scope: string, key: string): Promise<T | null> => {
+        if (!scope.startsWith("mem:obs:")) return originalGet<T>(scope, key);
+        observationGets++;
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        try {
+          return await originalGet<T>(scope, key);
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+    registerVerifyFunction(sdk as never, instrumentedKv as never);
+
+    const result = (await sdk.trigger("mem::verify", {
+      id: "obs_missing",
+      project: "/test/project",
+    })) as { success: boolean; error: string };
+
+    expect(result).toEqual({ success: false, error: "not found" });
+    expect(observationGets).toBe(121);
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(maxInFlight).toBeLessThanOrEqual(8);
+  });
+
   it("verifies a memory with citation chain", async () => {
     const session: Session = {
       id: "ses_1",

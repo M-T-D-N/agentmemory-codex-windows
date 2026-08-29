@@ -8,6 +8,7 @@ import { registerApiTriggers } from "../src/triggers/api.js";
 import { mockKV } from "./helpers/mocks.js";
 
 type Handler = (data: unknown) => Promise<unknown>;
+const readContext = vi.fn(async () => ({ context: "", blocks: 0, tokens: 0 }));
 
 function apiSdk() {
   const functions = new Map<string, Handler>();
@@ -41,7 +42,35 @@ describe("REST exact-project and provenance boundaries", () => {
   beforeEach(() => {
     sdk = apiSdk();
     kv = mockKV();
-    registerApiTriggers(sdk as never, kv as never);
+    readContext.mockClear();
+    registerApiTriggers(sdk as never, kv as never, readContext);
+  });
+
+  it("calls context directly for REST context and session start", async () => {
+    const context = (await sdk.trigger("api::context", {
+      body: { sessionId: "session-context", project: "project-a" },
+    })) as { status_code: number };
+    const start = (await sdk.trigger("api::session::start", {
+      body: {
+        sessionId: "session-start",
+        project: "project-a",
+        cwd: "/project-a",
+      },
+    })) as { status_code: number };
+
+    expect(context.status_code).toBe(200);
+    expect(start.status_code).toBe(200);
+    expect(readContext).toHaveBeenNthCalledWith(1, {
+      sessionId: "session-context",
+      project: "project-a",
+    });
+    expect(readContext).toHaveBeenNthCalledWith(2, {
+      sessionId: "session-start",
+      project: "project-a",
+    });
+    expect(sdk.downstream.map(({ functionId }) => functionId)).not.toContain(
+      "mem::context",
+    );
   });
 
   it.each([
@@ -111,7 +140,12 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(sdk.downstream).toEqual([]);
 
     const protectedSdk = apiSdk();
-    registerApiTriggers(protectedSdk as never, mockKV() as never, "test-secret");
+    registerApiTriggers(
+      protectedSdk as never,
+      mockKV() as never,
+      readContext,
+      "test-secret",
+    );
     const unauthorized = (await protectedSdk.trigger("api::graph-project-purge", {
       body: {
         project: "project-a",
@@ -343,7 +377,7 @@ describe("REST exact-project and provenance boundaries", () => {
     ]);
   });
 
-  it("excludes only the exact owned session and preserves lifecycle state", async () => {
+  it("does not let an internal prompt exclude a session that already has normal capture", async () => {
     await kv.set("mem:sessions", "session-excluded", {
       id: "session-excluded",
       project: "project-a",
@@ -372,14 +406,48 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(session).toMatchObject({
       status: "active",
       observationCount: 7,
-      captureExcluded: true,
     });
+    expect(session?.captureExcluded).toBeUndefined();
+    expect(auditRows).toEqual([]);
+    expect(response.body).toMatchObject({
+      captureExcluded: false,
+      preservedActiveSession: true,
+    });
+  });
+
+  it("excludes an exact owned session before any normal capture", async () => {
+    await kv.set("mem:sessions", "session-internal-only", {
+      id: "session-internal-only",
+      project: "project-a",
+      cwd: "/a",
+      startedAt: "2026-01-01T00:00:00Z",
+      status: "active",
+      observationCount: 0,
+    });
+
+    const response = (await sdk.trigger("api::session::exclude", {
+      body: {
+        sessionId: "session-internal-only",
+        project: "project-a",
+        cwd: "/a",
+        reason: `codex_internal_${"x".repeat(200)}`,
+      },
+    })) as { status_code: number; body: { success: boolean } };
+    const session = await kv.get<Record<string, unknown>>(
+      "mem:sessions",
+      "session-internal-only",
+    );
+    const auditRows = await kv.list<Record<string, unknown>>("mem:audit");
+
+    expect(response.status_code).toBe(200);
+    expect(response.body.success).toBe(true);
+    expect(session).toMatchObject({ captureExcluded: true });
     expect(String(session?.captureExclusionReason)).toHaveLength(128);
     expect(auditRows).toEqual([
       expect.objectContaining({
         operation: "session_exclude",
         functionId: "api::session::exclude",
-        targetIds: ["session-excluded"],
+        targetIds: ["session-internal-only"],
       }),
     ]);
   });
@@ -387,7 +455,12 @@ describe("REST exact-project and provenance boundaries", () => {
   it("rejects unauthenticated session exclusion when an API secret is configured", async () => {
     const protectedSdk = apiSdk();
     const protectedKv = mockKV();
-    registerApiTriggers(protectedSdk as never, protectedKv as never, "test-secret");
+    registerApiTriggers(
+      protectedSdk as never,
+      protectedKv as never,
+      readContext,
+      "test-secret",
+    );
     await protectedKv.set("mem:sessions", "session-protected", {
       id: "session-protected",
       project: "project-a",

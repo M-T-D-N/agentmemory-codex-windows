@@ -22,10 +22,7 @@ import {
   isExcludedCodexAmbientSession,
   sanitizeCodexAmbientObservation,
 } from "./observation-visibility.js";
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
+import { estimateTextTokens } from "../token-estimate.js";
 
 function escapeXmlAttr(s: string): string {
   return s
@@ -35,18 +32,27 @@ function escapeXmlAttr(s: string): string {
     .replace(/>/g, "&gt;");
 }
 
+export interface ContextRequest {
+  sessionId: string;
+  project: string;
+  budget?: number;
+  agentId?: string;
+}
+
+export interface ContextResult {
+  context: string;
+  blocks: number;
+  tokens: number;
+}
+
+export type ContextReader = (data: ContextRequest) => Promise<ContextResult>;
+
 export function registerContextFunction(
   sdk: ISdk,
   kv: StateKV,
   tokenBudget: number,
-): void {
-  sdk.registerFunction("mem::context", 
-    async (data: {
-      sessionId: string;
-      project: string;
-      budget?: number;
-      agentId?: string;
-    }) => {
+): ContextReader {
+  const readContext: ContextReader = async (data) => {
       const budget = data.budget || tokenBudget;
       const blocks: ContextBlock[] = [];
 
@@ -89,7 +95,7 @@ export function registerContextFunction(
         blocks.push({
           type: "memory",
           content: slotContent,
-          tokens: estimateTokens(slotContent),
+          tokens: estimateTextTokens(slotContent),
           recency: Date.now(),
         });
       }
@@ -124,7 +130,7 @@ export function registerContextFunction(
           blocks.push({
             type: "memory",
             content: profileContent,
-            tokens: estimateTokens(profileContent),
+            tokens: estimateTextTokens(profileContent),
             recency: new Date(profile.updatedAt).getTime(),
           });
         }
@@ -162,7 +168,7 @@ export function registerContextFunction(
         blocks.push({
           type: "memory",
           content: lessonsContent,
-          tokens: estimateTokens(lessonsContent),
+          tokens: estimateTextTokens(lessonsContent),
           recency: mostRecent,
           sourceIds: relevantLessons.map((l) => l.id),
         });
@@ -197,7 +203,7 @@ export function registerContextFunction(
           blocks.push({
             type: "summary",
             content,
-            tokens: estimateTokens(content),
+            tokens: estimateTextTokens(content),
             recency: new Date(summary.createdAt).getTime(),
           });
         } else {
@@ -234,7 +240,7 @@ export function registerContextFunction(
           blocks.push({
             type: "observation",
             content,
-            tokens: estimateTokens(content),
+            tokens: estimateTextTokens(content),
             recency: new Date(sessions[i].startedAt).getTime(),
             sourceIds: top.map((o) => o.id),
           });
@@ -248,7 +254,7 @@ export function registerContextFunction(
       const accessedIds: string[] = [];
       const header = `<agentmemory-context project="${escapeXmlAttr(data.project)}">`;
       const footer = `</agentmemory-context>`;
-      usedTokens += estimateTokens(header) + estimateTokens(footer);
+      usedTokens += estimateTextTokens(header) + estimateTextTokens(footer);
 
       for (const block of blocks) {
         if (usedTokens + block.tokens > budget) continue;
@@ -274,6 +280,7 @@ export function registerContextFunction(
         tokens: usedTokens,
       });
       return { context: result, blocks: selected.length, tokens: usedTokens };
-    },
-  );
+  };
+  sdk.registerFunction("mem::context", readContext);
+  return readContext;
 }

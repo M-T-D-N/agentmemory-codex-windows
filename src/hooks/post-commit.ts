@@ -3,24 +3,11 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { hookCwd } from "./_project.js";
+import { REST_URL, authHeaders, isSdkChildContext } from "./_runtime.js";
 
 const exec = promisify(execFile);
 
-function isSdkChildContext(payload: unknown): boolean {
-  if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { entrypoint?: unknown }).entrypoint === "sdk-ts";
-}
-
-const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
 const TIMEOUT_MS = 1500;
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-  return h;
-}
 
 async function git(args: string[], cwd: string): Promise<string | null> {
   try {

@@ -668,6 +668,17 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         });
       }
 
+      if (
+        strategy === "replace" ||
+        (importData.graphNodes?.length ?? 0) > 0 ||
+        (importData.graphEdges?.length ?? 0) > 0
+      ) {
+        // Canonical import rows are authoritative. Invalidate only the
+        // rebuildable query manifest; the next bounded graph read repairs the
+        // snapshot and shards together from the imported graph.
+        await kv.delete(KV.graphQueryManifest, "current");
+      }
+
       logger.info("Import complete", { strategy, ...stats });
       await recordAudit(kv, "import", "mem::import", [], {
         strategy,

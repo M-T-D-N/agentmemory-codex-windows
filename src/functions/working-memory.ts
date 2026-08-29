@@ -5,6 +5,7 @@ import { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { logger } from "../logger.js";
+import { estimateTextTokens } from "../token-estimate.js";
 
 const CORE_SCOPE = "mem:core-memory";
 
@@ -16,10 +17,6 @@ interface CoreMemoryEntry {
   accessCount: number;
   lastAccessedAt: string;
   createdAt: string;
-}
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
 }
 
 function scoreEntry(entry: CoreMemoryEntry, now: number): number {
@@ -90,7 +87,7 @@ export function registerWorkingMemoryFunctions(
         success: true,
         entries,
         totalTokens: entries.reduce(
-          (sum, e) => sum + estimateTokens(e.content),
+          (sum, e) => sum + estimateTextTokens(e.content),
           0,
         ),
       };
@@ -116,7 +113,7 @@ export function registerWorkingMemoryFunctions(
       const accessTimestamp = new Date().toISOString();
 
       for (const entry of [...pinned, ...unpinned]) {
-        const tokens = estimateTokens(entry.content);
+        const tokens = estimateTextTokens(entry.content);
         if (usedTokens + tokens > coreBudget && !entry.pinned) continue;
         coreLines.push(`- ${entry.content}`);
         usedTokens += tokens;
@@ -145,7 +142,7 @@ export function registerWorkingMemoryFunctions(
 
       const archivalIds: string[] = [];
       for (const mem of active) {
-        const tokens = estimateTokens(mem.content);
+        const tokens = estimateTextTokens(mem.content);
         if (usedTokens + tokens > budget) continue;
         archivalLines.push(`- [${mem.type}] ${mem.title}: ${mem.content}`);
         archivalIds.push(mem.id);
@@ -198,7 +195,7 @@ export function registerWorkingMemoryFunctions(
 
       const entries = await kv.list<CoreMemoryEntry>(CORE_SCOPE);
       let totalTokens = entries.reduce(
-        (sum, e) => sum + estimateTokens(e.content),
+        (sum, e) => sum + estimateTextTokens(e.content),
         0,
       );
 
@@ -215,7 +212,7 @@ export function registerWorkingMemoryFunctions(
       const pagedIds: string[] = [];
       for (const entry of unpinned) {
         if (totalTokens <= coreBudget) break;
-        const tokens = estimateTokens(entry.content);
+        const tokens = estimateTextTokens(entry.content);
 
         const archivalMemory: Memory = {
           id: generateId("mem"),

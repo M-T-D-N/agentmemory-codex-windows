@@ -8,7 +8,7 @@
     },
     {
       "name": "UserPromptSubmit",
-      "timeout_seconds": 4,
+      "timeout_seconds": 6,
       "additional_context_limit": 2400
     },
     {

@@ -387,8 +387,12 @@ export function registerMeshFunction(
           });
         }
       }
-      accepted += await lwwMergeGraphNodes(kv, data.graphNodes);
-      accepted += await lwwMergeGraphEdges(kv, data.graphEdges);
+      const graphNodesAccepted = await lwwMergeGraphNodes(kv, data.graphNodes);
+      const graphEdgesAccepted = await lwwMergeGraphEdges(kv, data.graphEdges);
+      accepted += graphNodesAccepted + graphEdgesAccepted;
+      if (graphNodesAccepted > 0 || graphEdgesAccepted > 0) {
+        await kv.delete(KV.graphQueryManifest, "current");
+      }
       await recordAudit(kv, "mesh_sync", "mem::mesh-receive", [], {
         action: "mesh.receive",
         accepted,
@@ -514,10 +518,18 @@ async function applySyncData(
     }
   }
   if (scopes.includes("graph:nodes")) {
-    applied += await lwwMergeGraphNodes(kv, data.graphNodes);
+    const graphNodesApplied = await lwwMergeGraphNodes(kv, data.graphNodes);
+    applied += graphNodesApplied;
+    if (graphNodesApplied > 0) {
+      await kv.delete(KV.graphQueryManifest, "current");
+    }
   }
   if (scopes.includes("graph:edges")) {
-    applied += await lwwMergeGraphEdges(kv, data.graphEdges);
+    const graphEdgesApplied = await lwwMergeGraphEdges(kv, data.graphEdges);
+    applied += graphEdgesApplied;
+    if (graphEdgesApplied > 0) {
+      await kv.delete(KV.graphQueryManifest, "current");
+    }
   }
 
   return applied;

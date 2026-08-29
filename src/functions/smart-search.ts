@@ -100,6 +100,7 @@ export function registerSmartSearchFunction(
       // #771: marks viewer-originated searches so the diagnostic
       // ignores them — only agent-initiated re-queries should count.
       source?: string;
+      trackAccess?: boolean;
     }) => {
       const requestedProject =
         typeof data.project === "string" && data.project.trim().length > 0
@@ -198,10 +199,12 @@ export function registerSmartSearchFunction(
             )
           : projectScoped;
 
-        void recordAccessBatch(
-          kv,
-          scoped.map((e) => e.observation.id),
-        );
+        if (data.trackAccess !== false) {
+          void recordAccessBatch(
+            kv,
+            scoped.map((e) => e.observation.id),
+          );
+        }
 
         const truncated = data.expandIds.length > raw.length;
         logger.info("Smart search expanded", {
@@ -278,10 +281,12 @@ export function registerSmartSearchFunction(
         timestamp: r.observation.timestamp,
       }));
 
-      void recordAccessBatch(
-        kv,
-        compact.map((r) => r.obsId),
-      );
+      if (data.trackAccess !== false) {
+        void recordAccessBatch(
+          kv,
+          compact.map((r) => r.obsId),
+        );
+      }
 
       // #771: followup-rate diagnostic. Only fires for agent-initiated
       // searches that carry a sessionId — viewer-originated searches

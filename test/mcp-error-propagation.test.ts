@@ -120,4 +120,48 @@ describe("MCP error propagation", () => {
     expect(result.body).toMatchObject({ isError: true });
     expect(result.body.content[0].text).toContain("exactly match");
   });
+
+  it("forwards trackAccess=false for all reinforcing retrieval tools", async () => {
+    const payloads = new Map<string, Record<string, unknown>>();
+    for (const functionId of [
+      "mem::search",
+      "mem::smart-search",
+      "mem::timeline",
+    ]) {
+      sdk.overrideTrigger(functionId, async (payload: Record<string, unknown>) => {
+        payloads.set(functionId, payload);
+        return { results: [], entries: [] };
+      });
+    }
+
+    const calls = [
+      ["memory_recall", { query: "needle", project: "project-a", trackAccess: false }],
+      ["memory_smart_search", { query: "needle", project: "project-a", trackAccess: false }],
+      ["memory_timeline", { anchor: "needle", project: "project-a", trackAccess: false }],
+    ] as const;
+    for (const [name, args] of calls) {
+      const response = await sdk.getFunction("mcp::tools::call")!(request(name, args));
+      expect(response.status_code).toBe(200);
+    }
+
+    expect(payloads.get("mem::search")?.trackAccess).toBe(false);
+    expect(payloads.get("mem::smart-search")?.trackAccess).toBe(false);
+    expect(payloads.get("mem::timeline")?.trackAccess).toBe(false);
+  });
+
+  it("rejects non-boolean trackAccess values", async () => {
+    const calls = [
+      ["memory_recall", { query: "needle", project: "project-a", trackAccess: "false" }],
+      ["memory_smart_search", { query: "needle", project: "project-a", trackAccess: 0 }],
+      ["memory_timeline", { anchor: "needle", project: "project-a", trackAccess: null }],
+    ] as const;
+
+    for (const [name, args] of calls) {
+      const response = await sdk.getFunction("mcp::tools::call")!(request(name, args));
+      expect(response).toEqual({
+        status_code: 400,
+        body: { error: "trackAccess must be a boolean" },
+      });
+    }
+  });
 });

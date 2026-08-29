@@ -1,21 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { resolveProject, hookCwd } from "./_project.js";
-
-function isSdkChildContext(payload: unknown): boolean {
-  if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { entrypoint?: unknown }).entrypoint === "sdk-ts";
-}
-
-const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-  return h;
-}
+import { REST_URL, authHeaders, isSdkChildContext } from "./_runtime.js";
 
 function extractTranscriptPrompts(data: Record<string, unknown>): string[] {
   const path = data.transcript_path;

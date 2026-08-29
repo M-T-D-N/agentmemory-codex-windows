@@ -207,6 +207,9 @@ export function registerSnapshotFunction(
           for (const node of state.graphNodes) {
             await kv.set(KV.graphNodes, node.id, node);
           }
+          if (state.graphNodes.length > 0) {
+            await kv.delete(KV.graphQueryManifest, "current");
+          }
         }
         if (state.observations) {
           for (const [sessionId, obs] of Object.entries(state.observations)) {

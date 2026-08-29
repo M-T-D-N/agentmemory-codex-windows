@@ -38,6 +38,12 @@ export const KV = {
   graphNameIndex: "mem:graph:name-index",
   graphEdgeKey: "mem:graph:edge-key",
   graphNodeDegree: "mem:graph:node-degree",
+  // Derived, rebuildable query index. Fixed-count shards avoid a full
+  // state::list over the canonical graph while keeping every shard below the
+  // iii response-frame / heartbeat risk that motivated #814.
+  graphQueryDocuments: "mem:graph:query-documents",
+  graphQueryAdjacency: "mem:graph:query-adjacency",
+  graphQueryManifest: "mem:graph:query-manifest",
   semantic: "mem:semantic",
   procedural: "mem:procedural",
   teamShared: (teamId: string) => `mem:team:${teamId}:shared`,

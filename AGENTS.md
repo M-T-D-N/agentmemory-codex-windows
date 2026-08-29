@@ -152,7 +152,7 @@ uses its own four-hook adapter and fail-closed local capture path documented in
 
 ## Testing
 
-- All tests must pass before PR: `pnpm test` (1,754 tests in the current preview baseline)
+- All tests must pass before PR: `pnpm test` (1,800 tests in the current preview baseline)
 - Mock pattern: `vi.mock("iii-sdk")` with mock `sdk.trigger`, `kv.get/set/list`
 - Test files go in `test/` with `.test.ts` extension
 - Follow existing patterns in `test/crystallize.test.ts` for function tests
@@ -164,4 +164,4 @@ uses its own four-hook adapter and fail-closed local capture path documented in
 - 6 MCP resources, 3 MCP prompts
 - 12 hooks, 17 skills
 - 260+ iii functions
-- 1,754 package tests plus the Windows/Codex adapter tests
+- 1,800 package tests plus the Windows/Codex adapter tests

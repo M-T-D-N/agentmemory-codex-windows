@@ -5,8 +5,6 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
-[![Windows용 Codex AgentMemory](../assets/social-preview.png)](../assets/social-preview.png)
-
 > [!IMPORTANT]
 > 이 저장소는 소스 전용 Technical Preview `0.1.0-preview.1`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
@@ -16,10 +14,6 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 
 개발 안내: 이 다운스트림은 AI가 생성하고 사용자가 시험했습니다. [전체
 고지](#ai-개발-고지)를 확인하세요.
-
-> **Windows에서 Codex로 평가하기**
->
-> 네이티브 Windows에서 이 저장소를 Codex로 열고 [`INSTALL_FOR_AGENTS.md`](../INSTALL_FOR_AGENTS.md)를 따르도록 요청하세요. 이 실행 안내서는 고정된 네이티브 입력과 소스 체크아웃을 검증하고, 기본적으로 설치 프로그램을 dry-run/검증 전용 모드로 유지하며, 실제 cutover를 위해 `-Execute`를 추가하기 전 명시적 승인을 요구합니다. 해시, 소유권, 경로, 매니페스트 또는 이전 설치 상태가 일치하지 않으면 중단하세요.
 
 ## 이 공개판이 제공하는 것
 
@@ -32,6 +26,9 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
   wildcard 쓰기는 허용하지 않습니다.
 - 선택적으로 인증정보가 없는 loopback 전용 로컬 Qwen을 typed graph 추출에만
   사용합니다. 다른 LLM 기능은 noop provider를 사용하고 외부 fallback은 꺼 둡니다.
+- 프로젝트·텍스트·페이지·제한 깊이 graph 조회는 재생성 가능한 shard index로
+  처리합니다. index가 dirty이거나 없으면 명시적인 제한 snapshot으로 저하하며,
+  정본 graph 전체를 조회하는 작업은 시작하지 않습니다.
 - 지원 프로필은 인증된 loopback MCP endpoint를 사용하며, stdio launcher는
   호환성 경로로만 패키징합니다.
 
@@ -39,13 +36,21 @@ upstream 호환 소스 surface에는 56 MCP tools, 6 resources, 3 prompts,
 port 3111의 133 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 지원 Windows 프로필은 위 네 개의 관리형 훅만 의도적으로 활성화합니다.
 
+### 비강화 조회
+
+`memory_recall`, `memory_smart_search`, `memory_timeline`은 기본적으로 조회된
+기억의 접근 기반 보존 신호를 강화합니다. 관리 점검, 평가, 보고서, 미리보기처럼
+그 신호를 바꾸지 않아야 하는 분석 조회에는 `trackAccess`를 `false`로 설정하세요.
+이 옵션은 프로젝트 범위, 에이전트 격리, 결과 제한, 기존 감사 동작을 우회하지
+않습니다.
+
 ## 버전 구분
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
 | 공개 다운스트림 버전 | `0.1.0-preview.1` | 저장소 공개판과 소스 tag |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
-| 검증 개정 | `r32` | 내부 빌드 provenance이며 공개 버전이 아님 |
+| 검증 개정 | `r58` | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
 
 정확한 upstream tag, commit, tree, 원본 package hash는

@@ -1,10 +1,5 @@
 #!/usr/bin/env node
-
-function isSdkChildContext(payload: unknown): boolean {
-  if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { entrypoint?: unknown }).entrypoint === "sdk-ts";
-}
+import { REST_URL, authHeaders, isSdkChildContext } from "./_runtime.js";
 
 // Pre-tool-use enrichment hook.
 //
@@ -21,15 +16,6 @@ function isSdkChildContext(payload: unknown): boolean {
 // and restart Claude Code. Expect your session input token count to grow
 // proportionally with the number of file-touching tool calls per turn.
 const INJECT_CONTEXT = process.env["AGENTMEMORY_INJECT_CONTEXT"] === "true";
-
-const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-  return h;
-}
 
 async function main() {
   // Default off: exit immediately so we don't even open stdin. This keeps
