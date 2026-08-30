@@ -43,6 +43,11 @@ Second public source preview.
   stubs. It restores only caller-supplied task metadata and observations with
   deterministic IDs and source-item provenance, rejects ambiguous or conflicting
   rows, and is safe to resume or repeat.
+- Added a separate exact-ID, dry-run-first migration for irrecoverable legacy
+  session-end stubs that contain no source observations or task identity. It
+  refuses the whole batch unless every candidate is the exact two-field shape
+  and has zero session, observation, summary, memory, lesson, commit, crystal,
+  and graph references; the official apply path is audited and idempotent.
 - Reopened semantic graph backlog work whenever a completed session receives a
   new observation. The existing cursor is preserved, so an abrupt shutdown
   before the matching session-end hook can no longer strand an unprocessed tail
@@ -59,7 +64,7 @@ Second public source preview.
 
 - Based on upstream AgentMemory v0.9.29 at commit 2d38daf.
 - Package, API, plugin, CLI, MCP, and export compatibility remain on 0.9.29.
-- Internal qualification revision r61 is provenance, not the public version.
+- Internal qualification revision r62 is provenance, not the public version.
 
 ### Preview limits
 

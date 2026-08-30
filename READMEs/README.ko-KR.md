@@ -44,13 +44,22 @@ port 3111의 133 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 이 옵션은 프로젝트 범위, 에이전트 격리, 결과 제한, 기존 감사 동작을 우회하지
 않습니다.
 
+### 오래된 빈 session-end stub
+
+내부 검증 개정 `r62`에는 `endedAt`과 `status: "completed"`만 남고 복구할
+세션·관찰 원본이 없는 오래된 stub을 위한 제한된 maintenance migration이
+포함됩니다. exact session ID만 받고 기본값은 dry-run이며, 행 모양이 다르거나
+session·observation·summary·memory·lesson·commit·crystal·graph 역참조가 하나라도
+있으면 배치 전체를 거부합니다. 적용은 공식 감사 경로를 사용하고 멱등적이며,
+일반 session 삭제나 state store 직접 수정을 허용하지 않습니다.
+
 ## 버전 구분
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
 | 공개 다운스트림 버전 | `0.1.0-preview.2` | 공개 저장소의 소스 프리뷰 버전 |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
-| 검증 개정 | `r61` | 내부 빌드 provenance이며 공개 버전이 아님 |
+| 검증 개정 | `r62` | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
 
 정확한 upstream tag, commit, tree, 원본 package hash는

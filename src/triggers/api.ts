@@ -1348,6 +1348,7 @@ export function registerApiTriggers(
         step?: string;
         dryRun?: boolean;
         candidates?: SessionStubRecoveryCandidate[];
+        sessionIds?: string[];
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1375,6 +1376,9 @@ export function registerApiTriggers(
           ...(req.body.dryRun !== undefined && { dryRun: req.body.dryRun }),
           ...(req.body.candidates !== undefined && {
             candidates: req.body.candidates,
+          }),
+          ...(req.body.sessionIds !== undefined && {
+            sessionIds: req.body.sessionIds,
           }),
         },
       });

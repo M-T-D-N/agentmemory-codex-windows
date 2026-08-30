@@ -66,7 +66,7 @@ identify:
 - product ID `agentmemory-codex-windows`;
 - downstream version `0.1.0-preview.2`;
 - AgentMemory compatibility version `0.9.29`; and
-- qualification revision `r61`.
+- qualification revision `r62`.
 
 The generated folder is a diagnostic candidate, not a signed public release.
 

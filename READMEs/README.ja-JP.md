@@ -48,7 +48,7 @@ portable hooks、17個の skills があります。サポート対象の Windows
 |---|---:|---|
 | 公開ダウンストリーム版 | `0.1.0-preview.2` | 公開リポジトリのソースプレビュー版 |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
-| 検証リビジョン | `r61` | 内部 build provenance。公開バージョン系列ではありません |
+| 検証リビジョン | `r62` | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
 
 正確なアップストリームの tag、commit、tree、元の package hash は

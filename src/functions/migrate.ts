@@ -14,6 +14,7 @@ import {
   recoverCodexSessionStubs,
   type SessionStubRecoveryCandidate,
 } from "./session-stub-recovery.js";
+import { purgeEmptySessionEndStubs } from "./session-stub-purge.js";
 
 const ALLOWED_DIRS = [resolve(homedir(), ".agentmemory")];
 
@@ -97,6 +98,7 @@ export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
       step?: string;
       dryRun?: boolean;
       candidates?: SessionStubRecoveryCandidate[];
+      sessionIds?: string[];
     }) => {
       // In-place KV migration steps (no SQLite dependency).
       if (data.step === "infer-memory-projects") {
@@ -122,6 +124,27 @@ export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
         return {
           success: result.invalid === 0 && result.conflicts === 0 && result.missing === 0,
           step: "repair-codex-session-stubs",
+          ...result,
+        };
+      }
+
+      if (data.step === "purge-empty-session-end-stubs") {
+        const dryRun = data.dryRun !== false;
+        if (!Array.isArray(data.sessionIds) || data.sessionIds.length === 0) {
+          return {
+            success: false,
+            error: "sessionIds are required for purge-empty-session-end-stubs",
+          };
+        }
+        logger.info("Migration step: purge-empty-session-end-stubs", {
+          dryRun,
+          sessionIds: data.sessionIds.length,
+        });
+        const result = await purgeEmptySessionEndStubs(kv, data.sessionIds, dryRun);
+        return {
+          success:
+            result.invalid === 0 && result.conflicts === 0 && result.referenced === 0,
+          step: "purge-empty-session-end-stubs",
           ...result,
         };
       }

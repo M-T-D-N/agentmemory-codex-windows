@@ -486,6 +486,27 @@ describe("REST exact-project and provenance boundaries", () => {
     });
   });
 
+  it("forwards exact session IDs for empty-stub purge", async () => {
+    const response = (await sdk.trigger("api::migrate", {
+      body: {
+        step: "purge-empty-session-end-stubs",
+        dryRun: true,
+        sessionIds: ["legacy-stub-a", "legacy-stub-b"],
+      },
+      headers: {},
+    })) as { status_code: number };
+
+    expect(response.status_code).toBe(200);
+    expect(sdk.downstream).toContainEqual({
+      functionId: "mem::migrate",
+      payload: {
+        step: "purge-empty-session-end-stubs",
+        dryRun: true,
+        sessionIds: ["legacy-stub-a", "legacy-stub-b"],
+      },
+    });
+  });
+
   it("excludes an exact owned session before any normal capture", async () => {
     await kv.set("mem:sessions", "session-internal-only", {
       id: "session-internal-only",

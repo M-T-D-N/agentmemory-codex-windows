@@ -9,7 +9,10 @@ vi.mock("../src/config.js", async (importOriginal) => {
   return { ...actual, isGraphExtractionEnabled: () => true };
 });
 
-import { registerGraphFunction } from "../src/functions/graph.js";
+import {
+  inspectGraphSessionReferences,
+  registerGraphFunction,
+} from "../src/functions/graph.js";
 import { registerRememberFunction } from "../src/functions/remember.js";
 import type {
   CompressedObservation,
@@ -189,6 +192,17 @@ describe("Graph Functions", () => {
       sourceObservationIds: ["obs_2"],
       sourceSessionIds: ["ses_1"],
     });
+    await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    await expect(
+      inspectGraphSessionReferences(kv as never, ["ses_1", "ses_missing"]),
+    ).resolves.toEqual([
+      {
+        sessionId: "ses_1",
+        nodeIds: expect.arrayContaining([expect.any(String), expect.any(String)]),
+        edgeIds: [expect.any(String)],
+      },
+      { sessionId: "ses_missing", nodeIds: [], edgeIds: [] },
+    ]);
     expect(await kv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
       .toMatchObject({
         semanticGraphThroughObservationId: "obs_2",

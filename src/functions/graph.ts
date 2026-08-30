@@ -205,6 +205,63 @@ async function readGraphQueryProvenanceCandidates(
   return { nodeIds: [...nodeIds].sort(), edgeIds: [...edgeIds].sort() };
 }
 
+export interface GraphSessionReferenceResult {
+  sessionId: string;
+  nodeIds: string[];
+  edgeIds: string[];
+}
+
+// Read-only, bounded provenance preflight for lifecycle migrations. A stale,
+// dirty, or provenance-free derived index is not evidence of absence, so fail
+// closed instead of enumerating the large canonical graph scopes.
+export async function inspectGraphSessionReferences(
+  kv: StateKV,
+  sessionIds: string[],
+): Promise<GraphSessionReferenceResult[]> {
+  const ids = [...new Set(sessionIds)];
+  if (ids.length === 0) return [];
+
+  const snapshot = await readSnapshot(kv);
+  if (!snapshot) {
+    throw new Error("graph session-reference preflight requires a current graph snapshot");
+  }
+  if (snapshot.dirty) {
+    throw new Error("graph session-reference preflight requires an idle, clean graph snapshot");
+  }
+  if (snapshot.stats.totalNodes === 0 && snapshot.stats.totalEdges === 0) {
+    return ids.map((sessionId) => ({ sessionId, nodeIds: [], edgeIds: [] }));
+  }
+  if (
+    !Number.isInteger(snapshot.stats.totalNodes) ||
+    !Number.isInteger(snapshot.stats.totalEdges) ||
+    snapshot.stats.totalNodes < 0 ||
+    snapshot.stats.totalEdges < 0 ||
+    (snapshot.stats.totalNodes === 0 && snapshot.stats.totalEdges > 0)
+  ) {
+    throw new Error("graph session-reference preflight found inconsistent graph statistics");
+  }
+  const indexed = await ensureGraphQueryIndex(kv, snapshot);
+  if (!indexed || indexed.manifest.provenanceVersion !== 1) {
+    throw new Error(
+      "exact graph provenance index is unavailable; rebuild it before purging session stubs",
+    );
+  }
+
+  const results: GraphSessionReferenceResult[] = [];
+  for (let start = 0; start < ids.length; start += GRAPH_QUERY_INDEX_IO_BATCH) {
+    const batch = ids.slice(start, start + GRAPH_QUERY_INDEX_IO_BATCH);
+    const references = await Promise.all(
+      batch.map((sessionId) =>
+        readGraphQueryProvenanceCandidates(kv, sessionId, [], true)
+      ),
+    );
+    batch.forEach((sessionId, index) => {
+      results.push({ sessionId, ...references[index]! });
+    });
+  }
+  return results;
+}
+
 async function buildGraphQueryIndex(
   kv: StateKV,
   nodes: GraphNode[],

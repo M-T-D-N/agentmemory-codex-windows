@@ -60,13 +60,23 @@ administrative inspection, evaluation, reporting, previews, or other
 analytical reads that should not change that signal. This option does not
 bypass project scoping, agent isolation, result limits, or existing auditing.
 
+### Legacy empty session-end stubs
+
+Internal qualification revision `r62` adds a narrow maintenance migration for
+legacy rows that contain exactly a valid `endedAt` and `status: "completed"`
+but no recoverable session or observation data. It accepts explicit session
+IDs only, defaults to dry-run, refuses the entire batch if any row differs or
+has a session, observation, summary, memory, lesson, commit, crystal, or graph
+reference, and is audited and idempotent when applied. It is not a general
+session deletion API and does not authorize direct state-store edits.
+
 ## Version identities
 
 | Identity | Value | Meaning |
 |---|---:|---|
 | Downstream release | `0.1.0-preview.2` | Public source-preview version |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
-| Qualification revision | `r61` | Internal build provenance, not a public version line |
+| Qualification revision | `r62` | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
 
 The exact upstream tag, commit, tree, and pristine package hash are recorded in

@@ -69,7 +69,7 @@ function validTimestamp(value: unknown): value is string {
   return validNonEmpty(value, 64) && Number.isFinite(Date.parse(value));
 }
 
-function isExactSessionEndStub(value: unknown): value is {
+export function isExactSessionEndStub(value: unknown): value is {
   endedAt: string;
   status: "completed";
 } {

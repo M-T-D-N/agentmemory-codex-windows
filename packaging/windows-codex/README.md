@@ -14,7 +14,7 @@ upstream AgentMemory TypeScript package. The adapter keeps iii-engine,
 AgentMemory's official state scopes, and the normal memory, lesson, graph,
 audit, and provenance lifecycles. It introduces no secondary database or queue.
 
-Internal qualification revision `r61` consolidates the supported behavior into
+Internal qualification revision `r62` consolidates the supported behavior into
 clearer boundaries without changing the upstream-compatible API or data model:
 
 - four managed Codex hooks capture normal main-task prompts and final responses
@@ -56,7 +56,12 @@ clearer boundaries without changing the upstream-compatible API or data model:
 - legacy two-field Codex session-end stubs can be repaired only through an
   exact-match, dry-run-first migration that preserves supplied task identity,
   observation provenance, and the original completion timestamp while rejecting
-  ambiguous or conflicting rows.
+  ambiguous or conflicting rows; and
+- irrecoverable exact two-field session-end stubs can be removed only through a
+  separate explicit-ID migration. It defaults to dry-run, requires zero
+  canonical and graph reverse references, rejects the whole batch on any
+  conflict, and applies through an audited, idempotent official API rather than
+  direct state-store mutation.
 
 The detailed failure lessons later in this guide explain why these constraints
 exist. They are operational history, not additional product surfaces.
@@ -97,7 +102,7 @@ The preview is intentionally narrow:
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
   downstream release version.
-- `r61` is internal qualification provenance, not a public version line.
+- `r62` is internal qualification provenance, not a public version line.
   Release revisions are path-safe build identifiers rather than a numeric-only
   version sequence, so a source identity suffix can be used without inventing a
   new public release.
