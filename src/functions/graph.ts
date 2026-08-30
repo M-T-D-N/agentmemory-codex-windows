@@ -66,7 +66,7 @@ import {
 // fan out faster than nodes.
 const MAX_GRAPH_PURGE_NODES = 500;
 const MAX_GRAPH_PURGE_EDGES = 1000;
-const GRAPH_WRITE_LOCK = "mem:graph-write";
+export const GRAPH_WRITE_LOCK = "mem:graph-write";
 
 // #814: the precomputed snapshot covers the top-degree subgraph used by
 // the empty-body / nodeType-only branch — the path the viewer hits on
@@ -137,6 +137,74 @@ async function runStateWrites(
   }
 }
 
+interface GraphQueryProvenanceEntry {
+  nodeIds: string[];
+  edgeIds: string[];
+}
+
+type GraphQueryProvenanceShard = Record<string, GraphQueryProvenanceEntry>;
+
+function graphQueryProvenanceShardKey(shard: number): string {
+  return `provenance-${queryIndexShardKey(shard)}`;
+}
+
+function graphQueryProvenanceKeys(
+  row: Pick<GraphNode | GraphEdge, "sourceObservationIds" | "sourceSessionIds">,
+): string[] {
+  return [
+    ...(row.sourceSessionIds ?? []).map((id) => `session:${id}`),
+    ...(row.sourceObservationIds ?? []).map((id) => `observation:${id}`),
+  ];
+}
+
+function addGraphQueryProvenance(
+  shards: GraphQueryProvenanceShard[],
+  kind: "nodeIds" | "edgeIds",
+  id: string,
+  row: Pick<GraphNode | GraphEdge, "sourceObservationIds" | "sourceSessionIds">,
+): void {
+  for (const sourceKey of new Set(graphQueryProvenanceKeys(row))) {
+    const shard = shards[queryIndexShardFor(sourceKey)]!;
+    const entry = shard[sourceKey] ?? { nodeIds: [], edgeIds: [] };
+    if (!entry[kind].includes(id)) entry[kind].push(id);
+    shard[sourceKey] = entry;
+  }
+}
+
+async function readGraphQueryProvenanceCandidates(
+  kv: StateKV,
+  sessionId: string,
+  observationIds: Iterable<string>,
+  includeSession: boolean,
+): Promise<{ nodeIds: string[]; edgeIds: string[] }> {
+  const sourceKeys = [
+    ...(includeSession ? [`session:${sessionId}`] : []),
+    ...[...new Set(observationIds)].map((id) => `observation:${id}`),
+  ];
+  const shardIds = [...new Set(sourceKeys.map((key) => queryIndexShardFor(key)))];
+  const shards = new Map<number, GraphQueryProvenanceShard>();
+  for (let start = 0; start < shardIds.length; start += GRAPH_QUERY_INDEX_IO_BATCH) {
+    const batch = shardIds.slice(start, start + GRAPH_QUERY_INDEX_IO_BATCH);
+    const values = await Promise.all(
+      batch.map((shard) =>
+        kv.get<GraphQueryProvenanceShard>(
+          KV.graphQueryDocuments,
+          graphQueryProvenanceShardKey(shard),
+        )
+      ),
+    );
+    batch.forEach((shard, index) => shards.set(shard, values[index] ?? {}));
+  }
+  const nodeIds = new Set<string>();
+  const edgeIds = new Set<string>();
+  for (const sourceKey of sourceKeys) {
+    const entry = shards.get(queryIndexShardFor(sourceKey))?.[sourceKey];
+    for (const id of entry?.nodeIds ?? []) nodeIds.add(id);
+    for (const id of entry?.edgeIds ?? []) edgeIds.add(id);
+  }
+  return { nodeIds: [...nodeIds].sort(), edgeIds: [...edgeIds].sort() };
+}
+
 async function buildGraphQueryIndex(
   kv: StateKV,
   nodes: GraphNode[],
@@ -159,8 +227,13 @@ async function buildGraphQueryIndex(
     { length: GRAPH_QUERY_INDEX_SHARDS },
     () => ({} as Record<string, GraphQueryEdgeRef[]>),
   );
+  const provenanceShards = Array.from(
+    { length: GRAPH_QUERY_INDEX_SHARDS },
+    () => ({} as GraphQueryProvenanceShard),
+  );
   for (const node of liveNodes) {
     documentShards[queryIndexShardFor(node.id)]!.push(graphQueryDocument(node));
+    addGraphQueryProvenance(provenanceShards, "nodeIds", node.id, node);
   }
   for (const edge of liveEdges) {
     const ref = graphQueryEdgeRef(edge);
@@ -168,6 +241,7 @@ async function buildGraphQueryIndex(
       const shard = adjacencyShards[queryIndexShardFor(nodeId)]!;
       (shard[nodeId] ??= []).push(ref);
     }
+    addGraphQueryProvenance(provenanceShards, "edgeIds", edge.id, edge);
   }
   const writes: Array<() => Promise<unknown>> = [];
   for (let shard = 0; shard < GRAPH_QUERY_INDEX_SHARDS; shard++) {
@@ -177,11 +251,19 @@ async function buildGraphQueryIndex(
     writes.push(
       () => kv.set(KV.graphQueryDocuments, key, documents),
       () => kv.set(KV.graphQueryAdjacency, key, adjacency),
+      () =>
+        kv.set(
+          KV.graphQueryDocuments,
+          graphQueryProvenanceShardKey(shard),
+          provenanceShards[shard]!,
+        ),
     );
   }
   await runStateWrites(writes);
   const manifest: GraphQueryIndexManifest = {
     version: GRAPH_QUERY_INDEX_VERSION,
+    revision: 1,
+    provenanceVersion: 1,
     shardCount: GRAPH_QUERY_INDEX_SHARDS,
     totalNodes: liveNodes.length,
     totalEdges: liveEdges.length,
@@ -400,6 +482,105 @@ async function buildSnapshotFromQueryIndexDelta(
   };
 }
 
+async function buildForgetSnapshotDelta(
+  kv: StateKV,
+  snapshot: GraphSnapshot,
+  changedNodes: GraphNode[],
+  changedEdges: GraphEdge[],
+  updatedAt: string,
+): Promise<{ snapshot: GraphSnapshot; degreeByNodeId: Map<string, number> }> {
+  const deletedNodes = changedNodes.filter((node) => node.stale);
+  const deletedEdges = changedEdges.filter((edge) => edge.stale);
+  const deletedNodeIds = new Set(deletedNodes.map((node) => node.id));
+  const deletedEdgeIds = new Set(deletedEdges.map((edge) => edge.id));
+  const changedNodesById = new Map(changedNodes.map((node) => [node.id, node]));
+  const changedEdgesById = new Map(changedEdges.map((edge) => [edge.id, edge]));
+  const degreeDecrements = new Map<string, number>();
+  for (const edge of deletedEdges) {
+    degreeDecrements.set(
+      edge.sourceNodeId,
+      (degreeDecrements.get(edge.sourceNodeId) ?? 0) + 1,
+    );
+    degreeDecrements.set(
+      edge.targetNodeId,
+      (degreeDecrements.get(edge.targetNodeId) ?? 0) + 1,
+    );
+  }
+  const affectedDegreeIds = new Set<string>([
+    ...changedNodes.map((node) => node.id),
+    ...changedEdges.flatMap((edge) => [edge.sourceNodeId, edge.targetNodeId]),
+  ]);
+  const degreeByNodeId = new Map<string, number>();
+  await Promise.all(
+    [...affectedDegreeIds].map(async (nodeId) => {
+      if (deletedNodeIds.has(nodeId)) {
+        degreeByNodeId.set(nodeId, 0);
+        return;
+      }
+      const stored = await kv.get<number>(KV.graphNodeDegree, nodeId);
+      const fallback = snapshot.topDegrees[nodeId] ?? 0;
+      degreeByNodeId.set(
+        nodeId,
+        Math.max(
+          0,
+          (typeof stored === "number" ? stored : fallback) -
+            (degreeDecrements.get(nodeId) ?? 0),
+        ),
+      );
+    }),
+  );
+
+  const topNodes = snapshot.topNodes
+    .map((node) => changedNodesById.get(node.id) ?? node)
+    .filter((node) => !node.stale && !deletedNodeIds.has(node.id));
+  const topDegrees = { ...snapshot.topDegrees };
+  for (const nodeId of deletedNodeIds) delete topDegrees[nodeId];
+  for (const [nodeId, degree] of degreeByNodeId) {
+    if (topNodes.some((node) => node.id === nodeId)) topDegrees[nodeId] = degree;
+  }
+  topNodes.sort(
+    (a, b) =>
+      (topDegrees[b.id] ?? 0) - (topDegrees[a.id] ?? 0) ||
+      a.id.localeCompare(b.id),
+  );
+  const topNodeIds = new Set(topNodes.map((node) => node.id));
+  const topEdges = snapshot.topEdges
+    .map((edge) => changedEdgesById.get(edge.id) ?? edge)
+    .filter(
+      (edge) =>
+        !edge.stale &&
+        !deletedEdgeIds.has(edge.id) &&
+        topNodeIds.has(edge.sourceNodeId) &&
+        topNodeIds.has(edge.targetNodeId),
+    );
+
+  const nodesByType = { ...snapshot.stats.nodesByType };
+  for (const node of deletedNodes) {
+    nodesByType[node.type] = Math.max(0, (nodesByType[node.type] ?? 0) - 1);
+  }
+  const edgesByType = { ...snapshot.stats.edgesByType };
+  for (const edge of deletedEdges) {
+    edgesByType[edge.type] = Math.max(0, (edgesByType[edge.type] ?? 0) - 1);
+  }
+  return {
+    snapshot: {
+      ...snapshot,
+      topNodes,
+      topEdges,
+      topDegrees,
+      stats: {
+        totalNodes: Math.max(0, snapshot.stats.totalNodes - deletedNodes.length),
+        totalEdges: Math.max(0, snapshot.stats.totalEdges - deletedEdges.length),
+        nodesByType,
+        edgesByType,
+      },
+      updatedAt,
+      dirty: false,
+    },
+    degreeByNodeId,
+  };
+}
+
 // #814 v2: the rebuild path won't terminate on corpora large enough
 // that kv.list returns a payload too big to JSON.parse without
 // starving the iii heartbeat. We don't actually know the corpus size
@@ -612,8 +793,8 @@ async function updateGraphQueryIndexDelta(
   changedNodes: GraphNode[],
   changedEdges: GraphEdge[],
   previousEdges: GraphEdge[] = [],
-): Promise<void> {
-  if (!priorManifest) return;
+): Promise<boolean> {
+  if (!priorManifest) return false;
   try {
     const documentShardIds = new Set(
       changedNodes.map((node) => queryIndexShardFor(node.id)),
@@ -630,11 +811,15 @@ async function updateGraphQueryIndexDelta(
         );
       }),
     );
+    const previousDocuments = new Map<string, GraphQueryIndexDocument>();
     for (const node of changedNodes) {
       const shardId = queryIndexShardFor(node.id);
       const shard = documentShards.get(shardId) ?? [];
       const existingIndex = shard.findIndex((entry) => entry.id === node.id);
-      if (existingIndex !== -1) shard.splice(existingIndex, 1);
+      if (existingIndex !== -1) {
+        previousDocuments.set(node.id, shard[existingIndex]!);
+        shard.splice(existingIndex, 1);
+      }
       if (isVisibleAfterReset(node, snapshot.resetAt)) {
         shard.push(graphQueryDocument(node));
       }
@@ -661,6 +846,17 @@ async function updateGraphQueryIndexDelta(
         );
       }),
     );
+    const previousEdgeRefs = new Map<string, GraphQueryEdgeRef>();
+    const changedEdgeIds = new Set(
+      [...previousEdges, ...changedEdges].map((edge) => edge.id),
+    );
+    for (const adjacency of adjacencyShards.values()) {
+      for (const refs of Object.values(adjacency)) {
+        for (const ref of refs) {
+          if (changedEdgeIds.has(ref.id)) previousEdgeRefs.set(ref.id, ref);
+        }
+      }
+    }
     const removeEdgeRef = (edge: GraphEdge): void => {
       for (const nodeId of new Set([edge.sourceNodeId, edge.targetNodeId])) {
         const shardId = queryIndexShardFor(nodeId);
@@ -684,6 +880,61 @@ async function updateGraphQueryIndexDelta(
       }
     }
 
+    const finalDocuments = changedNodes
+      .filter((node) => isVisibleAfterReset(node, snapshot.resetAt))
+      .map(graphQueryDocument);
+    const finalEdgeRefs = [...finalEdges.values()]
+      .filter((edge) => isVisibleAfterReset(edge, snapshot.resetAt))
+      .map(graphQueryEdgeRef);
+    const provenanceKeys = new Set<string>();
+    for (const row of [
+      ...previousDocuments.values(),
+      ...previousEdgeRefs.values(),
+      ...finalDocuments,
+      ...finalEdgeRefs,
+    ]) {
+      for (const key of graphQueryProvenanceKeys(row)) provenanceKeys.add(key);
+    }
+    const provenanceShardIds = new Set(
+      [...provenanceKeys].map((key) => queryIndexShardFor(key)),
+    );
+    const provenanceShards = new Map<number, GraphQueryProvenanceShard>();
+    await Promise.all(
+      [...provenanceShardIds].map(async (shard) => {
+        provenanceShards.set(
+          shard,
+          (await kv.get<GraphQueryProvenanceShard>(
+            KV.graphQueryDocuments,
+            graphQueryProvenanceShardKey(shard),
+          )) ?? {},
+        );
+      }),
+    );
+    const mutateProvenance = (
+      row: Pick<GraphNode | GraphEdge, "id" | "sourceObservationIds" | "sourceSessionIds">,
+      kind: "nodeIds" | "edgeIds",
+      add: boolean,
+    ): void => {
+      for (const sourceKey of new Set(graphQueryProvenanceKeys(row))) {
+        const shardId = queryIndexShardFor(sourceKey);
+        const shard = provenanceShards.get(shardId) ?? {};
+        const entry = shard[sourceKey] ?? { nodeIds: [], edgeIds: [] };
+        entry[kind] = add
+          ? [...new Set([...entry[kind], row.id])]
+          : entry[kind].filter((id) => id !== row.id);
+        if (entry.nodeIds.length === 0 && entry.edgeIds.length === 0) {
+          delete shard[sourceKey];
+        } else {
+          shard[sourceKey] = entry;
+        }
+        provenanceShards.set(shardId, shard);
+      }
+    };
+    for (const row of previousDocuments.values()) mutateProvenance(row, "nodeIds", false);
+    for (const row of previousEdgeRefs.values()) mutateProvenance(row, "edgeIds", false);
+    for (const row of finalDocuments) mutateProvenance(row, "nodeIds", true);
+    for (const row of finalEdgeRefs) mutateProvenance(row, "edgeIds", true);
+
     const writes: Array<() => Promise<unknown>> = [];
     for (const [shard, documents] of documentShards) {
       writes.push(() =>
@@ -695,9 +946,20 @@ async function updateGraphQueryIndexDelta(
         kv.set(KV.graphQueryAdjacency, queryIndexShardKey(shard), adjacency),
       );
     }
+    for (const [shard, provenance] of provenanceShards) {
+      writes.push(() =>
+        kv.set(
+          KV.graphQueryDocuments,
+          graphQueryProvenanceShardKey(shard),
+          provenance,
+        ),
+      );
+    }
     await runStateWrites(writes);
     await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, {
       version: GRAPH_QUERY_INDEX_VERSION,
+      revision: (priorManifest.revision ?? 0) + 1,
+      ...(priorManifest.provenanceVersion === 1 ? { provenanceVersion: 1 as const } : {}),
       shardCount: GRAPH_QUERY_INDEX_SHARDS,
       totalNodes: snapshot.stats.totalNodes,
       totalEdges: snapshot.stats.totalEdges,
@@ -705,6 +967,7 @@ async function updateGraphQueryIndexDelta(
       dirty: false,
       ...(snapshot.resetAt ? { resetAt: snapshot.resetAt } : {}),
     } satisfies GraphQueryIndexManifest);
+    return true;
   } catch (error) {
     logger.warn("Graph query index delta failed; next safe read will rebuild it", {
       error: error instanceof Error ? error.message : String(error),
@@ -718,6 +981,7 @@ async function updateGraphQueryIndexDelta(
       // Canonical graph writes remain authoritative. The missing / stale
       // derived manifest makes indexed reads fail closed into rebuild/fallback.
     }
+    return false;
   }
 }
 
@@ -811,6 +1075,353 @@ async function deleteIndexIfOwned(
   if ((await kv.get<string>(scope, key)) === expectedId) {
     await kv.delete(scope, key);
   }
+}
+
+export interface GraphForgetProvenanceInput {
+  project: string;
+  sessionId: string;
+  forgottenObservationIds: string[];
+  sessionObservationIds: string[];
+}
+
+export interface GraphForgetProvenanceResult {
+  graphNodesDetached: number;
+  graphNodesDeleted: number;
+  graphEdgesDetached: number;
+  graphEdgesDeleted: number;
+  graphNodeIds: string[];
+  graphEdgeIds: string[];
+}
+
+const EMPTY_GRAPH_FORGET_RESULT: GraphForgetProvenanceResult = {
+  graphNodesDetached: 0,
+  graphNodesDeleted: 0,
+  graphEdgesDetached: 0,
+  graphEdgesDeleted: 0,
+  graphNodeIds: [],
+  graphEdgeIds: [],
+};
+
+function exactStringSetEqual(a: string[], b: string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function hasForgottenGraphSource(
+  sourceObservationIds: string[],
+  sourceSessionIds: string[],
+  sessionId: string,
+  forgottenObservationIds: Set<string>,
+): boolean {
+  return sourceSessionIds.includes(sessionId) ||
+    sourceObservationIds.some((id) => forgottenObservationIds.has(id));
+}
+
+function detachExactGraphSource<T extends GraphNode | GraphEdge>(
+  row: T,
+  sessionId: string,
+  forgottenObservationIds: Set<string>,
+  sessionObservationIds: Set<string>,
+  updatedAt: string,
+): { changed: boolean; next: T; provenanceEmpty: boolean } {
+  const sourceObservationIds = [...new Set(row.sourceObservationIds ?? [])];
+  const sourceSessionIds = [...new Set(row.sourceSessionIds ?? [])];
+  const forgottenOnRow = sourceObservationIds.filter((id) =>
+    forgottenObservationIds.has(id)
+  );
+  const carriesSession = sourceSessionIds.includes(sessionId);
+  const carriesKnownSessionObservation = sourceObservationIds.some((id) =>
+    sessionObservationIds.has(id)
+  );
+  if (forgottenOnRow.length > 0 && !carriesSession) {
+    throw new Error(
+      `graph provenance mismatch: ${row.id} carries a forgotten observation without session ${sessionId}`,
+    );
+  }
+  if (
+    carriesSession &&
+    sourceObservationIds.length > 0 &&
+    !carriesKnownSessionObservation
+  ) {
+    throw new Error(
+      `graph provenance mismatch: ${row.id} carries session ${sessionId} without an exact source observation`,
+    );
+  }
+  const remainingObservationIds = sourceObservationIds.filter(
+    (id) => !forgottenObservationIds.has(id),
+  );
+  const keepsSession = remainingObservationIds.some((id) =>
+    sessionObservationIds.has(id)
+  );
+  const remainingSessionIds = sourceSessionIds.filter(
+    (id) => id !== sessionId || keepsSession,
+  );
+  const changed =
+    !exactStringSetEqual(sourceObservationIds, remainingObservationIds) ||
+    !exactStringSetEqual(sourceSessionIds, remainingSessionIds);
+  const next = {
+    ...row,
+    sourceObservationIds: remainingObservationIds,
+    sourceSessionIds: remainingSessionIds,
+    ...(changed ? { updatedAt } : {}),
+  } as T;
+  return {
+    changed,
+    next,
+    provenanceEmpty:
+      remainingObservationIds.length === 0 && remainingSessionIds.length === 0,
+  };
+}
+
+// Caller must hold GRAPH_WRITE_LOCK and the exact session lifecycle lock, in
+// that order. The derived index bounds candidate discovery; every candidate is
+// hydrated and revalidated against canonical rows before the first mutation.
+export async function detachForgottenGraphProvenance(
+  kv: StateKV,
+  input: GraphForgetProvenanceInput,
+): Promise<GraphForgetProvenanceResult> {
+  const project = typeof input.project === "string" ? input.project.trim() : "";
+  const sessionId = input.sessionId.trim();
+  const forgottenObservationIds = new Set(input.forgottenObservationIds);
+  const sessionObservationIds = new Set(input.sessionObservationIds);
+  if (!project || project === "*" || !sessionId) {
+    throw new Error("exact project and sessionId are required for graph provenance detach");
+  }
+  if (
+    [...forgottenObservationIds].some((id) => !sessionObservationIds.has(id))
+  ) {
+    throw new Error("forgotten observations must belong to the exact session preflight set");
+  }
+
+  const snapshot = await readSnapshot(kv);
+  if (!snapshot) {
+    const manifest = await readGraphQueryIndexManifest(kv);
+    if (!manifest) return { ...EMPTY_GRAPH_FORGET_RESULT };
+    throw new Error("graph provenance detach requires a current graph snapshot");
+  }
+  if (snapshot.stats.totalNodes === 0) return { ...EMPTY_GRAPH_FORGET_RESULT };
+  if (snapshot.dirty) {
+    throw new Error("graph provenance detach requires an idle, clean graph snapshot");
+  }
+  let indexed = await ensureGraphQueryIndex(kv, snapshot);
+  if (
+    !indexed &&
+    snapshot.topNodes.length === snapshot.stats.totalNodes &&
+    snapshot.topEdges.length === snapshot.stats.totalEdges &&
+    snapshot.stats.totalNodes <= MAX_GRAPH_PURGE_NODES &&
+    snapshot.stats.totalEdges <= MAX_GRAPH_PURGE_EDGES
+  ) {
+    await buildGraphQueryIndex(kv, snapshot.topNodes, snapshot.topEdges, snapshot);
+    indexed = await ensureGraphQueryIndex(kv, snapshot);
+  }
+  if (!indexed || indexed.manifest.provenanceVersion !== 1) {
+    throw new Error(
+      "exact graph provenance index is unavailable; rebuild it before forgetting graph-backed observations",
+    );
+  }
+
+  const fullSessionForget = exactStringSetEqual(
+    [...forgottenObservationIds],
+    [...sessionObservationIds],
+  );
+  const candidates = await readGraphQueryProvenanceCandidates(
+    kv,
+    sessionId,
+    forgottenObservationIds,
+    fullSessionForget,
+  );
+  const nodes = await hydrateGraphNodes(kv, candidates.nodeIds, snapshot.resetAt);
+  const edges = await hydrateGraphEdges(kv, candidates.edgeIds, snapshot.resetAt);
+  if (nodes.length !== candidates.nodeIds.length || edges.length !== candidates.edgeIds.length) {
+    throw new Error("graph changed after provenance preflight; retry exact forget");
+  }
+  for (const node of nodes) {
+    if (
+      graphNodeProject(node) !== project ||
+      !hasForgottenGraphSource(
+        node.sourceObservationIds ?? [],
+        node.sourceSessionIds ?? [],
+        sessionId,
+        forgottenObservationIds,
+      )
+    ) {
+      throw new Error(`graph node changed after provenance preflight: ${node.id}`);
+    }
+  }
+  for (const edge of edges) {
+    if (
+      edge.project !== project ||
+      !hasForgottenGraphSource(
+        edge.sourceObservationIds ?? [],
+        edge.sourceSessionIds ?? [],
+        sessionId,
+        forgottenObservationIds,
+      )
+    ) {
+      throw new Error(`graph edge changed after provenance preflight: ${edge.id}`);
+    }
+  }
+  const { refs: incidentRefs } = await readGraphQueryEdgeRefs(
+    kv,
+    candidates.nodeIds,
+  );
+  const liveRefs = incidentRefs.filter((ref) =>
+    isVisibleAfterReset(ref, snapshot.resetAt)
+  );
+
+  const updatedAt = new Date().toISOString();
+  const edgePlans = edges.map((edge) => {
+    const detached = detachExactGraphSource(
+      edge,
+      sessionId,
+      forgottenObservationIds,
+      sessionObservationIds,
+      updatedAt,
+    );
+    return { original: edge, ...detached, delete: detached.provenanceEmpty };
+  }).filter((plan) => plan.changed);
+  const deletedEdgeIds = new Set(
+    edgePlans.filter((plan) => plan.delete).map((plan) => plan.original.id),
+  );
+  const remainingIncidentRefs = liveRefs.filter((ref) => !deletedEdgeIds.has(ref.id));
+  const nodePlans = nodes.map((node) => {
+    const detached = detachExactGraphSource(
+      node,
+      sessionId,
+      forgottenObservationIds,
+      sessionObservationIds,
+      updatedAt,
+    );
+    const protectedByIncidentEdge = detached.provenanceEmpty &&
+      remainingIncidentRefs.some(
+        (ref) => ref.sourceNodeId === node.id || ref.targetNodeId === node.id,
+      );
+    if (protectedByIncidentEdge) {
+      throw new Error(
+        `graph node ${node.id} would lose all provenance while a referenced edge remains`,
+      );
+    }
+    return { original: node, ...detached, delete: detached.provenanceEmpty };
+  }).filter((plan) => plan.changed);
+
+  const priorManifest = await prepareGraphQueryIndexUpdate(kv, snapshot);
+  if (!priorManifest || priorManifest.provenanceVersion !== 1) {
+    throw new Error("graph changed after provenance preflight; retry exact forget");
+  }
+  await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, { ...snapshot, dirty: true });
+
+  const previousEdges = edgePlans.map((plan) => plan.original);
+  const changedEdges = edgePlans.map((plan) =>
+    plan.delete ? { ...plan.next, stale: true } : plan.next
+  );
+  const changedNodes = nodePlans.map((plan) =>
+    plan.delete ? { ...plan.next, stale: true } : plan.next
+  );
+  for (const plan of edgePlans) {
+    if (plan.delete) {
+      await kv.delete(KV.graphEdges, plan.original.id);
+      await kv.delete(KV.graphEdgeHistory, plan.original.id);
+      await deleteIndexIfOwned(
+        kv,
+        KV.graphEdgeKey,
+        edgeIndexKey(
+          plan.original.sourceNodeId,
+          plan.original.targetNodeId,
+          plan.original.type,
+        ),
+        plan.original.id,
+      );
+    } else {
+      await kv.set(KV.graphEdges, plan.original.id, plan.next);
+      const history = await kv.get<GraphEdge>(KV.graphEdgeHistory, plan.original.id);
+      if (history) {
+        const detachedHistory = detachExactGraphSource(
+          history,
+          sessionId,
+          forgottenObservationIds,
+          sessionObservationIds,
+          updatedAt,
+        );
+        if (detachedHistory.provenanceEmpty) {
+          await kv.delete(KV.graphEdgeHistory, plan.original.id);
+        } else if (detachedHistory.changed) {
+          await kv.set(KV.graphEdgeHistory, plan.original.id, detachedHistory.next);
+        }
+      }
+    }
+  }
+  const deletedNodeIds = new Set<string>();
+  for (const plan of nodePlans) {
+    if (plan.delete) {
+      deletedNodeIds.add(plan.original.id);
+      await kv.delete(KV.graphNodes, plan.original.id);
+      await kv.delete(KV.graphNodeDegree, plan.original.id);
+      await deleteIndexIfOwned(
+        kv,
+        KV.graphNameIndex,
+        scopedNameIndexKey(project, plan.original.type, plan.original.name),
+        plan.original.id,
+      );
+      await deleteIndexIfOwned(
+        kv,
+        KV.graphNameIndex,
+        legacyScopedNameIndexKey(project, plan.original.type, plan.original.name),
+        plan.original.id,
+      );
+      await deleteIndexIfOwned(
+        kv,
+        KV.graphNameIndex,
+        nameIndexKey(plan.original.type, plan.original.name),
+        plan.original.id,
+      );
+    } else {
+      await kv.set(KV.graphNodes, plan.original.id, plan.next);
+    }
+  }
+
+  const rebuilt = await buildForgetSnapshotDelta(
+    kv,
+    snapshot,
+    changedNodes,
+    changedEdges,
+    updatedAt,
+  );
+  await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, rebuilt.snapshot);
+  const queryIndexUpdated = await updateGraphQueryIndexDelta(
+    kv,
+    priorManifest,
+    rebuilt.snapshot,
+    changedNodes,
+    changedEdges,
+    previousEdges,
+  );
+  if (!queryIndexUpdated) {
+    throw new Error(
+      "graph provenance changed but the derived query index could not be committed; source records were preserved",
+    );
+  }
+  const affectedDegreeIds = new Set<string>([
+    ...nodePlans.map((plan) => plan.original.id),
+    ...edgePlans.flatMap((plan) => [
+      plan.original.sourceNodeId,
+      plan.original.targetNodeId,
+    ]),
+  ]);
+  for (const nodeId of affectedDegreeIds) {
+    if (!deletedNodeIds.has(nodeId)) {
+      await kv.set(KV.graphNodeDegree, nodeId, rebuilt.degreeByNodeId.get(nodeId) ?? 0);
+    }
+  }
+
+  return {
+    graphNodesDetached: nodePlans.filter((plan) => !plan.delete).length,
+    graphNodesDeleted: nodePlans.filter((plan) => plan.delete).length,
+    graphEdgesDetached: edgePlans.filter((plan) => !plan.delete).length,
+    graphEdgesDeleted: edgePlans.filter((plan) => plan.delete).length,
+    graphNodeIds: nodePlans.map((plan) => plan.original.id).sort(),
+    graphEdgeIds: edgePlans.map((plan) => plan.original.id).sort(),
+  };
 }
 
 async function purgeProjectGraph(
@@ -2102,7 +2713,13 @@ export function registerGraphFunction(
       // REBUILD_SAFE_NODE_CEILING) or mem::graph-reset to wipe and
       // rebuild incrementally from new observations.
       const noWalk =
-        !data.query && !data.queries && !data.startNodeId && !project && requestedProject !== "*";
+        !data.query &&
+        !data.queries &&
+        !data.startNodeId &&
+        !project &&
+        requestedProject !== "*" &&
+        data.edgeLimit === undefined &&
+        data.edgeOffset === undefined;
       if (noWalk) {
         if (snapshot && snapshot.stats.totalNodes > 0) {
           return paginateFromSnapshot(snapshot, data.nodeType, limit, offset);
@@ -2133,6 +2750,7 @@ export function registerGraphFunction(
               kv,
               data,
               indexed.snapshot,
+              indexed.manifest,
               project,
               maxDepth,
               limit,
@@ -2418,8 +3036,19 @@ export function registerGraphFunction(
         resetAt: new Date().toISOString(),
       };
       await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, resetSnapshot);
+      await runStateWrites(
+        Array.from({ length: GRAPH_QUERY_INDEX_SHARDS }, (_, shard) => () =>
+          kv.set(
+            KV.graphQueryDocuments,
+            graphQueryProvenanceShardKey(shard),
+            {} satisfies GraphQueryProvenanceShard,
+          )
+        ),
+      );
       await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, {
         version: GRAPH_QUERY_INDEX_VERSION,
+        revision: 1,
+        provenanceVersion: 1,
         shardCount: GRAPH_QUERY_INDEX_SHARDS,
         totalNodes: 0,
         totalEdges: 0,

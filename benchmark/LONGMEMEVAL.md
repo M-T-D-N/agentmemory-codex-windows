@@ -2,7 +2,7 @@
 
 > [!CAUTION]
 > Upstream reference only. This material predates the Windows/Codex downstream,
-> has not been rerun as qualification for `0.1.0-preview.1`, and is not a
+> has not been rerun as qualification for `0.1.0-preview.2`, and is not a
 > downstream performance claim.
 
 [LongMemEval](https://arxiv.org/abs/2410.10813) (ICLR 2025) is an academic benchmark for evaluating long-term memory in chat assistants. It tests 5 core abilities: information extraction, multi-session reasoning, temporal reasoning, knowledge updates, and abstention.

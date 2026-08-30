@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -59,6 +59,9 @@ function mockSdk() {
 describe("observe implicit session create (#638)", () => {
   beforeEach(() => {
     vi.resetModules();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("creates the session on first observe when project+cwd present and session record missing", async () => {
@@ -142,6 +145,45 @@ describe("observe implicit session create (#638)", () => {
     expect(session.firstPrompt).toBe("original first prompt");
     expect(session.observationCount).toBe(7);
     expect(kv.store.get("mem:obs:ses_existing")).toBeUndefined();
+  });
+
+  it("reopens graph backlog when a completed session receives a new tail", async () => {
+    vi.stubEnv("GRAPH_EXTRACTION_ENABLED", "true");
+    vi.resetModules();
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never);
+
+    await kv.set("mem:sessions", "ses_completed_tail", {
+      id: "ses_completed_tail",
+      project: "/project/a",
+      cwd: "/project/a",
+      startedAt: "2026-01-01T00:00:00Z",
+      endedAt: "2026-01-01T01:00:00Z",
+      status: "completed",
+      observationCount: 1,
+      semanticGraphStatus: "complete",
+      semanticGraphThroughObservationId: "obs_existing",
+    });
+
+    const result = await sdk.trigger("mem::observe", {
+      sessionId: "ses_completed_tail",
+      project: "/project/a",
+      cwd: "/project/a",
+      hookType: "prompt_submit",
+      timestamp: "2026-01-01T02:00:00Z",
+      data: { prompt: "tail captured before an abrupt shutdown" },
+    });
+
+    expect(result).toHaveProperty("observationId");
+    const session = kv.store.get("mem:sessions")!.get("ses_completed_tail") as Record<string, unknown>;
+    expect(session).toMatchObject({
+      status: "completed",
+      observationCount: 2,
+      semanticGraphStatus: "pending",
+      semanticGraphThroughObservationId: "obs_existing",
+    });
   });
 
   it("reactivates an excluded ambient session on its first normal prompt", async () => {

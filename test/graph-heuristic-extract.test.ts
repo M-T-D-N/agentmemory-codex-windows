@@ -98,8 +98,8 @@ describe("keyless graph extraction wiring", () => {
     const fire = stopped.indexOf('fireVoid("mem::graph-extract"');
     expect(fire).toBeGreaterThan(-1);
     expect(stopped).toContain("let selected = compressed");
-    expect(stopped).toContain("project: session.project");
-    expect(stopped).toContain("sessionId: session.id");
+    expect(stopped).toContain("project: graphDispatch.session.project");
+    expect(stopped).toContain("sessionId: graphDispatch.session.id");
   });
 
   it("graph functions register unconditionally so the trigger always resolves", () => {

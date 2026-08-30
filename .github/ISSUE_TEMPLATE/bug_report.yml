@@ -12,7 +12,7 @@ body:
     id: downstream-version
     attributes:
       label: Downstream version
-      placeholder: 0.1.0-preview.1
+      placeholder: 0.1.0-preview.2
     validations:
       required: true
   - type: input

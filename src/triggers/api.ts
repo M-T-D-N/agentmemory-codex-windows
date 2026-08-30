@@ -1,7 +1,12 @@
 import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
 import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary } from "../types.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { prepareSessionStart } from "../functions/session-lifecycle.js";
+import {
+  completeExistingSession,
+  prepareSessionStart,
+  sessionLifecycleLockKey,
+} from "../functions/session-lifecycle.js";
+import type { SessionStubRecoveryCandidate } from "../functions/session-stub-recovery.js";
 import type { ContextReader } from "../functions/context.js";
 import { safeAudit } from "../functions/audit.js";
 import type { ObservationSourceInput } from "../functions/provenance.js";
@@ -617,7 +622,7 @@ export function registerApiTriggers(
           ? body.agentId.trim().slice(0, 128)
           : undefined;
       const agentId = requestAgentId ?? getAgentId();
-      const start = await withKeyedLock(`session:${sessionId}`, async () => {
+      const start = await withKeyedLock(sessionLifecycleLockKey(sessionId), async () => {
         const existing = await kv.get<Session>(KV.sessions, sessionId);
         const prepared = prepareSessionStart(existing, {
           sessionId,
@@ -678,7 +683,7 @@ export function registerApiTriggers(
         };
       }
 
-      const result = await withKeyedLock(`obs:${sessionId}`, async () => {
+      const result = await withKeyedLock(sessionLifecycleLockKey(sessionId), async () => {
         const existing = await kv.get<Session>(KV.sessions, sessionId);
         if (!existing) {
           return { status_code: 404, body: { error: "session not found" } };
@@ -764,10 +769,13 @@ export function registerApiTriggers(
           body: { error: "sessionId is required and must be a non-empty string" },
         };
       }
-      await kv.update(KV.sessions, sessionId, [
-        { type: "set", path: "endedAt", value: new Date().toISOString() },
-        { type: "set", path: "status", value: "completed" },
-      ]);
+      const completed = await completeExistingSession(kv, sessionId);
+      if (!completed.success) {
+        return {
+          status_code: completed.error === "session_not_found" ? 404 : 409,
+          body: completed,
+        };
+      }
       // Fan out session-stopped lifecycle (non-blocking).
       try {
         sdk.trigger({
@@ -860,7 +868,7 @@ export function registerApiTriggers(
       });
 
       if (sessionId) {
-        await withKeyedLock(`session:${sessionId}`, async () => {
+        await withKeyedLock(sessionLifecycleLockKey(sessionId), async () => {
           const session = await kv.get<Session>(KV.sessions, sessionId);
           if (!session) return;
           const shaSet = new Set<string>(session.commitShas ?? []);
@@ -1335,7 +1343,12 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::migrate",
     async (
-      req: ApiRequest<{ dbPath?: string; step?: string; dryRun?: boolean }>,
+      req: ApiRequest<{
+        dbPath?: string;
+        step?: string;
+        dryRun?: boolean;
+        candidates?: SessionStubRecoveryCandidate[];
+      }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
@@ -1349,12 +1362,20 @@ export function registerApiTriggers(
           body: { error: "Either step (string) or dbPath (string) is required" },
         };
       }
+      const oversized = checkPayloadFrameSize(
+        req.body,
+        "reduce the number or size of migration candidates",
+      );
+      if (oversized) return { status_code: 413, body: oversized };
       const result = await sdk.trigger({
         function_id: "mem::migrate",
         payload: {
           ...(req.body.step !== undefined && { step: req.body.step }),
           ...(req.body.dbPath !== undefined && { dbPath: req.body.dbPath }),
           ...(req.body.dryRun !== undefined && { dryRun: req.body.dryRun }),
+          ...(req.body.candidates !== undefined && {
+            candidates: req.body.candidates,
+          }),
         },
       });
       return { status_code: 200, body: result };
@@ -1695,6 +1716,8 @@ export function registerApiTriggers(
         project?: string;
         limit?: number;
         offset?: number;
+        edgeLimit?: number;
+        edgeOffset?: number;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1729,6 +1752,8 @@ export function registerApiTriggers(
         project,
         limit: req.body?.limit,
         offset: req.body?.offset,
+        edgeLimit: req.body?.edgeLimit,
+        edgeOffset: req.body?.edgeOffset,
       };
       try {
         const result = await sdk.trigger({ function_id: "mem::graph-query", payload });

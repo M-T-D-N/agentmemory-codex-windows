@@ -2,7 +2,7 @@
 
 > [!CAUTION]
 > Upstream reference only. This material predates the Windows/Codex downstream,
-> has not been rerun as qualification for `0.1.0-preview.1`, and is not a
+> has not been rerun as qualification for `0.1.0-preview.2`, and is not a
 > downstream performance claim.
 
 **Date:** 2026-03-18T07:45:03.529Z

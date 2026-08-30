@@ -490,6 +490,18 @@ export interface EdgeContext {
 export interface GraphQueryResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  // Optional independent edge page for exact inventory. `edges` remains the
+  // viewer-safe page-local set whose endpoints are both present in `nodes`.
+  // Callers opt in with edgeLimit / edgeOffset and paginate this field against
+  // totalEdges without changing the existing viewer contract.
+  edgeInventory?: GraphEdge[];
+  edgeLimit?: number;
+  edgeOffset?: number;
+  edgeTruncated?: boolean;
+  edgeInventoryExact?: boolean;
+  // All pages in one exact inventory must report the same revision. A
+  // revision change means a writer committed between page requests.
+  edgeInventoryRevision?: string;
   depth: number;
   // #753: pagination + truncation signals for large graphs. `total*`
   // counts reflect the full unbounded result for the given filter so

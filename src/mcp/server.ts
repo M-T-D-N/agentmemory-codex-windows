@@ -561,6 +561,8 @@ export function registerMcpEndpoints(
                 project: string;
                 limit?: number;
                 offset?: number;
+                edgeLimit?: number;
+                edgeOffset?: number;
               } = { project: "" };
               const startNodeId = asNonEmptyString(args.startNodeId);
               const nodeType = asNonEmptyString(args.nodeType);
@@ -569,6 +571,8 @@ export function registerMcpEndpoints(
               const maxDepth = asNumber(args.maxDepth);
               const limit = asNumber(args.limit);
               const offset = asNumber(args.offset);
+              const edgeLimit = asNumber(args.edgeLimit);
+              const edgeOffset = asNumber(args.edgeOffset);
               if (!project) {
                 return {
                   status_code: 400,
@@ -582,6 +586,10 @@ export function registerMcpEndpoints(
               if (maxDepth !== undefined) payload.maxDepth = Math.max(1, Math.min(5, maxDepth));
               if (limit !== undefined) payload.limit = Math.max(1, Math.min(5000, limit));
               if (offset !== undefined) payload.offset = Math.max(0, offset);
+              if (edgeLimit !== undefined) {
+                payload.edgeLimit = Math.max(1, Math.min(1000, edgeLimit));
+              }
+              if (edgeOffset !== undefined) payload.edgeOffset = Math.max(0, edgeOffset);
               const result = await sdk.trigger({
                 function_id: "mem::graph-query",
                 payload,

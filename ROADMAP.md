@@ -3,10 +3,12 @@
 This roadmap describes the downstream only. It is not an upstream AgentMemory
 roadmap or a delivery promise.
 
-## Technical Preview
+## Current Technical Preview
 
-- Publish a source-only 0.1.0-preview.1 repository with English and Korean
-  entry documentation.
+- Maintain the source-only 0.1.0-preview.2 repository with English, Korean,
+  and Japanese entry documentation.
+- Publish qualified source snapshots as normal commits; binary artifacts,
+  tags, and GitHub Releases require separate qualification and approval.
 - Validate the Windows/Codex build, managed hooks, exact-project writes,
   federated recall labels, and optional local-Qwen graph boundary.
 - Enable Windows CI and private vulnerability reporting.

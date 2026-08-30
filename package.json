@@ -6,7 +6,7 @@
   "description": "Independent Windows-native AgentMemory downstream for OpenAI Codex Desktop and CLI",
   "agentmemoryDownstream": {
     "displayName": "AgentMemory for Codex on Windows",
-    "version": "0.1.0-preview.1",
+    "version": "0.1.0-preview.2",
     "repositoryName": "agentmemory-codex-windows",
     "supportedHostProfile": "windows-codex",
     "agentmemoryCompatibilityVersion": "0.9.29"

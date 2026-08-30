@@ -1,7 +1,7 @@
 # Evaluate AgentMemory for Codex on Windows (agent runbook)
 
 This runbook is for coding agents evaluating the independent source-only
-Technical Preview `0.1.0-preview.1` on native Windows.
+Technical Preview `0.1.0-preview.2` on native Windows.
 
 > [!IMPORTANT]
 > Do not install `@agentmemory/*` from npm, run an upstream `npx` command, use
@@ -59,14 +59,14 @@ Choose a new staging path and the exact verified iii executable:
 ```
 
 Expect a folder named
-`agentmemory-codex-windows-0.1.0-preview.1`. Its `release-manifest.json` must
+`agentmemory-codex-windows-0.1.0-preview.2`. Its `release-manifest.json` must
 identify:
 
 - product `AgentMemory for Codex on Windows`;
 - product ID `agentmemory-codex-windows`;
-- downstream version `0.1.0-preview.1`;
+- downstream version `0.1.0-preview.2`;
 - AgentMemory compatibility version `0.9.29`; and
-- qualification revision `r58`.
+- qualification revision `r61`.
 
 The generated folder is a diagnostic candidate, not a signed public release.
 
@@ -76,8 +76,8 @@ Use an owned AgentMemoryCodex installation, workspace root, project registry,
 and Node executable. Omit `-Execute`:
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.1\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.1 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.2\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.2 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `

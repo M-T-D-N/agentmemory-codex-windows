@@ -6,7 +6,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
 > [!IMPORTANT]
-> 이 저장소는 소스 전용 Technical Preview `0.1.0-preview.1`입니다.
+> 이 저장소는 소스 전용 Technical Preview `0.1.0-preview.2`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -48,9 +48,9 @@ port 3111의 133 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.1` | 저장소 공개판과 소스 tag |
+| 공개 다운스트림 버전 | `0.1.0-preview.2` | 공개 저장소의 소스 프리뷰 버전 |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
-| 검증 개정 | `r58` | 내부 빌드 provenance이며 공개 버전이 아님 |
+| 검증 개정 | `r61` | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
 
 정확한 upstream tag, commit, tree, 원본 package hash는
@@ -64,7 +64,7 @@ port 3111의 133 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)의
   SHA-256과 일치하는 공식 iii engine `0.11.2` Windows 실행 파일
 
-첫 소스 공개판에는 미리 빌드되거나 서명된 installer를 첨부하지 않습니다.
+이 소스 공개판에는 미리 빌드되거나 서명된 installer를 첨부하지 않습니다.
 
 ## 소스에서 빌드하기
 

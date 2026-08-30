@@ -13,7 +13,11 @@ import {
 } from "../config.js";
 import { logger } from "../logger.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { prepareSessionStart } from "../functions/session-lifecycle.js";
+import {
+  completeExistingSession,
+  prepareSessionStart,
+  sessionLifecycleLockKey,
+} from "../functions/session-lifecycle.js";
 import type { ContextReader } from "../functions/context.js";
 import { selectSemanticGraphBatch } from "../functions/semantic-graph-backlog.js";
 
@@ -65,18 +69,21 @@ export function registerEventTriggers(
           ? data.agentId.trim().slice(0, 128)
           : undefined;
       const agentId = requestAgentId ?? getAgentId();
-      const start = await withKeyedLock(`session:${data.sessionId}`, async () => {
-        const existing = await kv.get<Session>(KV.sessions, data.sessionId);
-        const prepared = prepareSessionStart(existing, {
-          sessionId: data.sessionId,
-          project: data.project,
-          cwd: data.cwd,
-          ...(agentId ? { agentId } : {}),
-        });
-        if (!prepared.success) return prepared;
-        await kv.set(KV.sessions, data.sessionId, prepared.session);
-        return prepared;
-      });
+      const start = await withKeyedLock(
+        sessionLifecycleLockKey(data.sessionId),
+        async () => {
+          const existing = await kv.get<Session>(KV.sessions, data.sessionId);
+          const prepared = prepareSessionStart(existing, {
+            sessionId: data.sessionId,
+            project: data.project,
+            cwd: data.cwd,
+            ...(agentId ? { agentId } : {}),
+          });
+          if (!prepared.success) return prepared;
+          await kv.set(KV.sessions, data.sessionId, prepared.session);
+          return prepared;
+        },
+      );
       if (!start.success) return start;
       const session = start.session;
       const contextResult = await readContext({
@@ -122,41 +129,49 @@ export function registerEventTriggers(
     // extraction is enabled, send only the unprocessed tail from the exact
     // official session so a per-turn Stop never replays the whole session.
     try {
-      const session = await kv.get<Session>(KV.sessions, data.sessionId);
-      const observations = await kv.list<CompressedObservation>(
-        KV.observations(data.sessionId),
-      );
-      const compressed = observations
-        .filter((o) => o.title)
-        .sort(
-          (a, b) =>
-            a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id),
-        );
-      if (session && compressed.length > 0) {
-        let selected = compressed;
-        let semanticBatch: ReturnType<typeof selectSemanticGraphBatch> = null;
-        if (isGraphExtractionEnabled()) {
-          const batchSize = Math.max(1, getGraphBatchSize());
-          semanticBatch = selectSemanticGraphBatch(session, compressed, batchSize);
-          selected = semanticBatch?.observations ?? [];
-          if (selected.length > 0) {
-            await kv.update(KV.sessions, data.sessionId, [
-              { type: "set", path: "semanticGraphStatus", value: "pending" },
-            ]);
+      const graphDispatch = await withKeyedLock(
+        sessionLifecycleLockKey(data.sessionId),
+        async () => {
+          const session = await kv.get<Session>(KV.sessions, data.sessionId);
+          const observations = await kv.list<CompressedObservation>(
+            KV.observations(data.sessionId),
+          );
+          const compressed = observations
+            .filter((o) => o.title)
+            .sort(
+              (a, b) =>
+                a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id),
+            );
+          if (!session || compressed.length === 0) return null;
+          let selected = compressed;
+          let semanticBatch: ReturnType<typeof selectSemanticGraphBatch> = null;
+          if (isGraphExtractionEnabled()) {
+            const batchSize = Math.max(1, getGraphBatchSize());
+            semanticBatch = selectSemanticGraphBatch(session, compressed, batchSize);
+            selected = semanticBatch?.observations ?? [];
+            if (selected.length > 0) {
+              await kv.update(KV.sessions, data.sessionId, [
+                { type: "set", path: "semanticGraphStatus", value: "pending" },
+              ]);
+            }
           }
-        }
-        if (selected.length > 0) {
-          fireVoid("mem::graph-extract", {
-            project: session.project,
-            sessionId: session.id,
-            observations: selected,
-            ...(semanticBatch ? {
-              cursorMode: semanticBatch.cursorMode,
-              semanticHasMore: semanticBatch.semanticHasMore,
-              semanticBootstrapDone: semanticBatch.semanticBootstrapDone,
-            } : {}),
-          });
-        }
+          if (selected.length === 0) return null;
+          return { session, selected, semanticBatch };
+        },
+      );
+      if (graphDispatch) {
+        fireVoid("mem::graph-extract", {
+          project: graphDispatch.session.project,
+          sessionId: graphDispatch.session.id,
+          observations: graphDispatch.selected,
+          ...(graphDispatch.semanticBatch
+            ? {
+                cursorMode: graphDispatch.semanticBatch.cursorMode,
+                semanticHasMore: graphDispatch.semanticBatch.semanticHasMore,
+                semanticBootstrapDone: graphDispatch.semanticBatch.semanticBootstrapDone,
+              }
+            : {}),
+        });
       }
     } catch (err) {
       logger.warn("graph-extract trigger failed", {
@@ -197,11 +212,7 @@ export function registerEventTriggers(
   sdk.registerFunction(
     "event::session::ended",
     async (data: { sessionId: string }) => {
-      await kv.update(KV.sessions, data.sessionId, [
-        { type: "set", path: "endedAt", value: new Date().toISOString() },
-        { type: "set", path: "status", value: "completed" },
-      ]);
-      return { success: true };
+      return completeExistingSession(kv, data.sessionId);
     },
   );
   sdk.registerTrigger({

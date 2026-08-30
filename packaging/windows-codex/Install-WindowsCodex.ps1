@@ -107,6 +107,12 @@ function Move-PackageJunctionTargets {
             throw "Package junction has an unexpected target count: $($junction.FullName)"
         }
         $sourceTarget = [System.IO.Path]::GetFullPath([string]$targets[0])
+        if ($sourceTarget -eq $destination -or $sourceTarget.StartsWith($destinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not (Test-Path -LiteralPath $sourceTarget -PathType Container)) {
+                throw "Relocated package junction target is missing: $sourceTarget"
+            }
+            continue
+        }
         if ($sourceTarget -ne $source -and -not $sourceTarget.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Package junction target escapes the release package: $($junction.FullName)"
         }

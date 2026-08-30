@@ -86,7 +86,14 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const kv = mockKV();
     registerRememberFunction(sdk as never, kv as never);
 
-    await kv.set("mem:sessions", "sess_1", { id: "sess_1" });
+    await kv.set("mem:sessions", "sess_1", {
+      id: "sess_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T00:00:00Z",
+      status: "completed",
+      observationCount: 2,
+    });
     await kv.set("mem:summaries", "sess_1", { id: "sess_1" });
     await kv.set("mem:obs:sess_1", "obs_a", { id: "obs_a" });
     await kv.set("mem:obs:sess_1", "obs_b", { id: "obs_b" });
@@ -214,6 +221,14 @@ describe("mem::forget search-index cleanup", () => {
 
     await kv.set("mem:obs:ses_1", "obs_a", { id: "obs_a" });
     await kv.set("mem:obs:ses_1", "obs_b", { id: "obs_b" });
+    await kv.set("mem:sessions", "ses_1", {
+      id: "ses_1",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: "2026-02-01T00:00:00Z",
+      status: "completed",
+      observationCount: 2,
+    });
     getSearchIndex().add(memoryToObservation(makeMemory("obs_a")));
     getSearchIndex().add(memoryToObservation(makeMemory("obs_b")));
 

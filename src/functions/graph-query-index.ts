@@ -9,6 +9,8 @@ import type {
 
 export const DEFAULT_GRAPH_QUERY_LIMIT = 500;
 export const MAX_GRAPH_QUERY_LIMIT = 5000;
+export const DEFAULT_GRAPH_EDGE_QUERY_LIMIT = 500;
+export const MAX_GRAPH_EDGE_QUERY_LIMIT = 1000;
 export const GRAPH_QUERY_INDEX_VERSION = 1;
 export const GRAPH_QUERY_INDEX_SHARDS = 64;
 export const GRAPH_QUERY_INDEX_MANIFEST_KEY = "current";
@@ -22,6 +24,8 @@ export interface GraphQueryIndexDocument {
   searchText: string;
   createdAt?: string;
   updatedAt?: string;
+  sourceObservationIds: string[];
+  sourceSessionIds: string[];
 }
 
 export interface GraphQueryEdgeRef {
@@ -31,10 +35,20 @@ export interface GraphQueryEdgeRef {
   targetNodeId: string;
   project?: string;
   createdAt?: string;
+  sourceObservationIds: string[];
+  sourceSessionIds: string[];
 }
 
 export interface GraphQueryIndexManifest {
   version: 1;
+  // Monotonic within one maintained index. Exact multi-page reads compare
+  // both this counter and updatedAt so same-millisecond writes cannot reuse a
+  // page revision.
+  revision?: number;
+  // Present only when every live node/edge reference in the derived index
+  // carries exact session + observation provenance. Legacy v1 indexes remain
+  // fully usable for reads but fail closed for provenance-aware forget.
+  provenanceVersion?: 1;
   shardCount: number;
   totalNodes: number;
   totalEdges: number;
@@ -52,6 +66,8 @@ export interface GraphQueryInput {
   project?: string;
   limit?: number;
   offset?: number;
+  edgeLimit?: number;
+  edgeOffset?: number;
 }
 
 export function queryIndexShardFor(id: string): number {
@@ -103,6 +119,8 @@ export function graphQueryDocument(node: GraphNode): GraphQueryIndexDocument {
     searchText: graphQuerySearchText(node),
     ...(node.createdAt ? { createdAt: node.createdAt } : {}),
     ...(node.updatedAt ? { updatedAt: node.updatedAt } : {}),
+    sourceObservationIds: [...new Set(node.sourceObservationIds ?? [])],
+    sourceSessionIds: [...new Set(node.sourceSessionIds ?? [])],
   };
 }
 
@@ -114,6 +132,8 @@ export function graphQueryEdgeRef(edge: GraphEdge): GraphQueryEdgeRef {
     targetNodeId: edge.targetNodeId,
     ...(edge.project ? { project: edge.project } : {}),
     ...(edge.createdAt ? { createdAt: edge.createdAt } : {}),
+    sourceObservationIds: [...new Set(edge.sourceObservationIds ?? [])],
+    sourceSessionIds: [...new Set(edge.sourceSessionIds ?? [])],
   };
 }
 
@@ -132,6 +152,98 @@ export function resolvePagination(
       : 0,
   );
   return { limit, offset };
+}
+
+export function resolveEdgePagination(
+  rawLimit: number | undefined,
+  rawOffset: number | undefined,
+): { limit: number; offset: number } {
+  const requested = typeof rawLimit === "number" && Number.isFinite(rawLimit)
+    ? Math.floor(rawLimit)
+    : DEFAULT_GRAPH_EDGE_QUERY_LIMIT;
+  const limit = Math.max(1, Math.min(requested, MAX_GRAPH_EDGE_QUERY_LIMIT));
+  const offset = Math.max(
+    0,
+    typeof rawOffset === "number" && Number.isFinite(rawOffset)
+      ? Math.floor(rawOffset)
+      : 0,
+  );
+  return { limit, offset };
+}
+
+function appendWarning(current: string | undefined, next: string): string {
+  if (!current) return next;
+  return next ? `${current} ${next}` : current;
+}
+
+async function exactEdgeInventoryPage(
+  kv: StateKV,
+  data: GraphQueryInput,
+  refs: GraphQueryEdgeRef[],
+  resetAt?: string,
+): Promise<Partial<GraphQueryResult>> {
+  if (data.edgeLimit === undefined && data.edgeOffset === undefined) return {};
+  const { limit, offset } = resolveEdgePagination(data.edgeLimit, data.edgeOffset);
+  const orderedIds = [...new Set(refs.map((ref) => ref.id))].sort((a, b) =>
+    a.localeCompare(b)
+  );
+  const selectedIds = orderedIds.slice(offset, offset + limit);
+  const edgeInventory = await hydrateGraphEdges(kv, selectedIds, resetAt);
+  const hydratedIds = new Set(edgeInventory.map((edge) => edge.id));
+  const exact =
+    edgeInventory.length === selectedIds.length &&
+    selectedIds.every((id) => hydratedIds.has(id));
+  return {
+    edgeInventory,
+    edgeLimit: limit,
+    edgeOffset: offset,
+    edgeTruncated: offset + selectedIds.length < orderedIds.length,
+    edgeInventoryExact: exact,
+    ...(!exact
+      ? { warning: "Graph changed while the exact edge page was being hydrated." }
+      : {}),
+  };
+}
+
+async function validateExactEdgeInventorySnapshot(
+  kv: StateKV,
+  snapshot: GraphSnapshot,
+  inventory: Partial<GraphQueryResult>,
+  expectedManifest: GraphQueryIndexManifest,
+): Promise<Partial<GraphQueryResult>> {
+  if (!inventory.edgeInventory) return inventory;
+  const edgeInventoryRevision = [
+    expectedManifest.updatedAt,
+    expectedManifest.revision ?? "legacy",
+    snapshot.stats.totalNodes,
+    snapshot.stats.totalEdges,
+  ].join(":");
+  const manifest = await kv.get<GraphQueryIndexManifest>(
+    KV.graphQueryManifest,
+    GRAPH_QUERY_INDEX_MANIFEST_KEY,
+  );
+  const stable = Boolean(
+    manifest &&
+      typeof expectedManifest.revision === "number" &&
+      manifest.version === GRAPH_QUERY_INDEX_VERSION &&
+      manifest.shardCount === GRAPH_QUERY_INDEX_SHARDS &&
+      !manifest.dirty &&
+      manifest.revision === expectedManifest.revision &&
+      manifest.updatedAt === expectedManifest.updatedAt &&
+      manifest.updatedAt === snapshot.updatedAt &&
+      manifest.totalNodes === snapshot.stats.totalNodes &&
+      manifest.totalEdges === snapshot.stats.totalEdges,
+  );
+  if (stable) return { ...inventory, edgeInventoryRevision };
+  return {
+    ...inventory,
+    edgeInventoryRevision,
+    edgeInventoryExact: false,
+    warning: appendWarning(
+      inventory.warning,
+      "Graph changed during exact edge pagination; retry this edge page.",
+    ),
+  };
 }
 
 export function paginateGraph(
@@ -217,6 +329,19 @@ export function queryGraphFromSnapshotFallback(
       : []),
     ...(Array.isArray(data.queries) ? data.queries : []),
   ].map((query) => query.toLowerCase());
+  const unavailableEdgeInventory =
+    data.edgeLimit !== undefined || data.edgeOffset !== undefined
+      ? (() => {
+          const edgePage = resolveEdgePagination(data.edgeLimit, data.edgeOffset);
+          return {
+            edgeInventory: [],
+            edgeLimit: edgePage.limit,
+            edgeOffset: edgePage.offset,
+            edgeTruncated: snapshot.stats.totalEdges > edgePage.offset,
+            edgeInventoryExact: false,
+          };
+        })()
+      : {};
   const projectNodes = snapshot.topNodes
     .filter((node) => isVisibleAfterReset(node, snapshot.resetAt))
     .filter((node) => !project || graphNodeProject(node) === project);
@@ -239,6 +364,7 @@ export function queryGraphFromSnapshotFallback(
     return {
       ...paginateGraph(matches, projectEdges, 0, limit, offset),
       fromSnapshot: true,
+      ...unavailableEdgeInventory,
       warning,
     };
   }
@@ -276,6 +402,7 @@ export function queryGraphFromSnapshotFallback(
         offset,
       ),
       fromSnapshot: true,
+      ...unavailableEdgeInventory,
       warning,
     };
   }
@@ -283,6 +410,7 @@ export function queryGraphFromSnapshotFallback(
   if (!project) {
     return {
       ...paginateFromSnapshot(snapshot, data.nodeType, limit, offset),
+      ...unavailableEdgeInventory,
       warning,
     };
   }
@@ -297,6 +425,7 @@ export function queryGraphFromSnapshotFallback(
       offset,
     ),
     fromSnapshot: true,
+    ...unavailableEdgeInventory,
     warning,
   };
 }
@@ -421,6 +550,7 @@ export async function queryGraphFromIndex(
   kv: StateKV,
   data: GraphQueryInput,
   snapshot: GraphSnapshot,
+  manifest: GraphQueryIndexManifest,
   project: string | undefined,
   maxDepth: number,
   limit: number,
@@ -467,10 +597,22 @@ export async function queryGraphFromIndex(
       [...visitedEdges.keys()],
       snapshot.resetAt,
     );
+    const inventory = await validateExactEdgeInventorySnapshot(
+      kv,
+      snapshot,
+      await exactEdgeInventoryPage(
+        kv,
+        data,
+        [...visitedEdges.values()],
+        snapshot.resetAt,
+      ),
+      manifest,
+    );
     return {
       ...paginateGraph(resultNodes, resultEdges, maxDepth, limit, offset),
       fromIndex: true,
       ...(queryIndexRebuilt ? { queryIndexRebuilt: true } : {}),
+      ...inventory,
     };
   }
 
@@ -513,6 +655,17 @@ export async function queryGraphFromIndex(
       universeIds.has(ref.targetNodeId) &&
       (!project || ref.project === undefined || ref.project === project),
   );
+  const inventory = await validateExactEdgeInventorySnapshot(
+    kv,
+    snapshot,
+    await exactEdgeInventoryPage(
+      kv,
+      data,
+      universeEdges,
+      snapshot.resetAt,
+    ),
+    manifest,
+  );
   const pageEdgeIds = universeEdges
     .filter(
       (ref) =>
@@ -520,6 +673,12 @@ export async function queryGraphFromIndex(
     )
     .map((ref) => ref.id);
   const pageEdges = await hydrateGraphEdges(kv, pageEdgeIds, snapshot.resetAt);
+  const nodeWarning = pageNodes.length !== pageDocuments.length
+    ? "Graph changed while the indexed page was being hydrated."
+    : undefined;
+  const warning = inventory.warning || nodeWarning
+    ? appendWarning(nodeWarning, inventory.warning ?? "")
+    : undefined;
   return {
     nodes: pageNodes,
     edges: pageEdges,
@@ -531,8 +690,7 @@ export async function queryGraphFromIndex(
     offset,
     fromIndex: true,
     ...(queryIndexRebuilt ? { queryIndexRebuilt: true } : {}),
-    ...(pageNodes.length !== pageDocuments.length
-      ? { warning: "Graph changed while the indexed page was being hydrated." }
-      : {}),
+    ...inventory,
+    ...(warning ? { warning } : {}),
   };
 }

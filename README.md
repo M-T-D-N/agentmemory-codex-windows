@@ -7,7 +7,7 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.1-orange" alt="0.1.0-preview.1" />
+  <img src="https://img.shields.io/badge/release-0.1.0--preview.2-orange" alt="0.1.0-preview.2" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
@@ -64,9 +64,9 @@ bypass project scoping, agent isolation, result limits, or existing auditing.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.1` | Public version and source tag |
+| Downstream release | `0.1.0-preview.2` | Public source-preview version |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
-| Qualification revision | `r58` | Internal build provenance, not a public version line |
+| Qualification revision | `r61` | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
 
 The exact upstream tag, commit, tree, and pristine package hash are recorded in
@@ -80,7 +80,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 - The official iii engine `0.11.2` Windows executable whose SHA-256 matches
   [`packaging/windows-codex/config/third-party-inputs.json`](packaging/windows-codex/config/third-party-inputs.json)
 
-No prebuilt or signed installer is attached to the first source preview.
+No prebuilt or signed installer is attached to this source preview.
 
 ## Build and evaluate from source
 

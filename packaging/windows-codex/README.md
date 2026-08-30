@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.1`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.2`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Build and evaluate it from source; do not substitute an
 > upstream `npx` install for the steps in this guide.
@@ -14,7 +14,7 @@ upstream AgentMemory TypeScript package. The adapter keeps iii-engine,
 AgentMemory's official state scopes, and the normal memory, lesson, graph,
 audit, and provenance lifecycles. It introduces no secondary database or queue.
 
-Internal qualification revision `r58` consolidates the supported behavior into
+Internal qualification revision `r61` consolidates the supported behavior into
 clearer boundaries without changing the upstream-compatible API or data model:
 
 - four managed Codex hooks capture normal main-task prompts and final responses
@@ -42,7 +42,21 @@ clearer boundaries without changing the upstream-compatible API or data model:
   the upstream context contract and state stores; and
 - session forget and semantic graph persistence share a keyed lifecycle
   boundary, so completed background inference cannot recreate a deleted source
-  session or advance its graph cursor after deletion.
+  session or advance its graph cursor after deletion;
+- session forget atomically detaches the exact source session and observation
+  provenance from the canonical graph. Shared graph records remain, while only
+  provenance-free orphan relationships and unreferenced nodes are removed;
+- exact graph edge inventory is available as an opt-in query mode with stable
+  edge-ID ordering, revision checks, and hydration verification, while the
+  existing page-local `edges` response remains compatible;
+- session start, observation, completion, forget, eviction, migration, and
+  graph dispatch share one per-session lifecycle boundary, so ending an unknown
+  or concurrently forgotten session cannot materialize an incomplete row in
+  iii's file-backed state store; and
+- legacy two-field Codex session-end stubs can be repaired only through an
+  exact-match, dry-run-first migration that preserves supplied task identity,
+  observation provenance, and the original completion timestamp while rejecting
+  ambiguous or conflicting rows.
 
 The detailed failure lessons later in this guide explain why these constraints
 exist. They are operational history, not additional product surfaces.
@@ -78,16 +92,17 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.1`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.2`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
   downstream release version.
-- `r58` is internal qualification provenance, not a public version line.
+- `r61` is internal qualification provenance, not a public version line.
   Release revisions are path-safe build identifiers rather than a numeric-only
   version sequence, so a source identity suffix can be used without inventing a
   new public release.
-- Source tags and generated release-folder names use the downstream version.
+- Public source snapshots and generated release-folder names use the downstream
+  version.
   The installed runtime directory and CLI still use AgentMemory compatibility
   version `0.9.29` so existing data and integrations are not relabelled.
 - Native Windows and Codex are the supported downstream host profile.
@@ -147,8 +162,8 @@ only validates release hashes, owner/manifest identity, exact paths, and the
 managed Codex requirements predecessor.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.1\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.1 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.2\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.2 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `

@@ -7,7 +7,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、ソースのみを提供する Technical Preview
-> `0.1.0-preview.1` です。
+> `0.1.0-preview.2` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -46,9 +46,9 @@ portable hooks、17個の skills があります。サポート対象の Windows
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.1` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.2` | 公開リポジトリのソースプレビュー版 |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
-| 検証リビジョン | `r58` | 内部 build provenance。公開バージョン系列ではありません |
+| 検証リビジョン | `r61` | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
 
 正確なアップストリームの tag、commit、tree、元の package hash は
@@ -62,7 +62,7 @@ portable hooks、17個の skills があります。サポート対象の Windows
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、公式 iii engine `0.11.2` Windows 実行ファイル
 
-最初のソース公開版には、ビルド済みまたは署名済みの installer を添付しません。
+このソース公開版には、ビルド済みまたは署名済みの installer を添付しません。
 
 ## ソースからビルドする
 

@@ -2,7 +2,7 @@
 
 > [!CAUTION]
 > Upstream reference only. This material predates the Windows/Codex downstream,
-> has not been rerun as qualification for `0.1.0-preview.1`, and is not a
+> has not been rerun as qualification for `0.1.0-preview.2`, and is not a
 > downstream performance claim.
 
 > For results on the academic LongMemEval-S benchmark (ICLR 2025, 500 questions), see [`LONGMEMEVAL.md`](LONGMEMEVAL.md) — **95.2% R@5, 98.6% R@10**.

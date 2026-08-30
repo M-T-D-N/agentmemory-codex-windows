@@ -12,6 +12,8 @@ import { isConsolidationEnabled } from "../config.js";
 import { recordAudit } from "./audit.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { logger } from "../logger.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 
 interface EvictionConfig {
   staleSessionDays: number;
@@ -170,7 +172,10 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
             }
 
             try {
-              await kv.delete(KV.sessions, session.id);
+              await withKeyedLock(
+                sessionLifecycleLockKey(session.id),
+                () => kv.delete(KV.sessions, session.id),
+              );
               stats.staleSessions++;
             } catch (err) {
               logger.warn("Eviction delete failed", {

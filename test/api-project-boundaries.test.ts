@@ -73,6 +73,41 @@ describe("REST exact-project and provenance boundaries", () => {
     );
   });
 
+  it("fails closed when session end targets an unknown session", async () => {
+    const response = (await sdk.trigger("api::session::end", {
+      body: { sessionId: "missing-session" },
+    })) as { status_code: number; body: unknown };
+
+    expect(response).toEqual({
+      status_code: 404,
+      body: { success: false, error: "session_not_found" },
+    });
+    await expect(kv.get("mem:sessions", "missing-session")).resolves.toBeNull();
+    expect(sdk.downstream).toEqual([]);
+  });
+
+  it("completes an existing session before publishing the stop lifecycle", async () => {
+    await kv.set("mem:sessions", "session-end", {
+      id: "session-end",
+      project: "project-a",
+      cwd: "/project-a",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      status: "active",
+      observationCount: 3,
+    });
+
+    const response = (await sdk.trigger("api::session::end", {
+      body: { sessionId: "session-end" },
+    })) as { status_code: number; body: unknown };
+
+    expect(response).toEqual({ status_code: 200, body: { success: true } });
+    expect(await kv.get<Record<string, unknown>>("mem:sessions", "session-end"))
+      .toMatchObject({ status: "completed", observationCount: 3 });
+    expect(sdk.downstream).toEqual([
+      { functionId: "event::session::stopped", payload: { sessionId: "session-end" } },
+    ]);
+  });
+
   it.each([
     ["api::search", { body: { query: "memory" } }],
     ["api::smart-search", { body: { query: "memory" } }],
@@ -412,6 +447,42 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(response.body).toMatchObject({
       captureExcluded: false,
       preservedActiveSession: true,
+    });
+  });
+
+  it("forwards bounded session-stub recovery candidates to mem::migrate", async () => {
+    const candidate = {
+      sessionId: "legacy-stub",
+      project: "project-a",
+      cwd: "/project-a",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      observations: [
+        {
+          sourceItemId: "user-1",
+          timestamp: "2026-01-01T00:01:00.000Z",
+          kind: "prompt_submit",
+          text: "recover this prompt",
+        },
+      ],
+    };
+
+    const response = (await sdk.trigger("api::migrate", {
+      body: {
+        step: "repair-codex-session-stubs",
+        dryRun: true,
+        candidates: [candidate],
+      },
+      headers: {},
+    })) as { status_code: number };
+
+    expect(response.status_code).toBe(200);
+    expect(sdk.downstream).toContainEqual({
+      functionId: "mem::migrate",
+      payload: {
+        step: "repair-codex-session-stubs",
+        dryRun: true,
+        candidates: [candidate],
+      },
     });
   });
 

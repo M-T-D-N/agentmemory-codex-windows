@@ -299,6 +299,19 @@ describe("session observation activity fan-out", () => {
     ).toBe(false);
     expect(trigger).not.toHaveBeenCalled();
   });
+
+  it("event::session::ended does not materialize an unknown session", async () => {
+    const kv = mockKV();
+    const { sdk, handlers } = mockSdk();
+    registerEventTriggers(sdk as never, kv as never);
+
+    const ended = handlers.get("event::session::ended")!;
+    await expect(ended({ sessionId: "missing" })).resolves.toEqual({
+      success: false,
+      error: "session_not_found",
+    });
+    expect(kv.update).not.toHaveBeenCalled();
+  });
 });
 
 describe("session start context dispatch", () => {

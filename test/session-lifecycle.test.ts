@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "../src/types.js";
-import { prepareSessionStart } from "../src/functions/session-lifecycle.js";
+import {
+  completeExistingSession,
+  prepareSessionStart,
+  sessionLifecycleLockKey,
+} from "../src/functions/session-lifecycle.js";
+import { mockKV } from "./helpers/mocks.js";
+import { withKeyedLock } from "../src/state/keyed-mutex.js";
 
 const existing: Session = {
   id: "ses_1",
@@ -81,5 +87,80 @@ describe("prepareSessionStart", () => {
     expect(result.session.observationCount).toBe(0);
     expect(result.session.firstPrompt).toHaveLength(200);
     expect(result.session.summary).toHaveLength(200);
+  });
+});
+
+describe("completeExistingSession", () => {
+  it("does not materialize a row for an unknown session", async () => {
+    const kv = mockKV();
+
+    await expect(
+      completeExistingSession(kv as never, "missing", "2026-01-02T00:00:00.000Z"),
+    ).resolves.toEqual({ success: false, error: "session_not_found" });
+    await expect(kv.get("mem:sessions", "missing")).resolves.toBeNull();
+  });
+
+  it("rejects the exact two-field legacy stub without changing it", async () => {
+    const kv = mockKV();
+    const stub = {
+      endedAt: "2026-01-01T01:00:00.000Z",
+      status: "completed",
+    };
+    await kv.set("mem:sessions", "legacy", stub);
+
+    await expect(
+      completeExistingSession(kv as never, "legacy", "2026-01-02T00:00:00.000Z"),
+    ).resolves.toEqual({ success: false, error: "session_invalid" });
+    await expect(kv.get("mem:sessions", "legacy")).resolves.toEqual(stub);
+  });
+
+  it("completes an existing session while preserving accumulated fields", async () => {
+    const kv = mockKV();
+    await kv.set("mem:sessions", existing.id, existing);
+
+    const result = await completeExistingSession(
+      kv as never,
+      existing.id,
+      "2026-01-02T00:00:00.000Z",
+    );
+
+    expect(result).toEqual({
+      success: true,
+      session: {
+        ...existing,
+        endedAt: "2026-01-02T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+        status: "completed",
+      },
+    });
+  });
+
+  it("cannot recreate a session deleted by the same lifecycle lock", async () => {
+    const kv = mockKV();
+    await kv.set("mem:sessions", existing.id, existing);
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const deletion = withKeyedLock(
+      sessionLifecycleLockKey(existing.id),
+      async () => {
+        await deleteGate;
+        await kv.delete("mem:sessions", existing.id);
+      },
+    );
+    const completion = completeExistingSession(
+      kv as never,
+      existing.id,
+      "2026-01-02T00:00:00.000Z",
+    );
+
+    releaseDelete();
+    await deletion;
+    await expect(completion).resolves.toEqual({
+      success: false,
+      error: "session_not_found",
+    });
+    await expect(kv.get("mem:sessions", existing.id)).resolves.toBeNull();
   });
 });

@@ -320,6 +320,15 @@ export const V040_TOOLS: McpToolDef[] = [
           type: "number",
           description: "Node offset for pagination",
         },
+        edgeLimit: {
+          type: "number",
+          description:
+            "Opt in to an independent exact edge inventory page (default 500, max 1000); existing edges remains viewer page-local",
+        },
+        edgeOffset: {
+          type: "number",
+          description: "Exact edge inventory offset for pagination",
+        },
       },
       required: ["project"],
     },

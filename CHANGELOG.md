@@ -6,6 +6,12 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.1.0-preview.2 — 2026-08-30
+
+Second public source preview.
+
 ### Added
 
 - Opt-in non-reinforcing retrieval for administrative inspection, evaluation,
@@ -29,6 +35,37 @@ The upstream AgentMemory release history remains in the
   that end without the terminal marker. This keeps generation alive past the
   llama.cpp non-streaming disconnect boundary without accepting truncated graph
   output or advancing its source cursor.
+- Prevented unknown or concurrently forgotten session-end requests from
+  materializing incomplete session rows in iii's file-backed state store.
+  Session start, observation, completion, forget, eviction, migration, and
+  graph dispatch now share the same per-session lifecycle boundary.
+- Added an exact-match, dry-run-first migration for legacy Codex session-end
+  stubs. It restores only caller-supplied task metadata and observations with
+  deterministic IDs and source-item provenance, rejects ambiguous or conflicting
+  rows, and is safe to resume or repeat.
+- Reopened semantic graph backlog work whenever a completed session receives a
+  new observation. The existing cursor is preserved, so an abrupt shutdown
+  before the matching session-end hook can no longer strand an unprocessed tail
+  or force previously processed observations to be extracted again.
+- Detached the forgotten session and observation provenance from the canonical
+  graph while preserving shared nodes and relationships. Only provenance-free
+  orphan relationships and then unreferenced nodes are removed; stale indexes,
+  concurrent changes, and project mismatches fail closed.
+- Added opt-in exact edge pagination to the existing graph query. Stable edge-ID
+  ordering, revision checks, and page hydration make duplicates or omissions
+  detectable without changing the existing page-local `edges` response.
+
+### Compatibility
+
+- Based on upstream AgentMemory v0.9.29 at commit 2d38daf.
+- Package, API, plugin, CLI, MCP, and export compatibility remain on 0.9.29.
+- Internal qualification revision r61 is provenance, not the public version.
+
+### Preview limits
+
+- Source release only. No npm package, signed installer, binary release asset,
+  or upstream support is provided.
+- Native Windows with Codex is the supported downstream host profile.
 
 ## 0.1.0-preview.1 — 2026-08-25
 
@@ -59,4 +96,4 @@ Initial public source preview.
 - Source release only. No npm package, signed installer, binary release asset,
   or upstream support is provided.
 - Native Windows with Codex is the supported downstream host profile.
-- Internal qualification revision r58 is provenance, not the public version.
+- Internal qualification revision r32 is provenance, not the public version.

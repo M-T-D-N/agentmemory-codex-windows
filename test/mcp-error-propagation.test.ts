@@ -67,6 +67,31 @@ describe("MCP error propagation", () => {
     expect(result.body).toEqual({ error: "graph unavailable" });
   });
 
+  it("passes bounded independent edge pagination through memory_graph_query", async () => {
+    let seen: unknown;
+    sdk.overrideTrigger("mem::graph-query", async (payload: unknown) => {
+      seen = payload;
+      return { nodes: [], edges: [], edgeInventory: [], edgeInventoryExact: true };
+    });
+
+    const result = await sdk.getFunction("mcp::tools::call")!(
+      request("memory_graph_query", {
+        project: "project-a",
+        limit: 1,
+        edgeLimit: 5000,
+        edgeOffset: 12,
+      }),
+    );
+
+    expect(result.status_code).toBe(200);
+    expect(seen).toMatchObject({
+      project: "project-a",
+      limit: 1,
+      edgeLimit: 1000,
+      edgeOffset: 12,
+    });
+  });
+
   it("returns non-2xx for disabled consolidation results", async () => {
     sdk.overrideTrigger("mem::consolidate-pipeline", async () => ({
       success: false,

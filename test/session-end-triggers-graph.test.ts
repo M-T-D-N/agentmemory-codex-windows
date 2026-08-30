@@ -12,9 +12,9 @@ import { readFileSync } from "node:fs";
 describe("api::session::end → event::session::stopped (#666)", () => {
   const api = readFileSync("src/triggers/api.ts", "utf-8");
 
-  it("api::session::end fires event::session::stopped after kv.update", () => {
+  it("api::session::end fires event::session::stopped after validated completion", () => {
     expect(api).toMatch(
-      /api::session::end[\s\S]*?kv\.update\(KV\.sessions[\s\S]*?function_id:\s*"event::session::stopped"/,
+      /api::session::end[\s\S]*?completeExistingSession\(kv, sessionId\)[\s\S]*?function_id:\s*"event::session::stopped"/,
     );
   });
 

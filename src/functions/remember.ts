@@ -1,5 +1,5 @@
 import { TriggerAction, type ISdk } from "iii-sdk";
-import type { Memory } from "../types.js";
+import type { Memory, RawObservation, Session } from "../types.js";
 import { KV, generateId, jaccardSimilarity } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
@@ -20,6 +20,14 @@ import {
   validateObservationProvenance,
   type ObservationSourceInput,
 } from "./provenance.js";
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
+import {
+  GRAPH_WRITE_LOCK,
+  detachForgottenGraphProvenance,
+  type GraphForgetProvenanceResult,
+} from "./graph.js";
+
+type ForgetObservation = RawObservation & { imageRef?: string };
 
 // Slicing by UTF-16 code unit can cut an astral character (emoji, some CJK
 // extensions) mid surrogate pair, leaving a lone high surrogate that renders
@@ -317,7 +325,127 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       const deletedMemoryIds: string[] = [];
       const deletedObservationIds: string[] = [];
       let deletedSession = false;
+      let alreadyAbsent = false;
+      let graphResult: GraphForgetProvenanceResult = {
+        graphNodesDetached: 0,
+        graphNodesDeleted: 0,
+        graphEdgesDetached: 0,
+        graphEdgesDeleted: 0,
+        graphNodeIds: [],
+        graphEdgeIds: [],
+      };
       const { decrementImageRef } = await import("./image-refs.js");
+
+      const sessionId = data.sessionId;
+      if (sessionId) {
+        await withKeyedLock(
+          GRAPH_WRITE_LOCK,
+          () =>
+            withKeyedLock(
+              sessionLifecycleLockKey(sessionId),
+              async () => {
+                const session = await kv.get<Session>(KV.sessions, sessionId);
+                const summary = await kv.get(KV.summaries, sessionId);
+                const observations = await kv.list<ForgetObservation>(
+                  KV.observations(sessionId),
+                );
+                if (!session) {
+                  if (observations.length > 0 || summary) {
+                    throw new Error(
+                      `session metadata is missing for exact forget: ${sessionId}`,
+                    );
+                  }
+                  alreadyAbsent = true;
+                  return;
+                }
+                const requestedObservationIds = Array.isArray(data.observationIds)
+                  ? [...new Set(data.observationIds.filter(
+                      (id): id is string => typeof id === "string" && id.length > 0,
+                    ))]
+                  : [];
+                if (
+                  Array.isArray(data.observationIds) &&
+                  requestedObservationIds.length !== data.observationIds.length
+                ) {
+                  throw new Error("observationIds must contain unique non-empty strings");
+                }
+                const wholeSession = requestedObservationIds.length === 0 && !data.memoryId;
+                const observationById = new Map(
+                  observations.map((observation) => [observation.id, observation]),
+                );
+                const targetObservations = wholeSession
+                  ? observations
+                  : requestedObservationIds
+                    .map((id) => observationById.get(id))
+                    .filter((observation): observation is ForgetObservation => Boolean(observation));
+                if (wholeSession || targetObservations.length > 0) {
+                  graphResult = await detachForgottenGraphProvenance(kv, {
+                    project: session.project,
+                    sessionId,
+                    forgottenObservationIds: targetObservations.map((observation) =>
+                      observation.id
+                    ),
+                    sessionObservationIds: observations.map((observation) => observation.id),
+                  });
+                }
+
+                const targetIds = new Set(
+                  targetObservations.map((observation) => observation.id),
+                );
+                for (const obs of targetObservations) {
+                  await kv.delete(KV.observations(sessionId), obs.id);
+                  if (obs.imageData) await decrementImageRef(kv, sdk, obs.imageData);
+                  if (obs.imageRef && obs.imageRef !== obs.imageData) {
+                    await decrementImageRef(kv, sdk, obs.imageRef);
+                  }
+                  getSearchIndex().remove(obs.id);
+                  vectorIndexRemove(obs.id);
+                  deletedObservationIds.push(obs.id);
+                  deleted++;
+                }
+
+                if (wholeSession) {
+                  await kv.delete(KV.sessions, sessionId);
+                  deletedSession = true;
+                  deleted++;
+                  if (summary) {
+                    await kv.delete(KV.summaries, sessionId);
+                    deleted++;
+                  }
+                } else if (targetIds.size > 0) {
+                  const ordered = [...observations].sort(
+                    (a, b) =>
+                      String(a.timestamp ?? "").localeCompare(String(b.timestamp ?? "")) ||
+                      a.id.localeCompare(b.id),
+                  );
+                  const remaining = ordered.filter((observation) => !targetIds.has(observation.id));
+                  const nextSession: Session = {
+                    ...session,
+                    observationCount: remaining.length,
+                    updatedAt: new Date().toISOString(),
+                  };
+                  for (const field of [
+                    "semanticGraphThroughObservationId",
+                    "semanticGraphBackfillThroughObservationId",
+                  ] as const) {
+                    const cursor = session[field];
+                    if (!cursor || !targetIds.has(cursor)) continue;
+                    const cursorIndex = ordered.findIndex((observation) => observation.id === cursor);
+                    const prior = ordered
+                      .slice(0, Math.max(0, cursorIndex))
+                      .filter((observation) => !targetIds.has(observation.id))
+                      .at(-1);
+                    delete nextSession[field];
+                    if (prior) nextSession[field] = prior.id;
+                  }
+                  await kv.set(KV.sessions, sessionId, nextSession);
+                } else {
+                  alreadyAbsent = true;
+                }
+              },
+            ),
+        );
+      }
 
       if (data.memoryId) {
         const mem = await kv.get<Memory>(KV.memories, data.memoryId);
@@ -331,59 +459,10 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           vectorIndexRemove(data.memoryId);
           deletedMemoryIds.push(data.memoryId);
           deleted++;
+          alreadyAbsent = false;
+        } else if (!sessionId || deleted === 0) {
+          alreadyAbsent = true;
         }
-      }
-
-      const sessionId = data.sessionId;
-      if (sessionId) {
-        await withKeyedLock(
-          `mem:session-lifecycle:${sessionId}`,
-          async () => {
-            if (data.observationIds && data.observationIds.length > 0) {
-              for (const obsId of data.observationIds) {
-                const obs = await kv.get<{ imageData?: string; imageRef?: string }>(
-                  KV.observations(sessionId),
-                  obsId,
-                );
-                await kv.delete(KV.observations(sessionId), obsId);
-                if (obs?.imageData) await decrementImageRef(kv, sdk, obs.imageData);
-                if (obs?.imageRef && obs.imageRef !== obs.imageData) {
-                  await decrementImageRef(kv, sdk, obs.imageRef);
-                }
-                getSearchIndex().remove(obsId);
-                vectorIndexRemove(obsId);
-                deletedObservationIds.push(obsId);
-                deleted++;
-              }
-            }
-
-            if (
-              (!data.observationIds || data.observationIds.length === 0) &&
-              !data.memoryId
-            ) {
-              const observations = await kv.list<{
-                id: string;
-                imageData?: string;
-                imageRef?: string;
-              }>(KV.observations(sessionId));
-              for (const obs of observations) {
-                await kv.delete(KV.observations(sessionId), obs.id);
-                if (obs.imageData) await decrementImageRef(kv, sdk, obs.imageData);
-                if (obs.imageRef && obs.imageRef !== obs.imageData) {
-                  await decrementImageRef(kv, sdk, obs.imageRef);
-                }
-                getSearchIndex().remove(obs.id);
-                vectorIndexRemove(obs.id);
-                deletedObservationIds.push(obs.id);
-                deleted++;
-              }
-              await kv.delete(KV.sessions, sessionId);
-              await kv.delete(KV.summaries, sessionId);
-              deletedSession = true;
-              deleted += 2;
-            }
-          },
-        );
       }
 
       if (deleted > 0) {
@@ -392,20 +471,31 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           kv,
           "forget",
           "mem::forget",
-          [...deletedMemoryIds, ...deletedObservationIds],
+          [
+            ...deletedMemoryIds,
+            ...deletedObservationIds,
+            ...graphResult.graphNodeIds,
+            ...graphResult.graphEdgeIds,
+          ],
           {
             sessionId: data.sessionId,
             deleted,
             memoriesDeleted: deletedMemoryIds.length,
             observationsDeleted: deletedObservationIds.length,
             sessionDeleted: deletedSession,
+            ...graphResult,
             reason: "user-initiated forget",
           },
         );
       }
 
       logger.info("Memory forgotten", { deleted });
-      return { success: true, deleted };
+      return {
+        success: true,
+        deleted,
+        ...(sessionId && alreadyAbsent && deleted === 0 ? { alreadyAbsent: true } : {}),
+        ...(sessionId ? graphResult : {}),
+      };
     },
   );
 }

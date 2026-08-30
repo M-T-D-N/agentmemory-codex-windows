@@ -1,15 +1,19 @@
 import type { ISdk } from "iii-sdk";
-import { resolve } from "node:path";
 import { homedir } from "node:os";
-import { KV, generateId } from "../state/schema.js";
+import { resolve } from "node:path";
+import { logger } from "../logger.js";
 import { StateKV } from "../state/kv.js";
+import { generateId, KV } from "../state/schema.js";
 import type {
+  CompressedObservation,
   Memory,
   Session,
-  CompressedObservation,
   SessionSummary,
 } from "../types.js";
-import { logger } from "../logger.js";
+import {
+  recoverCodexSessionStubs,
+  type SessionStubRecoveryCandidate,
+} from "./session-stub-recovery.js";
 
 const ALLOWED_DIRS = [resolve(homedir(), ".agentmemory")];
 
@@ -86,14 +90,40 @@ export async function inferMemoryProjects(
 }
 
 export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::migrate",
-    async (data: { dbPath?: string; step?: string; dryRun?: boolean }) => {
+  sdk.registerFunction(
+    "mem::migrate",
+    async (data: {
+      dbPath?: string;
+      step?: string;
+      dryRun?: boolean;
+      candidates?: SessionStubRecoveryCandidate[];
+    }) => {
       // In-place KV migration steps (no SQLite dependency).
       if (data.step === "infer-memory-projects") {
         const dryRun = data.dryRun ?? false;
         logger.info("Migration step: infer-memory-projects", { dryRun });
         const result = await inferMemoryProjects(kv, dryRun);
         return { success: true, step: "infer-memory-projects", ...result };
+      }
+
+      if (data.step === "repair-codex-session-stubs") {
+        const dryRun = data.dryRun !== false;
+        if (!Array.isArray(data.candidates) || data.candidates.length === 0) {
+          return {
+            success: false,
+            error: "candidates are required for repair-codex-session-stubs",
+          };
+        }
+        logger.info("Migration step: repair-codex-session-stubs", {
+          dryRun,
+          candidates: data.candidates.length,
+        });
+        const result = await recoverCodexSessionStubs(kv, data.candidates, dryRun);
+        return {
+          success: result.invalid === 0 && result.conflicts === 0 && result.missing === 0,
+          step: "repair-codex-session-stubs",
+          ...result,
+        };
       }
 
       if (!data.dbPath) {

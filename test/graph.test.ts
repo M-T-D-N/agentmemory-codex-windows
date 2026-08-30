@@ -239,27 +239,379 @@ describe("Graph Functions", () => {
     }) as Promise<Record<string, unknown>>;
     await providerStarted;
 
-    const forgotten = await localSdk.trigger("mem::forget", {
+    let forgetSettled = false;
+    const forgetting = localSdk.trigger("mem::forget", {
       sessionId: "ses_1",
-    }) as { success: boolean; deleted: number };
+    }).then((value) => {
+      forgetSettled = true;
+      return value as Record<string, unknown>;
+    });
+    await Promise.resolve();
+    expect(forgetSettled).toBe(false);
     releaseProvider();
-    const result = await extraction;
+    const [forgotten, result] = await Promise.all([forgetting, extraction]);
 
-    expect(forgotten).toMatchObject({ success: true, deleted: 3 });
+    expect(forgotten).toMatchObject({
+      success: true,
+      deleted: 2,
+      graphNodesDeleted: 1,
+      graphEdgesDeleted: 0,
+    });
     expect(result).toMatchObject({
       success: true,
-      skipped: "source_deleted",
-      nodesAdded: 0,
+      nodesAdded: 1,
       edgesAdded: 0,
-      semanticCompleted: false,
+      semanticCompleted: true,
     });
     expect(await localKv.get("mem:sessions", "ses_1")).toBeNull();
     expect(await localKv.list("mem:obs:ses_1")).toEqual([]);
     expect(await localKv.list("mem:graph:nodes")).toEqual([]);
     expect(await localKv.list("mem:graph:edges")).toEqual([]);
     const audits = await localKv.list<{ functionId?: string }>("mem:audit");
-    expect(audits.filter((row) => row.functionId === "mem::graph-extract"))
-      .toEqual([]);
+    expect(audits.some((row) => row.functionId === "mem::forget")).toBe(true);
+  });
+
+  it("forgets only exact graph provenance, removes orphans, and is idempotent", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    registerGraphFunction(localSdk as never, localKv as never, mockProvider as never);
+    registerRememberFunction(localSdk as never, localKv as never);
+    const createdAt = "2026-02-01T10:00:00Z";
+    await localKv.set("mem:sessions", "ses_a", {
+      id: "ses_a",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: createdAt,
+      status: "completed",
+      observationCount: 1,
+      semanticGraphThroughObservationId: "obs_a",
+      semanticGraphStatus: "complete",
+    });
+    await localKv.set("mem:sessions", "ses_b", {
+      id: "ses_b",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: createdAt,
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_a", "obs_a", {
+      id: "obs_a",
+      sessionId: "ses_a",
+      timestamp: createdAt,
+      raw: {},
+    });
+    await localKv.set("mem:obs:ses_b", "obs_b", {
+      id: "obs_b",
+      sessionId: "ses_b",
+      timestamp: createdAt,
+      raw: {},
+    });
+    await localKv.set("mem:summaries", "ses_a", { sessionId: "ses_a" });
+
+    const nodes: GraphNode[] = [
+      {
+        id: "gn_exclusive",
+        type: "concept",
+        name: "Exclusive",
+        project: "/project-a",
+        properties: {},
+        sourceObservationIds: ["obs_a"],
+        sourceSessionIds: ["ses_a"],
+        createdAt,
+      },
+      {
+        id: "gn_shared",
+        type: "concept",
+        name: "Shared",
+        project: "/project-a",
+        properties: {},
+        sourceObservationIds: ["obs_a", "obs_b"],
+        sourceSessionIds: ["ses_a", "ses_b"],
+        createdAt,
+      },
+      {
+        id: "gn_other",
+        type: "concept",
+        name: "Other",
+        project: "/project-a",
+        properties: {},
+        sourceObservationIds: ["obs_b"],
+        sourceSessionIds: ["ses_b"],
+        createdAt,
+      },
+    ];
+    const edges: GraphEdge[] = [
+      {
+        id: "ge_exclusive",
+        type: "related_to",
+        sourceNodeId: "gn_exclusive",
+        targetNodeId: "gn_shared",
+        weight: 1,
+        project: "/project-a",
+        sourceObservationIds: ["obs_a"],
+        sourceSessionIds: ["ses_a"],
+        createdAt,
+      },
+      {
+        id: "ge_shared",
+        type: "related_to",
+        sourceNodeId: "gn_shared",
+        targetNodeId: "gn_other",
+        weight: 1,
+        project: "/project-a",
+        sourceObservationIds: ["obs_a", "obs_b"],
+        sourceSessionIds: ["ses_a", "ses_b"],
+        createdAt,
+      },
+    ];
+    for (const node of nodes) await localKv.set("mem:graph:nodes", node.id, node);
+    for (const edge of edges) await localKv.set("mem:graph:edges", edge.id, edge);
+    await localKv.set("mem:memories", "mem_keep", {
+      id: "mem_keep",
+      sessionIds: ["ses_a"],
+      sourceObservationIds: ["obs_a"],
+    });
+    await localKv.set("mem:lessons", "lsn_keep", {
+      id: "lsn_keep",
+      sessionIds: ["ses_a"],
+      sourceObservationIds: ["obs_a"],
+    });
+    await localKv.set("mem:commits", "commit_keep", {
+      sha: "commit_keep",
+      sessionIds: ["ses_a"],
+    });
+    await localSdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    const listSpy = vi.spyOn(localKv, "list");
+    const getSpy = vi.spyOn(localKv, "get");
+
+    const first = await localSdk.trigger("mem::forget", {
+      sessionId: "ses_a",
+    }) as Record<string, unknown>;
+    expect(first).toMatchObject({
+      success: true,
+      deleted: 3,
+      graphNodesDeleted: 1,
+      graphNodesDetached: 1,
+      graphEdgesDeleted: 1,
+      graphEdgesDetached: 1,
+    });
+    expect(await localKv.get("mem:graph:nodes", "gn_exclusive")).toBeNull();
+    expect(await localKv.get("mem:graph:edges", "ge_exclusive")).toBeNull();
+    expect(await localKv.get("mem:graph:nodes", "gn_shared")).toMatchObject({
+      sourceObservationIds: ["obs_b"],
+      sourceSessionIds: ["ses_b"],
+    });
+    expect(await localKv.get("mem:graph:edges", "ge_shared")).toMatchObject({
+      sourceObservationIds: ["obs_b"],
+      sourceSessionIds: ["ses_b"],
+    });
+    expect(await localKv.get("mem:graph:nodes", "gn_other")).toMatchObject({
+      sourceObservationIds: ["obs_b"],
+      sourceSessionIds: ["ses_b"],
+    });
+    expect(await localKv.get("mem:memories", "mem_keep")).not.toBeNull();
+    expect(await localKv.get("mem:lessons", "lsn_keep")).not.toBeNull();
+    expect(await localKv.get("mem:commits", "commit_keep")).not.toBeNull();
+    expect(
+      listSpy.mock.calls.some(([scope]) =>
+        scope === "mem:graph:nodes" || scope === "mem:graph:edges"
+      ),
+    ).toBe(false);
+    expect(
+      getSpy.mock.calls.some(
+        ([scope, key]) =>
+          scope === "mem:graph:query-documents" &&
+          String(key).startsWith("provenance-"),
+      ),
+    ).toBe(true);
+
+    const second = await localSdk.trigger("mem::forget", {
+      sessionId: "ses_a",
+    }) as Record<string, unknown>;
+    expect(second).toMatchObject({
+      success: true,
+      deleted: 0,
+      alreadyAbsent: true,
+    });
+    expect(await localKv.get("mem:graph:nodes", "gn_shared")).toMatchObject({
+      sourceObservationIds: ["obs_b"],
+      sourceSessionIds: ["ses_b"],
+    });
+  });
+
+  it("rewinds a deleted observation cursor and keeps same-session graph provenance", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    registerGraphFunction(localSdk as never, localKv as never, mockProvider as never);
+    registerRememberFunction(localSdk as never, localKv as never);
+    const createdAt = "2026-02-01T10:00:00Z";
+    await localKv.set("mem:sessions", "ses_partial", {
+      id: "ses_partial",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: createdAt,
+      status: "completed",
+      observationCount: 2,
+      semanticGraphThroughObservationId: "obs_2",
+      semanticGraphStatus: "complete",
+    });
+    await localKv.set("mem:obs:ses_partial", "obs_1", {
+      id: "obs_1",
+      sessionId: "ses_partial",
+      timestamp: "2026-02-01T10:00:00Z",
+      raw: {},
+    });
+    await localKv.set("mem:obs:ses_partial", "obs_2", {
+      id: "obs_2",
+      sessionId: "ses_partial",
+      timestamp: "2026-02-01T10:01:00Z",
+      raw: {},
+    });
+    await localKv.set("mem:graph:nodes", "gn_partial", {
+      id: "gn_partial",
+      type: "concept",
+      name: "Partial",
+      project: "/project-a",
+      properties: {},
+      sourceObservationIds: ["obs_1", "obs_2"],
+      sourceSessionIds: ["ses_partial"],
+      createdAt,
+    } satisfies GraphNode);
+    await localSdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+
+    const result = await localSdk.trigger("mem::forget", {
+      sessionId: "ses_partial",
+      observationIds: ["obs_2"],
+    }) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      success: true,
+      deleted: 1,
+      graphNodesDetached: 1,
+      graphNodesDeleted: 0,
+    });
+    expect(await localKv.get("mem:graph:nodes", "gn_partial")).toMatchObject({
+      sourceObservationIds: ["obs_1"],
+      sourceSessionIds: ["ses_partial"],
+    });
+    expect(await localKv.get("mem:sessions", "ses_partial")).toMatchObject({
+      observationCount: 1,
+      semanticGraphThroughObservationId: "obs_1",
+      semanticGraphStatus: "complete",
+    });
+    expect(await localKv.get("mem:obs:ses_partial", "obs_2")).toBeNull();
+
+    const replay = await localSdk.trigger("mem::forget", {
+      sessionId: "ses_partial",
+      observationIds: ["obs_2"],
+    }) as Record<string, unknown>;
+    expect(replay).toMatchObject({ success: true, deleted: 0, alreadyAbsent: true });
+  });
+
+  it("blocks forget when an exclusive node is still protected by another source edge", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    registerGraphFunction(localSdk as never, localKv as never, mockProvider as never);
+    registerRememberFunction(localSdk as never, localKv as never);
+    const createdAt = "2026-02-01T10:00:00Z";
+    await localKv.set("mem:sessions", "ses_a", {
+      id: "ses_a",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: createdAt,
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_a", "obs_a", {
+      id: "obs_a",
+      sessionId: "ses_a",
+      timestamp: createdAt,
+      raw: {},
+    });
+    await localKv.set("mem:graph:nodes", "gn_a", {
+      id: "gn_a",
+      type: "concept",
+      name: "A",
+      project: "/project-a",
+      properties: {},
+      sourceObservationIds: ["obs_a"],
+      sourceSessionIds: ["ses_a"],
+      createdAt,
+    } satisfies GraphNode);
+    await localKv.set("mem:graph:nodes", "gn_b", {
+      id: "gn_b",
+      type: "concept",
+      name: "B",
+      project: "/project-a",
+      properties: {},
+      sourceObservationIds: ["obs_b"],
+      sourceSessionIds: ["ses_b"],
+      createdAt,
+    } satisfies GraphNode);
+    await localKv.set("mem:graph:edges", "ge_b", {
+      id: "ge_b",
+      type: "related_to",
+      sourceNodeId: "gn_a",
+      targetNodeId: "gn_b",
+      weight: 1,
+      project: "/project-a",
+      sourceObservationIds: ["obs_b"],
+      sourceSessionIds: ["ses_b"],
+      createdAt,
+    } satisfies GraphEdge);
+    await localSdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+
+    await expect(localSdk.trigger("mem::forget", { sessionId: "ses_a" }))
+      .rejects.toThrow("would lose all provenance while a referenced edge remains");
+    expect(await localKv.get("mem:sessions", "ses_a")).not.toBeNull();
+    expect(await localKv.get("mem:obs:ses_a", "obs_a")).not.toBeNull();
+    expect(await localKv.get("mem:graph:nodes", "gn_a")).not.toBeNull();
+    expect(await localKv.get("mem:graph:edges", "ge_b")).not.toBeNull();
+  });
+
+  it("fails closed before source deletion when the provenance index is legacy", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    registerGraphFunction(localSdk as never, localKv as never, mockProvider as never);
+    registerRememberFunction(localSdk as never, localKv as never);
+    const createdAt = "2026-02-01T10:00:00Z";
+    await localKv.set("mem:sessions", "ses_a", {
+      id: "ses_a",
+      project: "/project-a",
+      cwd: "/project-a",
+      startedAt: createdAt,
+      status: "completed",
+      observationCount: 1,
+    });
+    await localKv.set("mem:obs:ses_a", "obs_a", {
+      id: "obs_a",
+      sessionId: "ses_a",
+      timestamp: createdAt,
+      raw: {},
+    });
+    await localKv.set("mem:graph:nodes", "gn_a", {
+      id: "gn_a",
+      type: "concept",
+      name: "A",
+      project: "/project-a",
+      properties: {},
+      sourceObservationIds: ["obs_a"],
+      sourceSessionIds: ["ses_a"],
+      createdAt,
+    } satisfies GraphNode);
+    await localSdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    const manifest = await localKv.get<Record<string, unknown>>(
+      "mem:graph:query-manifest",
+      "current",
+    );
+    const { provenanceVersion: _ignored, ...legacyManifest } = manifest ?? {};
+    await localKv.set("mem:graph:query-manifest", "current", legacyManifest);
+
+    await expect(localSdk.trigger("mem::forget", { sessionId: "ses_a" }))
+      .rejects.toThrow("exact graph provenance index is unavailable");
+    expect(await localKv.get("mem:sessions", "ses_a")).not.toBeNull();
+    expect(await localKv.get("mem:obs:ses_a", "obs_a")).not.toBeNull();
+    expect(await localKv.get("mem:graph:nodes", "gn_a")).not.toBeNull();
   });
 
   it("sends only sanitized official narrative to the graph provider", async () => {
@@ -1351,6 +1703,64 @@ describe("Graph Functions", () => {
     expect(page.edges.filter((e) => e.id.startsWith("cluster_")).length).toBe(10);
     // totalEdges counts every edge in the full result universe.
     expect(page.totalEdges).toBe(11);
+
+    const inventoryIds: string[] = [];
+    const inventoryRevisions = new Set<string>();
+    for (let edgeOffset = 0; edgeOffset < 11; edgeOffset += 4) {
+      const inventoryPage = (await sdk.trigger("mem::graph-query", {
+        project: "*",
+        limit: 1,
+        offset: 0,
+        edgeLimit: 4,
+        edgeOffset,
+      })) as GraphQueryResult & { edgeInventory?: GraphEdge[] };
+      expect(inventoryPage.edgeInventoryExact).toBe(true);
+      expect(inventoryPage.edgeLimit).toBe(4);
+      expect(inventoryPage.edgeOffset).toBe(edgeOffset);
+      expect(inventoryPage.edgeInventoryRevision).toBeTruthy();
+      inventoryRevisions.add(inventoryPage.edgeInventoryRevision!);
+      inventoryIds.push(...(inventoryPage.edgeInventory ?? []).map((edge) => edge.id));
+    }
+    expect(new Set(inventoryIds).size).toBe(11);
+    expect(inventoryIds).toHaveLength(11);
+    expect(inventoryIds).toContain("cross");
+    expect(inventoryRevisions.size).toBe(1);
+  });
+
+  it("marks an opted-in edge inventory inexact when the query index is dirty", async () => {
+    await kv.set("mem:graph:nodes", "gn_a", {
+      id: "gn_a",
+      type: "concept",
+      name: "A",
+      project: "/project-a",
+      properties: {},
+      sourceObservationIds: ["obs_a"],
+      sourceSessionIds: ["ses_a"],
+      createdAt: "2026-02-01T10:00:00Z",
+    } satisfies GraphNode);
+    await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    const manifest = await kv.get<Record<string, unknown>>(
+      "mem:graph:query-manifest",
+      "current",
+    );
+    await kv.set("mem:graph:query-manifest", "current", {
+      ...manifest,
+      dirty: true,
+    });
+
+    const result = await sdk.trigger("mem::graph-query", {
+      project: "*",
+      edgeLimit: 10,
+      edgeOffset: 0,
+    }) as GraphQueryResult;
+    expect(result).toMatchObject({
+      fromSnapshot: true,
+      edgeInventory: [],
+      edgeInventoryExact: false,
+      edgeLimit: 10,
+      edgeOffset: 0,
+    });
+    expect(result.warning).toContain("exact graph query index is temporarily unavailable");
   });
 
   // #814: precomputed snapshot path. The viewer-tab default-cap query
@@ -1713,6 +2123,37 @@ describe("Graph Functions", () => {
         stats: { totalNodes: number };
       }>("mem:graph:snapshot", "current");
       expect(snap?.stats.totalNodes).toBe(0);
+    });
+
+    it("keeps routine session forget available after an empty graph reset", async () => {
+      registerRememberFunction(sdk as never, kv as never);
+      await kv.set("mem:sessions", "ses_after_reset", {
+        id: "ses_after_reset",
+        project: "/reset",
+        cwd: "/reset",
+        startedAt: "2026-02-01T00:00:00Z",
+        status: "completed",
+        observationCount: 1,
+      });
+      await kv.set("mem:obs:ses_after_reset", "obs_after_reset", {
+        id: "obs_after_reset",
+        sessionId: "ses_after_reset",
+        timestamp: "2026-02-01T00:00:01Z",
+        raw: {},
+      });
+      await sdk.trigger("mem::graph-reset", {});
+
+      const forgotten = await sdk.trigger("mem::forget", {
+        sessionId: "ses_after_reset",
+      }) as Record<string, unknown>;
+      expect(forgotten).toMatchObject({
+        success: true,
+        deleted: 2,
+        graphNodesDeleted: 0,
+        graphEdgesDeleted: 0,
+      });
+      expect(await kv.get("mem:sessions", "ses_after_reset")).toBeNull();
+      expect(await kv.get("mem:obs:ses_after_reset", "obs_after_reset")).toBeNull();
     });
 
     it("graph-reset writes empty snapshot; legacy rows stay as orphans (#825)", async () => {

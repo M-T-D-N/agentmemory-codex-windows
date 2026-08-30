@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [Parameter(Mandatory = $true)][string]$IiiEnginePath,
     [string]$NodePath = '',
-    [string]$ReleaseRevision = 'r58',
+    [string]$ReleaseRevision = 'r61',
     [switch]$SkipTests
 )
 

@@ -7,10 +7,13 @@ import { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
 import { DedupMap } from "./dedup.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { isAutoCompressEnabled } from "../config.js";
+import {
+  getAgentId,
+  isAutoCompressEnabled,
+  isGraphExtractionEnabled,
+} from "../config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
-import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 import { saveImageToDisk } from "../utils/image-store.js";
 import { createHash } from "node:crypto";
@@ -19,6 +22,7 @@ import {
   isExcludedCodexAmbientSession,
 } from "./observation-visibility.js";
 import { safeAudit } from "./audit.js";
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -173,7 +177,7 @@ export function registerObserveFunction(
 
       const pendingImageData = extractedImage;
 
-      return withKeyedLock(`obs:${payload.sessionId}`, async () => {
+      return withKeyedLock(sessionLifecycleLockKey(payload.sessionId), async () => {
         // Existing session is the source of truth for agentId (even
         // undefined). Env AGENT_ID only fires when no session row
         // exists yet — otherwise an unscoped session would get
@@ -312,6 +316,17 @@ export function registerObserveFunction(
               value: (session.observationCount || 0) + 1,
             },
           ];
+          // A completed session can receive another turn without a fresh
+          // session-start hook. If the process stops before session-end,
+          // the backlog must still see the new tail after restart. Preserve
+          // the existing cursor and only reopen semantic graph work.
+          if (isGraphExtractionEnabled()) {
+            updates.push({
+              type: "set",
+              path: "semanticGraphStatus",
+              value: "pending",
+            });
+          }
           if (!session.firstPrompt && typeof raw.userPrompt === "string") {
             const trimmed = raw.userPrompt.replace(/\s+/g, " ").trim();
             if (trimmed.length > 0) {
