@@ -39,6 +39,7 @@ describe("@agentmemory/mcp standalone official proxy", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     resetHandleForTests();
     vi.restoreAllMocks();
     globalThis.fetch = originalFetch;
@@ -192,6 +193,47 @@ describe("@agentmemory/mcp standalone official proxy", () => {
     });
     expect(calls.some((url) => url.endsWith("/agentmemory/livez"))).toBe(false);
     expect(calls.some((url) => url.endsWith("/agentmemory/mcp/call"))).toBe(true);
+  });
+
+  it("retries force-proxy tools/list while the startup route returns 404", async () => {
+    vi.useFakeTimers();
+    process.env["AGENTMEMORY_FORCE_PROXY"] = "1";
+    let attempts = 0;
+    installFetch((url) => {
+      if (!url.endsWith("/agentmemory/mcp/tools")) {
+        return new Response("not found", { status: 404 });
+      }
+      attempts++;
+      if (attempts < 3) {
+        return new Response("not ready", {
+          status: 404,
+          statusText: "Not Found",
+        });
+      }
+      return new Response(JSON.stringify({ tools: [{ name: "memory_recall" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const pending = handleToolsList();
+    await vi.runAllTimersAsync();
+    await expect(pending).resolves.toEqual({ tools: [{ name: "memory_recall" }] });
+    expect(attempts).toBe(3);
+  });
+
+  it("does not retry a non-startup tools/list HTTP failure", async () => {
+    vi.useFakeTimers();
+    process.env["AGENTMEMORY_FORCE_PROXY"] = "1";
+    const fetchMock = installFetch(() =>
+      new Response("unauthorized", {
+        status: 401,
+        statusText: "Unauthorized",
+      }),
+    );
+
+    await expect(handleToolsList()).rejects.toThrow(/401 Unauthorized/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("allows proxy calls to use the engine's 180 second invocation window", async () => {

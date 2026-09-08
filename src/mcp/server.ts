@@ -1,6 +1,7 @@
 import type { ISdk, ApiRequest } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { parseSessionQuery, selectSessionPage } from "../functions/session-query.js";
 import type {
   SessionSummary,
   Memory,
@@ -72,6 +73,62 @@ function mcpToolResult(result: unknown, isError = false): McpResponse {
       ...(isError ? { isError: true } : {}),
     },
   };
+}
+
+type GraphProvenanceTargetPayload = {
+  kind: "node" | "edge";
+  id: string;
+  sources: Array<{ sessionId: string; observationIds: string[] }>;
+  expectedUpdatedAt?: string;
+};
+
+function parseGraphProvenanceTargets(
+  value: unknown,
+): GraphProvenanceTargetPayload[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) return null;
+  const targets: GraphProvenanceTargetPayload[] = [];
+  for (const rawTarget of value) {
+    if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) {
+      return null;
+    }
+    const target = rawTarget as Record<string, unknown>;
+    const kind = target.kind;
+    const id = asNonEmptyString(target.id);
+    if ((kind !== "node" && kind !== "edge") || !id) return null;
+    if (!Array.isArray(target.sources) || target.sources.length === 0 || target.sources.length > 50) {
+      return null;
+    }
+    const sources: GraphProvenanceTargetPayload["sources"] = [];
+    for (const rawSource of target.sources) {
+      if (!rawSource || typeof rawSource !== "object" || Array.isArray(rawSource)) {
+        return null;
+      }
+      const source = rawSource as Record<string, unknown>;
+      const sessionId = asNonEmptyString(source.sessionId);
+      if (
+        !sessionId ||
+        !Array.isArray(source.observationIds) ||
+        source.observationIds.length === 0 ||
+        source.observationIds.length > 200
+      ) {
+        return null;
+      }
+      const observationIds = source.observationIds.map(asNonEmptyString);
+      if (observationIds.some((observationId) => observationId === undefined)) return null;
+      sources.push({ sessionId, observationIds: observationIds as string[] });
+    }
+    const expectedUpdatedAt = target.expectedUpdatedAt === undefined
+      ? undefined
+      : asNonEmptyString(target.expectedUpdatedAt);
+    if (target.expectedUpdatedAt !== undefined && !expectedUpdatedAt) return null;
+    targets.push({
+      kind,
+      id,
+      sources,
+      ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+    });
+  }
+  return targets;
 }
 
 export function registerMcpEndpoints(
@@ -214,6 +271,14 @@ export function registerMcpEndpoints(
                 },
               };
             }
+            const sourceObservationIds = args.sourceObservationIds;
+            if (sourceObservationIds !== undefined && (
+              !Array.isArray(sourceObservationIds) ||
+              sourceObservationIds.length > 500 ||
+              sourceObservationIds.some((id) => typeof id !== "string" || !id.trim())
+            )) {
+              return { status_code: 400, body: { error: "sourceObservationIds must contain up to 500 non-empty strings" } };
+            }
             const type = (args.type as string) || "fact";
             const concepts =
               typeof args.concepts === "string"
@@ -236,6 +301,7 @@ export function registerMcpEndpoints(
               files,
               ...(project !== undefined && { project }),
               ...(saveAgentId !== undefined && { agentId: saveAgentId }),
+              ...(sourceObservationIds !== undefined && { sourceObservationIds }),
             } });
             if (
               result &&
@@ -298,17 +364,9 @@ export function registerMcpEndpoints(
           }
 
           case "memory_sessions": {
-            const sessions = (await kv.list<Session>(KV.sessions)).filter(
-              (session) => !isExcludedCodexAmbientSession(session),
-            );
-            return {
-              status_code: 200,
-              body: {
-                content: [
-                  { type: "text", text: JSON.stringify({ sessions }, null, 2) },
-                ],
-              },
-            };
+            const query = parseSessionQuery(args);
+            if ("error" in query) return mcpToolResult(query, true);
+            return mcpToolResult(selectSessionPage(await kv.list<Session>(KV.sessions), query));
           }
 
           case "memory_smart_search": {
@@ -500,8 +558,48 @@ export function registerMcpEndpoints(
               payload: {
                 project: args.project,
                 sources: args.sources,
+                sharedSources: args.sharedSources,
                 nodes: args.nodes,
                 edges: args.edges,
+              },
+            });
+            if (
+              result &&
+              typeof result === "object" &&
+              (result as { success?: boolean }).success === false
+            ) {
+              return mcpToolResult(result, true);
+            }
+            return mcpToolResult(result);
+          }
+
+          case "memory_graph_provenance_reconcile": {
+            const project = asNonEmptyString(args.project);
+            const reason = asNonEmptyString(args.reason);
+            const targets = parseGraphProvenanceTargets(args.targets);
+            if (!project || project === "*" || !reason || !targets) {
+              return {
+                status_code: 400,
+                body: {
+                  error:
+                    "exact project, non-empty reason, and valid targets are required for memory_graph_provenance_reconcile",
+                },
+              };
+            }
+            if (args.dryRun !== undefined && typeof args.dryRun !== "boolean") {
+              return {
+                status_code: 400,
+                body: { error: "dryRun must be a boolean" },
+              };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::graph-provenance-reconcile",
+              payload: {
+                project,
+                targets,
+                reason,
+                dryRun: args.dryRun,
+                action: args.action,
               },
             });
             if (

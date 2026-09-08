@@ -14,7 +14,8 @@ export interface Session {
   agentId?: string;
   updatedAt?: string;
   captureExcluded?: boolean;
-  captureExclusionReason?: string;
+  captureExclusionReason?: string | null;
+  codexCaptureTurnId?: string | null;
   semanticGraphThroughObservationId?: string;
   semanticGraphAnalyzer?: string;
   semanticGraphStatus?: "pending" | "complete" | "deferred" | "rejected";
@@ -92,6 +93,13 @@ export interface CompressedObservation {
   origin?: Origin;
   sourceObservationIds?: string[];
   project?: string;
+  emptyDeletion?: {
+    state: "deleted" | "restored";
+    version: number;
+    changedAt: string;
+    reason: string;
+    auditId: string;
+  };
 }
 
 export type ObservationType =
@@ -458,6 +466,13 @@ export type GraphEdgeType =
   | "succeeded_by";
 
 export interface GraphEdge {
+  reviewRetirement?: {
+    active: boolean;
+    reason: string;
+    sourceObservationIds: string[];
+    sourceSessionIds: string[];
+    updatedAt: string;
+  };
   id: string;
   type: GraphEdgeType;
   sourceNodeId: string;
@@ -680,7 +695,9 @@ export interface AuditEntry {
     | "slot_replace"
     | "slot_create"
     | "slot_delete"
+    | "graph_provenance_reconcile"
     | "session_exclude"
+    | "session_capture_reactivated"
     | "slot_reflect";
   userId?: string;
   functionId: string;

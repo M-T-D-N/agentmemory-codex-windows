@@ -20,6 +20,7 @@ describe("MCP surface consistency", () => {
     expect(new Set(names).size).toBe(names.length);
     expect(names).toContain("memory_lesson_delete");
     expect(names).toContain("memory_graph_upsert");
+    expect(names).toContain("memory_graph_provenance_reconcile");
     expect(names).toContain("memory_graph_purge");
   });
 

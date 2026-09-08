@@ -1,3 +1,4 @@
+import { listenForFetch } from "./helpers/http-port.js";
 import { describe, expect, it } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -233,9 +234,7 @@ describe("Copilot hook scripts", () => {
       });
     });
 
-    await new Promise<void>((resolveServer) => {
-      server.listen(0, "127.0.0.1", resolveServer);
-    });
+    await listenForFetch(server);
 
     const address = server.address();
     if (!address || typeof address === "string") {

@@ -67,6 +67,22 @@ describe("prepareSessionStart", () => {
     expect(result.session.endedAt).toBeUndefined();
   });
 
+  it("fills missing identity on an explicit start while preserving existing observations and exclusions", () => {
+    const incomplete = { endedAt: "2026-09-07", status: "completed", firstPrompt: "preserved source", observationCount: 13,
+      captureExcluded: true, captureExclusionReason: "manual" } as Session;
+    const result = prepareSessionStart(incomplete, { sessionId: "ses_1", project: "project-a", cwd: "C:/worktree/a" }, "2026-09-08");
+    expect(result).toMatchObject({ success: true, reused: true, session: { id: "ses_1", project: "project-a",
+      cwd: "C:/worktree/a", startedAt: "2026-09-08", status: "active", observationCount: 13,
+      firstPrompt: "preserved source", captureExcluded: true, captureExclusionReason: "manual" } });
+    if (result.success) expect(result.session.endedAt).toBeUndefined();
+    expect(incomplete).not.toHaveProperty("project");
+  });
+  it("does not reassign a known id or working directory during incomplete identity recovery", () => {
+    const input = { sessionId: "ses_1", project: "project-a", cwd: "C:/worktree/a" };
+    expect(prepareSessionStart({ id: "another" } as Session, input).success).toBe(false);
+    expect(prepareSessionStart({ cwd: "C:/other" } as Session, input).success).toBe(false);
+    expect(prepareSessionStart({ project: "other" } as Session, input).success).toBe(false);
+  });
   it("creates a new scoped session with bounded title metadata", () => {
     const title = "x".repeat(300);
     const result = prepareSessionStart(

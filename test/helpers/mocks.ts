@@ -9,17 +9,6 @@ export function mockKV() {
     get: async <T>(scope: string, key: string): Promise<T | null> => {
       return (store.get(scope)?.get(key) as T) ?? null;
     },
-    update: async (
-      scope: string,
-      key: string,
-      updates: Array<{ path: string; value: unknown }>,
-    ): Promise<void> => {
-      const entries = store.get(scope);
-      if (!entries) return;
-      const value = (entries.get(key) as Record<string, unknown>) ?? {};
-      for (const u of updates) value[u.path] = u.value;
-      entries.set(key, value);
-    },
     set: async <T>(scope: string, key: string, data: T): Promise<T> => {
       if (!store.has(scope)) store.set(scope, new Map());
       store.get(scope)!.set(key, data);

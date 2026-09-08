@@ -1,3 +1,4 @@
+import { listenForFetch } from "./helpers/http-port.js";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
@@ -9,9 +10,12 @@ let server: Server;
 let port: number;
 const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
 
-function runHook(payload: Record<string, unknown>): Promise<number> {
+function runHook(payload: Record<string, unknown>, freezeDeadlineClock = false): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn("node", ["plugin/scripts/session-end.mjs"], {
+    const clockArgs = freezeDeadlineClock
+      ? ["--import", "data:text/javascript," + encodeURIComponent("const now = Date.now(); Date.now = () => now;")]
+      : [];
+    const child = spawn("node", [...clockArgs, "plugin/scripts/session-end.mjs"], {
       env: { ...process.env, AGENTMEMORY_URL: `http://127.0.0.1:${port}` },
     });
     child.on("exit", (code) => resolve(code ?? 1));
@@ -38,7 +42,7 @@ describe("session-end transcript prompt backfill", () => {
         res.end("{}");
       });
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    await listenForFetch(server);
     port = (server.address() as { port: number }).port;
   });
 
@@ -120,7 +124,7 @@ describe("session-end transcript prompt backfill", () => {
       hook_event_name: "sessionEnd",
       reason: "completed",
       transcript_path: transcript,
-    });
+    }, true);
     expect(code).toBe(0);
     expect(posts.filter((p) => p.path.includes("/observe"))).toHaveLength(50);
   });

@@ -31,9 +31,6 @@ AgentMemory ダウンストリームです。
 - 任意で、認証情報を必要としない loopback 専用のローカル Qwen を typed graph
   抽出だけに使用できます。その他の LLM 機能は noop provider を使用し、外部
   fallback は無効のままです。
-- project、text、pagination、bounded walk の graph 読み取りは、再構築可能な
-  shard index で処理します。index が dirty または利用不能な場合は明示的な
-  bounded snapshot に縮退し、正規 graph 全体の列挙は開始しません。
 - サポート対象プロファイルは認証済み loopback MCP endpoint を使用します。
   stdio launcher は互換性経路としてのみパッケージに含まれます。
 
@@ -46,9 +43,9 @@ portable hooks、17個の skills があります。サポート対象の Windows
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.2` | 公開リポジトリのソースプレビュー版 |
+| 公開ダウンストリーム版 | `0.1.0-preview.2` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
-| 検証リビジョン | `r62` | 内部 build provenance。公開バージョン系列ではありません |
+| 検証リビジョン | `r32` | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
 
 正確なアップストリームの tag、commit、tree、元の package hash は
@@ -62,7 +59,7 @@ portable hooks、17個の skills があります。サポート対象の Windows
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、公式 iii engine `0.11.2` Windows 実行ファイル
 
-このソース公開版には、ビルド済みまたは署名済みの installer を添付しません。
+最初のソース公開版には、ビルド済みまたは署名済みの installer を添付しません。
 
 ## ソースからビルドする
 

@@ -28,14 +28,18 @@ other hosts. The supported Windows/Codex build in
 - capability-scoped `local-qwen` uses only a loopback OpenAI-compatible server
   for typed graph extraction; all other LLM features receive the noop provider,
   fallback providers remain disabled, and force-proxy prevents standalone writes;
-- writes, deletion, and derived-store provenance are exact-project scoped;
+- durable writes and manual graph provenance are exact-project scoped;
+  legacy forget is irreversible and reconciles exact live graph provenance,
+  but does not reconcile every other derived reference;
+  exact-project `delete-empty`/`restore-empty` actions recover one proven empty,
+  processed non-cursor observation in its canonical row; see the packaging contract;
   deliberate reads may use `*`, and the managed user-prompt hook performs a
   bounded cross-project recall with current-project weighting and source labels;
 - Codex performs selective promotion through the official memory, lesson, and
   manual graph tools; provider-backed summary, consolidation, reflection,
   crystallization, and compression remain disabled while local Qwen may enrich
-  the exact-project graph, a fair cursor-preserving deferred backlog retries one
-  project batch at a time, and deterministic structural extraction stays available; and
+  the exact-project graph, a fair cursor-preserving deferred backlog drains bounded batches after
+  Qwen readiness events and retains a 15-minute recovery probe, and deterministic structural extraction stays available; and
 - canonical data is installation state, not a generated build artifact. See
   `packaging/windows-codex/README.md` for build, cutover, and retention rules.
 
@@ -152,16 +156,16 @@ uses its own four-hook adapter and fail-closed local capture path documented in
 
 ## Testing
 
-- All tests must pass before PR: `pnpm test` (1,800 tests in the current preview baseline)
+- All tests must pass before PR: `pnpm test` (1,760 tests in the current preview baseline)
 - Mock pattern: `vi.mock("iii-sdk")` with mock `sdk.trigger`, `kv.get/set/list`
 - Test files go in `test/` with `.test.ts` extension
 - Follow existing patterns in `test/crystallize.test.ts` for function tests
 
 ## Current Stats (v0.9.29)
 
-- 56 MCP tools in this downstream source (upstream 54 plus provenance-preserving `memory_graph_upsert` and audited `memory_graph_purge`); all visible by default, with 8 in `AGENTMEMORY_TOOLS=core`
-- 133 REST endpoints
+- 57 MCP tools in this downstream source (upstream 54 plus provenance-preserving `memory_graph_upsert`, target-scoped `memory_graph_provenance_reconcile`, and audited `memory_graph_purge`); all visible by default, with 8 in `AGENTMEMORY_TOOLS=core`
+- 134 REST endpoints
 - 6 MCP resources, 3 MCP prompts
 - 12 hooks, 17 skills
 - 260+ iii functions
-- 1,800 package tests plus the Windows/Codex adapter tests
+- 1,760 package tests plus the Windows/Codex adapter tests

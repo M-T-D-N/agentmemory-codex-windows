@@ -31,6 +31,19 @@ function Get-NormalizedTextSha256 {
     }
 }
 
+function Get-NormalizedStringSha256 {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return (($sha.ComputeHash($encoding.GetBytes($normalized)) | ForEach-Object { $_.ToString('x2') }) -join '').ToUpperInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
 function Set-ObjectProperty {
     param([Parameter(Mandatory = $true)]$Object, [Parameter(Mandatory = $true)][string]$Name, $Value)
     if ($Object.PSObject.Properties.Name -contains $Name) {
@@ -107,12 +120,6 @@ function Move-PackageJunctionTargets {
             throw "Package junction has an unexpected target count: $($junction.FullName)"
         }
         $sourceTarget = [System.IO.Path]::GetFullPath([string]$targets[0])
-        if ($sourceTarget -eq $destination -or $sourceTarget.StartsWith($destinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            if (-not (Test-Path -LiteralPath $sourceTarget -PathType Container)) {
-                throw "Relocated package junction target is missing: $sourceTarget"
-            }
-            continue
-        }
         if ($sourceTarget -ne $source -and -not $sourceTarget.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Package junction target escapes the release package: $($junction.FullName)"
         }
@@ -319,20 +326,23 @@ if (Test-Path -LiteralPath $managedRequirements -PathType Leaf) {
     $managedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $managedRequirements).Hash
     $ownedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $existingManagedCopy).Hash
     if ($managedHash -ne $ownedHash) {
-        throw 'Managed requirements differ from the owned predecessor; refusing to overwrite unrelated Codex policy.'
+        $candidateHookSpec = Get-Content -Raw -LiteralPath (Join-Path $payload 'config\hook-spec.json') | ConvertFrom-Json
+        $candidateHookArtifacts = New-HookArtifacts -Root $root -Spec $candidateHookSpec
+        $managedNormalizedHash = Get-NormalizedTextSha256 -Path $managedRequirements
+        $candidateNormalizedHash = Get-NormalizedStringSha256 -Text $candidateHookArtifacts.Toml
+        if ($managedNormalizedHash -ne $candidateNormalizedHash) {
+            throw 'Managed requirements differ from both the owned predecessor and the exact release candidate; refusing to overwrite unrelated Codex policy.'
+        }
     }
 }
 
 $newPackageRoot = [System.IO.Path]::GetFullPath((Join-Path $root ([string]$releaseManifest.package_relative_path)))
 $reuseExistingPackage = $false
-$replaceExistingPackage = $false
 if (Test-Path -LiteralPath $newPackageRoot) {
-    if (Test-ExistingPackageMatchesRelease -PackageRoot $newPackageRoot -Manifest $releaseManifest) {
-        $reuseExistingPackage = $true
+    if (-not (Test-ExistingPackageMatchesRelease -PackageRoot $newPackageRoot -Manifest $releaseManifest)) {
+        throw "The versioned package target exists but does not exactly match the release: $newPackageRoot"
     }
-    else {
-        $replaceExistingPackage = $true
-    }
+    $reuseExistingPackage = $true
 }
 $taskRegistrations = @(Get-OwnedTaskRegistrations -Root $root)
 $hiddenLauncherRelative = 'bin\agentmemory-hidden-launcher.exe'
@@ -361,7 +371,6 @@ $summary = [ordered]@{
     target_version = [string]$releaseManifest.agentmemory_version
     target_package = $newPackageRoot
     reused_staged_package = $reuseExistingPackage
-    replace_existing_package = $replaceExistingPackage
     preserve_existing_hidden_launcher = $preserveHiddenLauncher
     canonical_data = (Join-Path $root 'data')
     data_action = 'preserve'
@@ -373,7 +382,6 @@ if (-not $Execute) {
 
 $backupId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $backupRoot = Join-Path $root "backups\releases\$backupId"
-$replacedPackageBackupRoot = Join-Path $backupRoot 'replaced-versioned-package'
 [void][System.IO.Directory]::CreateDirectory($backupRoot)
 $copyRoots = @('scripts', 'bin', 'src')
 foreach ($relative in $copyRoots) {
@@ -405,15 +413,6 @@ try {
     catch {}
 
     $packageSource = [System.IO.Path]::GetFullPath((Join-Path $payload ([string]$releaseManifest.package_relative_path)))
-    if ($replaceExistingPackage) {
-        if (-not (Test-Path -LiteralPath $newPackageRoot -PathType Container)) {
-            throw "The package selected for replacement disappeared before cutover: $newPackageRoot"
-        }
-        if (Test-ExistingPackageMatchesRelease -PackageRoot $newPackageRoot -Manifest $releaseManifest) {
-            throw "The package selected for replacement changed before cutover: $newPackageRoot"
-        }
-        Move-Item -LiteralPath $newPackageRoot -Destination $replacedPackageBackupRoot
-    }
     if (-not $reuseExistingPackage) {
         [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $newPackageRoot))
         $robocopy = Join-Path $env:SystemRoot 'System32\robocopy.exe'
@@ -507,9 +506,6 @@ try {
     if (-not $healthy) { throw 'AgentMemory did not become healthy after cutover.' }
 
     $summary.backup_root = $backupRoot
-    if ($replaceExistingPackage) {
-        $summary.replaced_package_backup = $replacedPackageBackupRoot
-    }
     $summary.healthy = $true
     $summary | ConvertTo-Json
 }
@@ -546,13 +542,6 @@ catch {
     $requirementsBackup = Join-Path $backupRoot 'requirements.toml'
     if (Test-Path -LiteralPath $requirementsBackup -PathType Leaf) {
         Copy-Item -LiteralPath $requirementsBackup -Destination $managedRequirements -Force
-    }
-    if ($replaceExistingPackage -and (Test-Path -LiteralPath $replacedPackageBackupRoot -PathType Container)) {
-        if (Test-Path -LiteralPath $newPackageRoot) {
-            Remove-Item -LiteralPath $newPackageRoot -Recurse -Force
-        }
-        [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $newPackageRoot))
-        Move-Item -LiteralPath $replacedPackageBackupRoot -Destination $newPackageRoot
     }
     try { Start-OwnedTasks -Registrations $taskRegistrations } catch {}
     throw "AgentMemory cutover failed; owned predecessor files were restored from $backupRoot. $($failure.Exception.Message)"

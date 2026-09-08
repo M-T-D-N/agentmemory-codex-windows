@@ -22,44 +22,37 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 - 주변 UI 상태, 제목·fork 트래픽, 알려진 내부 호스트 프롬프트, subagent
   트래픽은 영속 수집에서 제외합니다.
 - 쓰기·삭제·curation·provenance는 정확한 현재 프로젝트 범위로 제한합니다.
+- 감사 기록과 dry-run을 갖춘 대상 한정 live graph provenance 정정을 지원합니다.
+  여러 source group을 수동 graph write에 사용할 때는 각 node·edge에 0부터 시작하는
+  `sourceIndexes`를 지정하거나, 의도적인 공유 출처임을 `sharedSources: true`로
+  명시해야 합니다.
 - 프로젝트 간 읽기는 제한된 수량으로 수행하고 출처 프로젝트를 표시하며,
   wildcard 쓰기는 허용하지 않습니다.
 - 선택적으로 인증정보가 없는 loopback 전용 로컬 Qwen을 typed graph 추출에만
   사용합니다. 다른 LLM 기능은 noop provider를 사용하고 외부 fallback은 꺼 둡니다.
-- 프로젝트·텍스트·페이지·제한 깊이 graph 조회는 재생성 가능한 shard index로
-  처리합니다. index가 dirty이거나 없으면 명시적인 제한 snapshot으로 저하하며,
-  정본 graph 전체를 조회하는 작업은 시작하지 않습니다.
 - 지원 프로필은 인증된 loopback MCP endpoint를 사용하며, stdio launcher는
   호환성 경로로만 패키징합니다.
 
-upstream 호환 소스 surface에는 56 MCP tools, 6 resources, 3 prompts,
-port 3111의 133 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
+upstream 호환 소스 surface에는 57 MCP tools, 6 resources, 3 prompts,
+port 3111의 134 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 지원 Windows 프로필은 위 네 개의 관리형 훅만 의도적으로 활성화합니다.
 
-### 비강화 조회
+감사 목적의 MCP `memory_recall`, `memory_smart_search`, `memory_timeline`에는
+`trackAccess: false`를 지정할 수 있습니다. 조회 횟수에 따른 강화만 끄며,
+프로젝트 경계·가시성·삭제 복구 보호는 유지합니다. 기본값은 true입니다.
+그래프 조회 색인은 정본 그래프와 같은 iii 저장소에 있습니다. 색인이 없거나
+오래되면 경고와 제한된 snapshot을 반환하며, 명시적 snapshot rebuild로 갱신합니다.
 
-`memory_recall`, `memory_smart_search`, `memory_timeline`은 기본적으로 조회된
-기억의 접근 기반 보존 신호를 강화합니다. 관리 점검, 평가, 보고서, 미리보기처럼
-그 신호를 바꾸지 않아야 하는 분석 조회에는 `trackAccess`를 `false`로 설정하세요.
-이 옵션은 프로젝트 범위, 에이전트 격리, 결과 제한, 기존 감사 동작을 우회하지
-않습니다.
-
-### 오래된 빈 session-end stub
-
-내부 검증 개정 `r62`에는 `endedAt`과 `status: "completed"`만 남고 복구할
-세션·관찰 원본이 없는 오래된 stub을 위한 제한된 maintenance migration이
-포함됩니다. exact session ID만 받고 기본값은 dry-run이며, 행 모양이 다르거나
-session·observation·summary·memory·lesson·commit·crystal·graph 역참조가 하나라도
-있으면 배치 전체를 거부합니다. 적용은 공식 감사 경로를 사용하고 멱등적이며,
-일반 session 삭제나 state store 직접 수정을 허용하지 않습니다.
+현재 소스는 공개 preview 이후의 미발행 변경을 포함합니다.
+[변경 기록](../CHANGELOG.md)과 각 빌드 manifest로 실제 소스·검증 개정을 확인하세요.
 
 ## 버전 구분
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.2` | 공개 저장소의 소스 프리뷰 버전 |
+| 공개 다운스트림 버전 | `0.1.0-preview.2` | 저장소 공개판과 소스 tag |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
-| 검증 개정 | `r62` | 내부 빌드 provenance이며 공개 버전이 아님 |
+| 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
 
 정확한 upstream tag, commit, tree, 원본 package hash는
@@ -73,7 +66,7 @@ session·observation·summary·memory·lesson·commit·crystal·graph 역참조�
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)의
   SHA-256과 일치하는 공식 iii engine `0.11.2` Windows 실행 파일
 
-이 소스 공개판에는 미리 빌드되거나 서명된 installer를 첨부하지 않습니다.
+첫 소스 공개판에는 미리 빌드되거나 서명된 installer를 첨부하지 않습니다.
 
 ## 소스에서 빌드하기
 

@@ -33,6 +33,7 @@ assert.ok(coreChunk && registryChunk, "generated CLI chunks are missing");
 for (const file of [join(dist, "index.mjs"), join(dist, coreChunk), join(dist, registryChunk), standalone]) {
   const content = readFileSync(file, "utf8");
   assert.match(content, /memory_graph_upsert/);
+  assert.match(content, /memory_graph_provenance_reconcile/);
   assert.match(content, /memory_graph_purge/);
 }
 for (const file of [join(dist, "index.mjs"), join(dist, coreChunk)]) {
@@ -46,6 +47,7 @@ const fullTools = Object.values(registry)
     && value.some((tool) => tool?.name === "memory_recall")
     && value.some((tool) => tool?.name === "memory_lesson_delete")
     && value.some((tool) => tool?.name === "memory_graph_upsert")
+    && value.some((tool) => tool?.name === "memory_graph_provenance_reconcile")
     && value.some((tool) => tool?.name === "memory_graph_purge"));
 assert.ok(fullTools, "generated registry does not expose the complete tool surface");
 assert.equal(new Set(fullTools.map((tool) => tool.name)).size, fullTools.length);
@@ -109,6 +111,7 @@ try {
   assert.ok(toolsList, `missing tools/list response: ${mcp.stdout}\n${mcp.stderr}`);
   assert.equal(toolsList.result.tools.length, 7);
   assert.equal(toolsList.result.tools.some((tool) => tool.name === "memory_graph_upsert"), false);
+  assert.equal(toolsList.result.tools.some((tool) => tool.name === "memory_graph_provenance_reconcile"), false);
   assert.equal(toolsList.result.tools.some((tool) => tool.name === "memory_graph_purge"), false);
 } finally {
   rmSync(smokeHome, { recursive: true, force: true });

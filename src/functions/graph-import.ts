@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { ISdk } from "iii-sdk";
@@ -193,8 +194,7 @@ export function parseGraphifyGraph(raw: string): {
 }
 
 export function registerGraphImportFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction(
-    "mem::graph::import-graphify",
+  registerObservationWriter(sdk, "mem::graph::import-graphify",
     async (data?: { path?: string; cwd?: string }): Promise<GraphifyImportResult> => {
       const explicitPath = typeof data?.path === "string" ? data.path : undefined;
       const cwd = typeof data?.cwd === "string" ? data.cwd : process.cwd();

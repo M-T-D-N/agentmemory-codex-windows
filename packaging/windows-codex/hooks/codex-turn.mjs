@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REST_URL = process.env.AGENTMEMORY_URL || "http://127.0.0.1:3111";
@@ -61,22 +61,58 @@ function pathContains(parent, child) {
   return canonicalChild === canonicalParent || canonicalChild.startsWith(`${canonicalParent}${sep}`);
 }
 
-function loadProjectRegistry() {
-  if (registryCache) return registryCache;
-  const parsed = JSON.parse(readFileSync(PROJECT_REGISTRY, "utf8"));
-  if (!Array.isArray(parsed?.projects)) throw new Error(`Invalid project registry: ${PROJECT_REGISTRY}`);
+function readProjectRegistry(registryPath, workspaceRoot) {
+  const parsed = JSON.parse(readFileSync(registryPath, "utf8"));
+  if (!Array.isArray(parsed?.projects)) throw new Error(`Invalid project registry: ${registryPath}`);
+  let relocation;
+  try {
+    relocation = JSON.parse(readFileSync(join(dirname(registryPath), "workspace-relocation.json"), "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const relativePath = (value) => typeof value === "string" && value.trim()
+    && !isAbsolute(value) && !value.split(/[\\/]/).some((part) => part === ".." || part === ".");
+  if (relocation && (relocation.schema_version !== 1
+    || typeof relocation.target_root !== "string" || !isAbsolute(relocation.target_root)
+    || typeof relocation.cutover_state?.legacy_control_root !== "string"
+    || !isAbsolute(relocation.cutover_state.legacy_control_root)
+    || !relativePath(relocation.namespaces?.control)
+    || !["source", "target"].includes(relocation.cutover_state.control)
+    || !relativePath(relocation.namespaces?.projects)
+    || !relocation.namespaces.projects.includes("{project}")
+    || /[{}]/.test(relocation.namespaces.projects.replaceAll("{project}", "project")))) {
+    throw new Error("Invalid workspace relocation routing");
+  }
   const projects = parsed.projects.map((entry) => {
-    if (typeof entry?.id !== "string" || !entry.id.trim() || typeof entry?.path !== "string" || !entry.path.trim()) {
-      throw new Error(`Invalid project registry entry: ${PROJECT_REGISTRY}`);
+    if (typeof entry?.id !== "string" || !/^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(entry.id)
+      || !relativePath(entry?.path)) throw new Error(`Invalid project registry entry: ${registryPath}`);
+    let projectPath = resolve(workspaceRoot, entry.path);
+    if (relocation) {
+      const location = relocation.cutover_state.registered_projects?.[entry.id];
+      if (location !== "source" && location !== "target") {
+        throw new Error(`Missing or invalid project cutover state: ${entry.id}`);
+      }
+      projectPath = location === "target"
+        ? resolve(relocation.target_root, relocation.namespaces.projects.replaceAll("{project}", entry.id))
+        : resolve(relocation.cutover_state.legacy_control_root, entry.path);
     }
-    const projectPath = resolve(WORKSPACE_ROOT, entry.path);
-    return {
-      id: entry.id.trim(),
-      path: projectPath,
-      gitCommonDir: resolve(projectPath, ".git"),
-    };
+    return { id: entry.id, path: projectPath, gitCommonDir: resolve(projectPath, ".git") };
   }).sort((a, b) => b.path.length - a.path.length);
-  registryCache = { projects };
+  const controlRoot = relocation
+    ? relocation.cutover_state.control === "target"
+      ? resolve(relocation.target_root, relocation.namespaces.control)
+      : resolve(relocation.cutover_state.legacy_control_root)
+    : workspaceRoot;
+  return {
+    projects,
+    workspaceRoot: controlRoot,
+    workspaceGitCommonDir: resolve(controlRoot, ".git"),
+    workspaceProject: basename(relocation?.cutover_state.legacy_control_root || workspaceRoot),
+  };
+}
+
+function loadProjectRegistry() {
+  registryCache ??= readProjectRegistry(PROJECT_REGISTRY, WORKSPACE_ROOT);
   return registryCache;
 }
 
@@ -93,9 +129,8 @@ function gitValue(cwd, args) {
   }
 }
 
-function projectFor(cwd) {
+function projectFor(cwd, registry = loadProjectRegistry()) {
   const dir = resolve(typeof cwd === "string" && cwd.trim() ? cwd : process.cwd());
-  const registry = loadProjectRegistry();
   const direct = registry.projects.find((entry) => pathContains(entry.path, dir));
   if (direct) return direct.id;
 
@@ -105,9 +140,10 @@ function projectFor(cwd) {
       (entry) => canonicalPath(entry.gitCommonDir) === canonicalPath(commonDir),
     );
     if (linked) return linked.id;
+    if (canonicalPath(commonDir) === canonicalPath(registry.workspaceGitCommonDir)) return registry.workspaceProject;
   }
 
-  if (pathContains(WORKSPACE_ROOT, dir)) return basename(WORKSPACE_ROOT);
+  if (pathContains(registry.workspaceRoot, dir)) return registry.workspaceProject;
   const gitRoot = gitValue(dir, ["rev-parse", "--show-toplevel"]);
   return basename(gitRoot || dir);
 }
@@ -136,6 +172,13 @@ function isSdkChildContext(payload) {
     || (typeof agentType === "string" && agentType.trim().toLowerCase() !== "main");
 }
 
+function isApprovalReviewPrompt(value) {
+  if (typeof value !== "string") return false;
+  const text = value.trim().toLowerCase();
+  return text.startsWith("the following is the codex agent history whose request action you are assessing.")
+    || text.startsWith("the following is the codex agent history added since your last approval assessment.");
+}
+
 function isInternalCodexAmbientPrompt(value) {
   if (typeof value !== "string") return false;
   const text = value.trim().toLowerCase();
@@ -158,6 +201,8 @@ function isInternalCodexAmbientPrompt(value) {
     "<turn_aborted",
     "# agents.md instructions",
     "# response annotations:",
+    "the following is the codex agent history whose request action you are assessing.",
+    "the following is the codex agent history added since your last approval assessment.",
   ].some((prefix) => text.startsWith(prefix));
   const suggestionGenerator = text.startsWith("# overview")
     && text.includes("hyperpersonalized suggestion");
@@ -196,6 +241,7 @@ function promptText(value) {
 }
 
 function curationCandidateText(value) {
+  if (isInternalCodexAmbientPrompt(value)) return null;
   const text = safeText(value, MAX_CURATION_SOURCE);
   if (!text || text.length < 180) return null;
   const completed = CURATION_COMPLETION.test(text);
@@ -207,6 +253,7 @@ function curationCandidateText(value) {
 }
 
 function preferenceCandidateText(value) {
+  if (isInternalCodexAmbientPrompt(value)) return null;
   const text = safeText(value, 900);
   if (!text || !EXPLICIT_PREFERENCE.test(text)) return null;
   return text;
@@ -340,7 +387,7 @@ Source JSON:`;
   for (const source of sources.slice(0, MAX_CURATION_SOURCES)) {
     const candidate = jsonForContext([...selected, source]);
     if (`${header}\n${candidate}${footer}`.length
-      > MAX_ADDITIONAL_CONTEXT - MAX_GRAPH_CONTEXT - MAX_RECALL_CONTEXT - 4) break;
+      > MAX_ADDITIONAL_CONTEXT - MAX_GRAPH_CONTEXT - MAX_RECALL_CONTEXT - 4) continue;
     selected.push(source);
   }
   if (selected.length === 0) return null;
@@ -562,19 +609,17 @@ async function getJson(path, timeout = 1200) {
   return response.json();
 }
 
-async function markSessionExcluded(sessionId, project, cwd, reason) {
+async function markSessionExcluded(sessionId, project, cwd, reason, turnId) {
   const response = await post("/agentmemory/session/exclude", {
     sessionId,
     project,
     cwd,
     reason,
+    turnId,
   }, 1500);
   const result = await response.json();
-  if (
-    result?.success !== true ||
-    (result?.captureExcluded !== true && result?.preservedActiveSession !== true)
-  ) {
-    throw new Error("/agentmemory/session/exclude did not confirm a capture policy");
+  if (result?.success !== true || (result?.captureExcluded !== true && result?.preservedActiveSession !== true)) {
+    throw new Error("/agentmemory/session/exclude did not confirm exclusion");
   }
 }
 
@@ -671,7 +716,8 @@ async function graphContext(prompt, project) {
 function formatRecallContext(project, result) {
   if (!Array.isArray(result?.results)) return null;
   const ranked = result.results
-    .filter((entry) => entry?.observation?.id && typeof entry.project === "string" && entry.project)
+    .filter((entry) => entry?.observation?.id && typeof entry.project === "string" && entry.project
+      && !isInternalCodexAmbientPrompt(entry.observation.narrative ?? ""))
     .map((entry) => ({
       ...entry,
       rank: (Number(entry.score) || 0) + (entry.project === project ? 3 : 0),
@@ -745,6 +791,8 @@ async function handleTurn(event, eventName) {
   const isPrompt = eventName === "UserPromptSubmit";
   const cwd = resolve(typeof event.cwd === "string" && event.cwd.trim() ? event.cwd : process.cwd());
   const project = projectFor(cwd);
+  const rawTurnId = event.turn_id ?? event.turnId;
+  const turnId = typeof rawTurnId === "string" ? rawTurnId.trim() : "";
   const rawPrompt = isPrompt ? event.prompt ?? event.userPrompt : null;
   const text = isPrompt
     ? promptText(rawPrompt)
@@ -753,14 +801,14 @@ async function handleTurn(event, eventName) {
     const prompt = typeof rawPrompt === "string" ? rawPrompt : "";
     const ambientOnly = prompt.trim() && !prompt.replace(AMBIENT_UI_CONTEXT_BLOCK, "").trim();
     if (isInternalCodexAmbientPrompt(prompt) || ambientOnly) {
-      await markSessionExcluded(sessionId, project, cwd, "codex_internal_prompt");
+      await markSessionExcluded(sessionId, project, cwd, "codex_internal_prompt", turnId);
     }
     return;
   }
   if (!text) return;
+  if (!turnId || turnId.length > 512) throw new Error("Hook payload is missing a valid turn_id");
 
   const observedAt = new Date().toISOString();
-  const turnId = event.turn_id ?? event.turnId ?? observedAt;
   const graphPromise = isPrompt ? graphContext(text, project) : Promise.resolve(null);
   const recallPromise = isPrompt ? federatedRecallContext(text, project) : Promise.resolve(null);
   const backlogPromise = isPrompt ? curationBacklogSources(project, String(turnId)) : Promise.resolve([]);
@@ -771,8 +819,9 @@ async function handleTurn(event, eventName) {
     cwd,
     timestamp: observedAt,
     data: isPrompt
-      ? { prompt: text }
+      ? { prompt: text, codex_turn_id: turnId }
       : {
+          codex_turn_id: turnId,
           tool_name: "assistant_response",
           tool_input: { turn_id: String(turnId) },
           tool_output: text,
@@ -782,7 +831,10 @@ async function handleTurn(event, eventName) {
   if (observeResult?.success === false || observeResult?.error) {
     throw new Error(`/agentmemory/observe failed: ${observeResult.error || "unknown error"}`);
   }
-  if (observeResult?.skipped === true) return;
+  if (observeResult?.skipped === true) {
+    await Promise.all([graphPromise, recallPromise, backlogPromise]);
+    return;
+  }
   if (!observeResult?.observationId && observeResult?.deduplicated !== true) {
     throw new Error("/agentmemory/observe did not return an observation ID or deduplication result");
   }
@@ -830,7 +882,7 @@ async function main() {
     throw new Error("Hook payload is not valid JSON");
   }
   if (!event || typeof event !== "object") throw new Error("Hook payload must be an object");
-  if (isSdkChildContext(event)) return;
+  if (isSdkChildContext(event) || isApprovalReviewPrompt(event.prompt ?? event.userPrompt)) return;
 
   const eventName = event.hook_event_name ?? event.hookEventName;
   if (eventName === "SessionStart") return handleSessionStart(event);
@@ -844,6 +896,7 @@ export {
   boundedAdditionalContext,
   collectHandledObservationIds,
   curationCandidateText,
+  isApprovalReviewPrompt,
   isExcludedSession,
   isInternalCodexAmbientPrompt,
   formatGraphContext,
@@ -855,6 +908,7 @@ export {
   observationCurationSource,
   preferenceCandidateText,
   projectFor,
+  readProjectRegistry,
   promptText,
   safeText,
   selectFairCurationSources,

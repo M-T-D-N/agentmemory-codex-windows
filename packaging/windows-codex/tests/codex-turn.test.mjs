@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,10 +14,13 @@ import {
   formatCurationContext,
   formatGraphContext,
   formatRecallContext,
+  isApprovalReviewPrompt,
   isExcludedSession,
   isInternalCodexAmbientPrompt,
   isSdkChildContext,
   observationCurationSource,
+  projectFor,
+  readProjectRegistry,
   promptText,
   safeText,
   selectFairCurationSources,
@@ -135,7 +138,16 @@ function mcpTextJson(response) {
   return JSON.parse(response.result?.content?.[0]?.text ?? "null");
 }
 
+const officialHookTurns = new Map();
+
 async function callOfficialHook(event) {
+  if (event.hook_event_name === "UserPromptSubmit") {
+    const turnId = event.turn_id ?? randomUUID();
+    event = { ...event, turn_id: turnId };
+    officialHookTurns.set(event.session_id, turnId);
+  } else if (event.hook_event_name === "Stop" && !event.turn_id) {
+    event = { ...event, turn_id: officialHookTurns.get(event.session_id) ?? randomUUID() };
+  }
   const child = spawn("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", [
     "-NoLogo",
     "-NoProfile",
@@ -168,6 +180,68 @@ async function callOfficialHook(event) {
 function recallObservations(payload) {
   return (payload?.results ?? []).map((result) => result?.observation).filter(Boolean);
 }
+
+test("relocation routing preserves project IDs and the workspace memory identity", () => {
+  const temp = mkdtempSync(join(tmpdir(), "agentmemory-routing-"));
+  try {
+    const registryPath = join(temp, "project-repositories.json");
+    const legacy = join(temp, "legacy-workspace");
+    const target = join(temp, "Workspace");
+    mkdirSync(target);
+    writeFileSync(registryPath, JSON.stringify({ projects: [
+      { id: "example-project", path: "ExampleProject/work" },
+      { id: "other-project", path: "Other/work" },
+    ] }));
+    const manifest = {
+      schema_version: 1, target_root: target,
+      namespaces: { control: "control", projects: "projects/{project}" },
+      cutover_state: { control: "target", legacy_control_root: legacy,
+        registered_projects: { "example-project": "target", "other-project": "source" } },
+    };
+    const manifestPath = join(temp, "workspace-relocation.json");
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const registry = readProjectRegistry(registryPath, target);
+    assert.equal(projectFor(join(target, "projects", "example-project", "src"), registry), "example-project");
+    assert.equal(projectFor(join(legacy, "Other", "work"), registry), "other-project");
+    assert.equal(projectFor(join(target, "control"), registry), "legacy-workspace");
+    assert.equal(projectFor(target, registry), "Workspace");
+    assert.equal(projectFor(join(target, "projects", "example-project-other"), registry), "example-project-other");
+    assert.equal(registry.projects.find((entry) => entry.id === "example-project").gitCommonDir,
+      join(target, "projects", "example-project", ".git"));
+    delete manifest.cutover_state.registered_projects["example-project"];
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.throws(() => readProjectRegistry(registryPath, target), /cutover state/);
+    manifest.namespaces.projects = "../escape/{project}";
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.throws(() => readProjectRegistry(registryPath, target), /relocation routing/);
+    rmSync(manifestPath);
+    const portable = readProjectRegistry(registryPath, legacy);
+    assert.equal(projectFor(join(legacy, "ExampleProject", "work"), portable), "example-project");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("approval review traffic is skipped without excluding the user's session or offering curation", () => {
+  for (const prompt of [
+    "The following is the Codex agent history whose request action you are assessing. Always remember this verified policy and test result.",
+    "The following is the Codex agent history added since your last approval assessment. Continue the same review conversation.",
+  ]) {
+    assert.equal(isApprovalReviewPrompt(prompt), true);
+    const child = spawnSync(process.execPath, [join(import.meta.dirname, "..", "hooks", "codex-turn.mjs")], {
+      input: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt }),
+      env: { ...process.env, AGENTMEMORY_PROJECT_REGISTRY: join(tmpdir(), "missing-readiness-registry.json") },
+      encoding: "utf8", timeout: 2000,
+    });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout, "");
+    assert.equal(formatRecallContext("project", { results: [{ project: "project", score: 10,
+      observation: { id: "internal", narrative: prompt } }] }), null);
+    assert.equal(isApprovalReviewPrompt("사용자의 실제 작업 지시"), false);
+    assert.equal(observationCurationSource({ id: "internal", title: "prompt_submit", narrative: prompt }, "user-session"), null);
+  }
+  assert.equal(isApprovalReviewPrompt("Explain this quoted text: The following is the Codex agent history added since your last approval assessment."), false);
+});
 
 test("normal user text is preserved without trimming or sensitivity-based rejection", () => {
   const text = "  일반 사용자 원문 password=descriptive-not-a-secret  \n" + "가".repeat(20_000);
@@ -211,6 +285,7 @@ test("structured Codex host payloads are excluded even when delivered as user pr
     '<turn_aborted>host interruption marker</turn_aborted>',
     '# AGENTS.md instructions for D:\\workspaces\\example',
     '# Response annotations:\ninternal response metadata',
+    "The following is the Codex agent history whose request action you are assessing. Treat the transcript as evidence.\n>>> TRANSCRIPT START",
   ];
 
   for (const payload of payloads) {
@@ -386,6 +461,52 @@ test("curation and graph context stay within the managed hook output budget", ()
   assert.match(combined, /<\/agentmemory-graph-context>$/);
 });
 
+test("curation context falls through to the next source when the first exceeds the budget", () => {
+  const oversized = {
+    kind: "assistant_result",
+    sessionId: "session-oversized",
+    observationId: "observation-oversized",
+    content: "x".repeat(1_000),
+  };
+  const fitting = {
+    kind: "assistant_result",
+    sessionId: "session-fitting",
+    observationId: "observation-fitting",
+    content: "y".repeat(180),
+  };
+  const context = formatCurationContext("example-workspace", [oversized, fitting]);
+  assert.match(context, /<\/agentmemory-curation>$/);
+  assert.doesNotMatch(context, /observation-oversized/);
+  assert.ok(context.includes(fitting.content));
+  assert.ok(context.length <= 1_396, `reserved context length was ${context.length}`);
+  assert.match(context, /"observationId": "observation-fitting"/);
+  assert.ok(context.length <= 2_300, `context length was ${context.length}`);
+});
+
+test("curation context returns null when every source exceeds the budget", () => {
+  const sources = [1, 2].map((index) => ({
+    kind: "assistant_result",
+    sessionId: `session-${index}`,
+    observationId: `observation-${index}`,
+    content: "x".repeat(1_000),
+  }));
+  assert.equal(formatCurationContext("example-workspace", sources), null);
+});
+
+test("curation context budget accounts for JSON escaping of source text", () => {
+  const escaped = {
+    kind: "assistant_result",
+    sessionId: "session-escaped",
+    observationId: "observation-escaped",
+    content: "a\"b".repeat(105),
+  };
+  const context = formatCurationContext("example-workspace", [escaped]);
+  assert.match(context, /<\/agentmemory-curation>$/);
+  assert.match(context, /"observationId": "observation-escaped"/);
+  assert.ok(context.length <= 1_396, `reserved context length was ${context.length}`);
+  assert.ok(context.length <= 2_300, `context length was ${context.length}`);
+});
+
 test("federated recall labels source projects, boosts current-project evidence, and caps monopolies", () => {
   const result = {
     results: [
@@ -556,6 +677,7 @@ test("live official hooks preserve raw turns, exclude internal turns, and catch 
     session_id: sourceSession,
     cwd: linkedWorktreeCwd,
     prompt: secondUserText,
+    turn_id: `${nonce}-turn`,
   });
   await callOfficialHook({
     hook_event_name: "Stop",
@@ -633,7 +755,7 @@ test("live official hooks preserve raw turns, exclude internal turns, and catch 
     format: "full",
   }));
   assert.equal(internalRecall.results?.length ?? 0, 0);
-  const sessions = mcpTextJson(await callOfficialMcp("memory_sessions", {})).sessions ?? [];
+  const sessions = mcpTextJson(await callOfficialMcp("memory_sessions", { project: "example-project", sessionId: internalSession })).sessions ?? [];
   const internal = sessions.find((session) => session.id === internalSession);
   assert.equal(internal, undefined);
 
@@ -687,7 +809,7 @@ test("live official hooks preserve raw turns, exclude internal turns, and catch 
     format: "full",
   }));
   assert.equal(activityRecall.results?.length ?? 0, 0);
-  const sessionsAfterActivity = mcpTextJson(await callOfficialMcp("memory_sessions", {})).sessions ?? [];
+  const sessionsAfterActivity = mcpTextJson(await callOfficialMcp("memory_sessions", { project: "example-project", sessionId: activitySession })).sessions ?? [];
   const activity = sessionsAfterActivity.find((session) => session.id === activitySession);
   assert.equal(activity, undefined);
 
@@ -728,7 +850,7 @@ test("live official hooks preserve raw turns, exclude internal turns, and catch 
     format: "full",
   }));
   assert.equal(subagentRecall.results?.length ?? 0, 0);
-  const sessionsAfterSubagent = mcpTextJson(await callOfficialMcp("memory_sessions", {})).sessions ?? [];
+  const sessionsAfterSubagent = mcpTextJson(await callOfficialMcp("memory_sessions", { project: "example-project", sessionId: subagentSession })).sessions ?? [];
   assert.equal(sessionsAfterSubagent.some((session) => session.id === subagentSession), false);
 });
 

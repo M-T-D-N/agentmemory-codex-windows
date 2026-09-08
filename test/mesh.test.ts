@@ -19,6 +19,8 @@ import type {
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
+    assertRecoveryImportAllowed: () => {},
+    hasObservationRecovery: () => false,
     get: async <T>(scope: string, key: string): Promise<T | null> => {
       return (store.get(scope)?.get(key) as T) ?? null;
     },

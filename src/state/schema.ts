@@ -81,6 +81,21 @@ export const KV = {
   recentSearches: "mem:recent-searches",
 } as const;
 
+export const OBSERVATION_REFERENCE_ROW_SCOPES = [
+  KV.graphNodes,
+  KV.graphEdges,
+  KV.graphEdgeHistory,
+  KV.memories,
+  KV.lessons,
+  KV.semantic,
+  KV.procedural,
+  KV.actions,
+  KV.crystals,
+  KV.commits,
+  KV.summaries,
+  KV.relations,
+] as const;
+
 export const STREAM = {
   name: "mem-live",
   group: (sessionId: string) => sessionId,

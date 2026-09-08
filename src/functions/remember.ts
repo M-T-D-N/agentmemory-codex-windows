@@ -1,3 +1,4 @@
+import { withObservationWrite, registerObservationWriter } from "../state/observation-write.js";
 import { TriggerAction, type ISdk } from "iii-sdk";
 import type { Memory, RawObservation, Session } from "../types.js";
 import { KV, generateId, jaccardSimilarity } from "../state/schema.js";
@@ -39,7 +40,7 @@ function safeSlice(text: string, length: number): string {
 }
 
 export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::remember", 
+  registerObservationWriter(sdk, "mem::remember",
     async (data: {
       content: string;
       type?: string;
@@ -320,7 +321,30 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       sessionId?: string;
       observationIds?: string[];
       memoryId?: string;
+      project?: string;
+      dryRun?: boolean;
+      action?: string;
+      expectedVersion?: number;
+      reason?: string;
     }) => {
+      if (data.action !== undefined) {
+        const { changeEmptyObservation } = await import("./empty-observation.js");
+        return changeEmptyObservation(kv, data);
+      }
+      if (data.dryRun !== undefined && typeof data.dryRun !== "boolean") return { success: false, error: "dryRun must be a boolean" };
+      if (data.observationIds !== undefined && (!Array.isArray(data.observationIds) || data.observationIds.length === 0)) {
+        return { success: false, error: "observationIds must be a non-empty array; omit it only for explicit whole-session deletion" };
+      }
+      if (data.dryRun === true) {
+        try {
+          const { previewSessionForget } = await import("./forget-preview.js");
+          return await previewSessionForget(kv, data);
+        } catch (error) {
+          return { success: false, dryRun: true, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      return withObservationWrite(async () => {
+      kv.assertRecoveryImportAllowed({ sessionId: data.sessionId, observationIds: data.observationIds });
       let deleted = 0;
       const deletedMemoryIds: string[] = [];
       const deletedObservationIds: string[] = [];
@@ -496,6 +520,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         ...(sessionId && alreadyAbsent && deleted === 0 ? { alreadyAbsent: true } : {}),
         ...(sessionId ? graphResult : {}),
       };
+      });
     },
   );
 }

@@ -24,6 +24,8 @@ import type {
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
+    // These fixtures contain no recoverable observations; StateKV guards are covered separately.
+    assertRecoveryImportAllowed: () => {},
     get: async <T>(scope: string, key: string): Promise<T | null> => {
       return (store.get(scope)?.get(key) as T) ?? null;
     },
@@ -209,6 +211,66 @@ describe("Graph Functions", () => {
         semanticGraphAnalyzer: "test",
         semanticGraphStatus: "complete",
       });
+  });
+
+  it("keeps a newly captured tail pending when an earlier extraction finishes", async () => {
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const localSdk = mockSdk(); const localKv = mockKV();
+    for (const id of ["stream::set", "stream::send"]) localSdk.registerFunction(id, async () => null);
+    registerObserveFunction(localSdk as never, localKv as never);
+    await localKv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", cwd: "/project-a",
+      status: "completed", observationCount: 1, semanticGraphStatus: "complete" });
+    await localKv.set("mem:obs:ses_1", "obs_1", testObs);
+    let capturedId: string | undefined;
+    const provider = { name: "test", compress: vi.fn(async () => {
+      const captured = await localSdk.trigger("mem::observe", { sessionId: "ses_1", project: "/project-a",
+        cwd: "/project-a", hookType: "prompt_submit", timestamp: "2026-02-01T10:01:00Z",
+        data: { prompt: "new observation while provider was running" } });
+      capturedId = captured.observationId;
+      expect(capturedId).toBeTruthy();
+      return "<entities></entities><relationships></relationships>";
+    }) };
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1",
+      observations: [testObs], semanticHasMore: false });
+    expect(result).toMatchObject({ success: true, semanticCompleted: true });
+    expect(await localKv.get("mem:sessions", "ses_1")).toMatchObject({
+      semanticGraphStatus: "pending", semanticGraphThroughObservationId: "obs_1", observationCount: 2 });
+    expect(await localKv.get("mem:obs:ses_1", capturedId!)).not.toBeNull();
+  });
+
+  it.each(["forward", "bootstrap_backfill"])("derives completion from current official cursors for %s", async (mode) => {
+    const second = { ...testObs, id: "obs_2", timestamp: "2026-02-01T10:01:00Z" };
+    await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", status: "completed",
+      ...(mode === "bootstrap_backfill" ? { semanticGraphThroughObservationId: "obs_2", semanticGraphBootstrapSkipped: 1 } : {}) });
+    await kv.set("mem:obs:ses_1", "obs_1", testObs); await kv.set("mem:obs:ses_1", "obs_2", second);
+    mockProvider.compress.mockImplementationOnce(async () => {
+      await kv.set("mem:obs:ses_1", "obs_3", { ...testObs, id: "obs_3", timestamp: "2026-02-01T10:02:00Z" });
+      return "<entities></entities><relationships></relationships>";
+    });
+    expect(await sdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1",
+      observations: [testObs], cursorMode: mode, semanticBootstrapDone: true, semanticHasMore: false }))
+      .toMatchObject({ success: true });
+    expect(await kv.get("mem:sessions", "ses_1")).toMatchObject({ semanticGraphStatus: "pending",
+      ...(mode === "bootstrap_backfill" ? { semanticGraphThroughObservationId: "obs_2",
+        semanticGraphBackfillThroughObservationId: "obs_1", semanticGraphBootstrapSkipped: 0 }
+        : { semanticGraphThroughObservationId: "obs_1" }) });
+  });
+
+  it.each(["missing", "changed_project"])("does not update postflight session metadata when it is %s", async (mode) => {
+    await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a" });
+    await kv.set("mem:obs:ses_1", "obs_1", testObs);
+    const update = vi.spyOn(kv, "update");
+    mockProvider.compress.mockImplementationOnce(async () => {
+      if (mode === "missing") await kv.delete("mem:sessions", "ses_1");
+      else await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/other" });
+      update.mockClear();
+      return "<entities></entities><relationships></relationships>";
+    });
+    expect(await sdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [testObs] }))
+      .toMatchObject({ success: false });
+    expect(update.mock.calls.filter(([scope]) => scope === "mem:sessions")).toEqual([]);
+    expect(await kv.get("mem:sessions", "ses_1")).toEqual(mode === "missing" ? null : { id: "ses_1", project: "/other" });
   });
 
   it("does not resurrect a session forgotten during provider inference", async () => {
@@ -979,6 +1041,129 @@ describe("Graph Functions", () => {
     expect(await localKv.list<GraphNode>("mem:graph:nodes")).toEqual([]);
   });
 
+  it.each(["valid", "invalid_again", "multiple_sources"])("regenerates only an exact single-source citation failure once: %s", async (outcome) => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const sourceId = "obs_mtj6kfub_f02ae9c7fc32";
+    const invalidId = "obs_mtj6kfub_f02ae9c7";
+    const observation = { ...testObs, id: sourceId, narrative: "Keep the current local root until the user approves relocation.", concepts: [], files: [] };
+    const second = { ...observation, id: "obs_second", timestamp: "2026-02-01T11:00:00Z" };
+    const xml = (id: string) => `<entities><entity key="n1" type="decision" name="Keep current root" source_observation_ids="${id}"/></entities><relationships></relationships>`;
+    const provider = {
+      name: "local-qwen",
+      compress: vi.fn().mockResolvedValueOnce(xml(invalidId)).mockResolvedValueOnce(xml(outcome === "valid" ? sourceId : "obs_foreign")),
+      summarize: vi.fn(),
+      getRuntimeInfo: () => null,
+    };
+    await localKv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", cwd: "/project-a", startedAt: "2026-02-01T10:00:00Z", status: "completed", observationCount: outcome === "multiple_sources" ? 2 : 1 });
+    await localKv.set("mem:obs:ses_1", sourceId, observation);
+    if (outcome === "multiple_sources") await localKv.set("mem:obs:ses_1", second.id, second);
+    await localKv.set("mem:sessions", "foreign_session", { id: "foreign_session", project: "/other" });
+    await localKv.set("mem:obs:foreign_session", "obs_foreign", { ...observation, id: "obs_foreign", sessionId: "foreign_session" });
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: outcome === "multiple_sources" ? [observation, second] : [observation] });
+    expect(result.semanticCompleted).toBe(outcome === "valid");
+    expect(provider.compress).toHaveBeenCalledTimes(outcome === "multiple_sources" ? 1 : 2);
+    if (outcome !== "multiple_sources") {
+      const regeneration = provider.compress.mock.calls[1]![1];
+      expect(regeneration).toContain(observation.narrative);
+      expect(regeneration).toContain(`Observation ID: ${sourceId}`);
+      expect(regeneration).toContain("Regenerate a fresh result");
+      expect(regeneration).not.toContain(`source_observation_ids="${invalidId}"`);
+    }
+    const session = await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1");
+    const providerNodes = (await localKv.list<GraphNode>("mem:graph:nodes")).filter(node => node.properties?.curation_lane === "provider_graph");
+    if (outcome === "valid") {
+      expect(session).toMatchObject({ semanticGraphStatus: "complete", semanticGraphThroughObservationId: sourceId });
+      expect(providerNodes).toHaveLength(1);
+      expect(providerNodes[0]!.sourceObservationIds).toEqual([sourceId]);
+    } else {
+      expect(session).toMatchObject({ semanticGraphStatus: "deferred" });
+      expect(session?.semanticGraphThroughObservationId).toBeUndefined();
+      expect(providerNodes).toEqual([]);
+    }
+  });
+
+  it("discards parsed provider nodes when a regenerated relationship still cites a foreign observation", async () => {
+    const localSdk = mockSdk();
+    const localKv = mockKV();
+    const observation = { ...testObs, narrative: "The runner uses the parser.", concepts: [], files: [] };
+    const xml = `<entities>
+<entity key="n1" type="function" name="runner" source_observation_ids="obs_1"/>
+<entity key="n2" type="function" name="parser" source_observation_ids="obs_1"/>
+</entities><relationships><relationship type="uses" source="n1" target="n2" source_observation_ids="obs_foreign"/></relationships>`;
+    const provider = { name: "local-qwen", compress: vi.fn().mockResolvedValue(xml), summarize: vi.fn() };
+    await localKv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", cwd: "/project-a", status: "completed", observationCount: 1 });
+    await localKv.set("mem:obs:ses_1", observation.id, observation);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [observation] });
+    expect(result).toMatchObject({ semanticCompleted: false, semanticRepairAttempted: true });
+    expect(provider.compress).toHaveBeenCalledTimes(2);
+    expect(provider.compress.mock.calls[1]![1]).toContain(observation.narrative);
+    const session = await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1");
+    expect(session?.semanticGraphThroughObservationId).toBeUndefined();
+    expect(session?.semanticGraphStatus).toBe("deferred");
+    expect((await localKv.list<GraphNode>("mem:graph:nodes")).filter(n => n.properties?.curation_lane === "provider_graph")).toEqual([]);
+    expect((await localKv.list<GraphEdge>("mem:graph:edges")).filter(e => e.properties?.curation_lane === "provider_graph")).toEqual([]);
+  });
+
+
+  it.each(["initial", "delta", "noop"])("consumes internal approval input without deriving graph content or deleting the source: %s", async (mode) => {
+    const localSdk = mockSdk(), localKv = mockKV();
+    const prefix = mode === "initial"
+      ? "The following is the Codex agent history whose request action you are assessing."
+      : "The following is the Codex agent history added since your last approval assessment.";
+    const observation = { ...testObs, narrative: prefix + " Synthetic internal review.", concepts: ["must not derive"], files: ["internal-only.ts"] };
+    const provider = { name: mode === "noop" ? "noop" : "local-qwen", compress: vi.fn(), summarize: vi.fn() };
+    const session = { id: "ses_1", project: "/project-a", status: "completed", observationCount: 1, semanticGraphLastError: "entity contains an invalid key, type, or name" };
+    await localKv.set("mem:sessions", "ses_1", session);
+    await localKv.set("mem:obs:ses_1", observation.id, observation);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [observation] });
+    expect(result).toMatchObject({ success: true, processingCompleted: true, semanticCompleted: false, semanticRepairAttempted: false, excludedObservationIds: [observation.id], nodesAdded: 0, edgesAdded: 0 });
+    expect(provider.compress).not.toHaveBeenCalled();
+    expect(await localKv.get("mem:obs:ses_1", observation.id)).toEqual(observation);
+    expect(await localKv.get("mem:sessions", "ses_1")).toMatchObject({ semanticGraphStatus: "complete", semanticGraphThroughObservationId: observation.id, semanticGraphLastError: "", observationCount: 1 });
+    expect(await localKv.list("mem:graph:nodes")).toEqual([]);
+    expect(await localKv.list("mem:graph:edges")).toEqual([]);
+    const audit = (await localKv.list<Record<string, any>>("mem:audit")).find(a => a.functionId === "mem::graph-extract");
+    expect(audit).toMatchObject({ targetIds: [observation.id], details: { processingCompleted: true, semanticCompleted: false, excludedObservationIds: [observation.id], exclusionReason: "codex_approval_review" } });
+  });
+
+  it.each([false, true])("excludes internal sources from mixed batches while preserving exact cursor and citation checks: %s", async (citeInternal) => {
+    const localSdk = mockSdk(), localKv = mockKV();
+    const normal = { ...testObs, narrative: "The parser uses the lexer.", concepts: [], files: [] };
+    const internal = { ...normal, id: "obs_internal", timestamp: "2026-02-01T11:00:00Z", narrative: "The following is the Codex agent history added since your last approval assessment. Synthetic internal review." };
+    const cited = citeInternal ? internal.id : normal.id;
+    const provider = { name: "local-qwen", compress: vi.fn().mockResolvedValue(`<entities><entity key="n1" type="function" name="parser" source_observation_ids="${cited}"/></entities><relationships></relationships>`), summarize: vi.fn() };
+    await localKv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", status: "completed", observationCount: 2 });
+    for (const o of [normal, internal]) await localKv.set("mem:obs:ses_1", o.id, o);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [normal, internal] });
+    expect(result.processingCompleted).toBe(!citeInternal);
+    expect(provider.compress.mock.calls[0]![1]).toContain(normal.narrative);
+    expect(provider.compress.mock.calls[0]![1]).not.toContain(internal.narrative);
+    const session = await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1");
+    expect(session?.semanticGraphThroughObservationId).toBe(citeInternal ? undefined : internal.id);
+    const nodes = await localKv.list<GraphNode>("mem:graph:nodes");
+    expect(nodes).toHaveLength(citeInternal ? 0 : 1);
+    if (!citeInternal) expect(nodes[0]!.sourceObservationIds).toEqual([normal.id]);
+    expect(await localKv.get("mem:obs:ses_1", internal.id)).toEqual(internal);
+  });
+
+  it("keeps a normal user's explanation request that quotes the approval template", async () => {
+    const localSdk = mockSdk(), localKv = mockKV();
+    const observation = { ...testObs, narrative: "Explain this text: The following is the Codex agent history added since your last approval assessment.", concepts: [], files: [] };
+    const provider = { name: "local-qwen", compress: vi.fn().mockResolvedValue("<entities></entities><relationships></relationships>"), summarize: vi.fn() };
+    await localKv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", status: "completed", observationCount: 1 });
+    await localKv.set("mem:obs:ses_1", observation.id, observation);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [observation] });
+    expect(result.semanticCompleted).toBe(true);
+    expect(result.excludedObservationIds).toBeUndefined();
+    expect(provider.compress).toHaveBeenCalledOnce();
+  });
+
   it("keeps the semantic cursor unchanged when foreground Qwen preempts extraction", async () => {
     const localSdk = mockSdk();
     const localKv = mockKV();
@@ -1019,6 +1204,71 @@ describe("Graph Functions", () => {
     expect((await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
       ?.semanticGraphThroughObservationId).toBeUndefined();
   });
+
+  it("updates one exact same-name node without absorbing its sibling or redirecting edges", async () => {
+    await kv.set("mem:sessions", "ses_exact", { id: "ses_exact", project: "/app", status: "completed" });
+    await kv.set("mem:obs:ses_exact", "obs_exact", { ...testObs, id: "obs_exact", sessionId: "ses_exact" });
+    const sources = [{ sessionId: "ses_exact", observationIds: ["obs_exact"] }];
+    const initial = await sdk.trigger("mem::graph-upsert", {
+      project: "/app", sources,
+      nodes: [{ key: "old", type: "decision", name: "CREATE_NARROWED", properties: { scope: "first" } },
+        { key: "anchor", type: "concept", name: "Anchor" }],
+      edges: [{ source: "old", target: "anchor", type: "related_to" }],
+    }) as { success: boolean; nodeIds: Record<string, string> };
+    expect(initial.success).toBe(true);
+    const first = await kv.get<GraphNode>("mem:graph:nodes", initial.nodeIds.old);
+    await kv.set("mem:graph:nodes", "gn_second", { ...first, id: "gn_second", properties: { project: "/app", scope: "second" } });
+    await kv.set("mem:graph:edges", "ge_second", {
+      id: "ge_second", type: "related_to", sourceNodeId: "gn_second", targetNodeId: initial.nodeIds.anchor,
+      project: "/app", sourceObservationIds: ["obs_exact"], sourceSessionIds: ["ses_exact"],
+      createdAt: testObs.timestamp, weight: 0.5,
+    });
+    await sdk.trigger("mem::graph-snapshot-rebuild", {});
+    const snapshotBefore = await kv.get<{ stats: unknown }>("mem:graph:snapshot", "current");
+    const edgesBefore = structuredClone(await kv.list("mem:graph:edges"));
+    const indexBefore = structuredClone(await kv.list("mem:graph:name-index"));
+    const result = await sdk.trigger("mem::graph-upsert", {
+      project: "/app", sources,
+      nodes: [{ key: "selected", existingNodeId: "gn_second", type: "decision", name: "CREATE_NARROWED", properties: { status: "superseded" } }],
+    }) as { success: boolean; nodeIds: Record<string, string> };
+    expect(result).toMatchObject({ success: true, nodeIds: { selected: "gn_second" } });
+    expect(await kv.get("mem:graph:nodes", initial.nodeIds.old)).toEqual(first);
+    expect(await kv.get("mem:graph:nodes", "gn_second")).toMatchObject({
+      stale: false, properties: { scope: "second", status: "superseded" }, sourceObservationIds: ["obs_exact"],
+    });
+    expect(await kv.list("mem:graph:edges")).toEqual(edgesBefore);
+    expect(await kv.list("mem:graph:name-index")).toEqual(indexBefore);
+    expect(await kv.list("mem:graph:nodes")).toHaveLength(3);
+    expect((await kv.get<{ stats: unknown }>("mem:graph:snapshot", "current"))?.stats).toEqual(snapshotBefore?.stats);
+  });
+
+  it.each(["missing", "project", "name", "type", "stale", "reset", "mixed", "mixed-reversed", "repeated", "blank"])(
+    "rejects invalid exact graph target %s before any mutation", async (kind) => {
+      await kv.set("mem:sessions", "ses_exact", { id: "ses_exact", project: "/app", status: "completed" });
+      await kv.set("mem:obs:ses_exact", "obs_exact", { ...testObs, id: "obs_exact", sessionId: "ses_exact" });
+      await kv.set("mem:graph:nodes", "gn_exact", {
+        id: "gn_exact", project: kind === "project" ? "/other" : "/app", type: "decision", name: "Same",
+        properties: {}, sourceObservationIds: ["obs_exact"], createdAt: testObs.timestamp, stale: kind === "stale",
+      });
+      if (kind === "reset") await kv.set("mem:graph:snapshot", "current", {
+        version: 1, topNodes: [], topEdges: [], topDegrees: {}, stats: { totalNodes: 0, totalEdges: 0, nodesByType: {}, edgesByType: {} },
+        resetAt: "2099-01-01T00:00:00Z", updatedAt: "2099-01-01T00:00:00Z", dirty: false,
+      });
+      const snapshotBefore = structuredClone(await kv.list("mem:graph:snapshot"));
+      const before = structuredClone(await kv.list("mem:graph:nodes"));
+      const selected = { key: "selected", existingNodeId: kind === "missing" ? "absent" : kind === "blank" ? " " : "gn_exact",
+        type: kind === "type" ? "concept" : "decision", name: kind === "name" ? "Different" : "Same" };
+      const nodes = kind.startsWith("mixed") ? [selected, { key: "byname", type: "decision", name: "Same" }]
+        : kind === "repeated" ? [selected, { ...selected, key: "repeated" }] : [selected];
+      if (kind === "mixed-reversed") nodes.reverse();
+      const result = await sdk.trigger("mem::graph-upsert", { project: "/app", sources: [{ sessionId: "ses_exact", observationIds: ["obs_exact"] }], nodes }) as { success: boolean };
+      expect(result.success).toBe(false);
+      expect(await kv.list("mem:graph:nodes")).toEqual(before);
+      expect(await kv.list("mem:graph:snapshot")).toEqual(snapshotBefore);
+      for (const scope of ["mem:graph:edges", "mem:graph:name-index", "mem:audit"])
+        expect(await kv.list(scope)).toEqual([]);
+    },
+  );
 
   it("manual zero-LLM upsert isolates projects and merges exact provenance", async () => {
     for (const [sessionId, project, observationId] of [
@@ -1075,6 +1325,342 @@ describe("Graph Functions", () => {
     const queryB = (await sdk.trigger("mem::graph-query", { project: "/b" })) as GraphQueryResult;
     expect(queryA.nodes.map((node) => node.id)).toEqual([firstA.nodeIds.canonical]);
     expect(queryB.nodes.map((node) => node.id)).toEqual([firstB.nodeIds.canonical]);
+  });
+
+  it("requires deliberate multi-source mapping and stores per-record provenance", async () => {
+    for (const [sessionId, observationId] of [
+      ["ses_1", "obs_1"],
+      ["ses_2", "obs_2"],
+    ] as const) {
+      await kv.set("mem:sessions", sessionId, {
+        id: sessionId,
+        project: "/app",
+        cwd: "/app",
+        startedAt: "2026-01-01T00:00:00Z",
+        status: "completed",
+        observationCount: 1,
+      });
+      await kv.set(`mem:obs:${sessionId}`, observationId, {
+        ...testObs,
+        id: observationId,
+        sessionId,
+      });
+    }
+    const sources = [
+      { sessionId: "ses_1", observationIds: ["obs_1"] },
+      { sessionId: "ses_2", observationIds: ["obs_2"] },
+    ];
+    const ambiguous = (await sdk.trigger("mem::graph-upsert", {
+      project: "/app",
+      sources,
+      nodes: [
+        { key: "a", type: "decision", name: "Decision A" },
+        { key: "b", type: "decision", name: "Decision B" },
+      ],
+    })) as { success: boolean; error: string };
+    expect(ambiguous.success).toBe(false);
+    expect(ambiguous.error).toMatch(/sourceIndexes or sharedSources=true/);
+    expect(await kv.list<GraphNode>("mem:graph:nodes")).toEqual([]);
+
+    const mapped = (await sdk.trigger("mem::graph-upsert", {
+      project: "/app",
+      sources,
+      nodes: [
+        {
+          key: "a",
+          type: "decision",
+          name: "Decision A",
+          sourceIndexes: [0],
+        },
+        {
+          key: "b",
+          type: "decision",
+          name: "Decision B",
+          sourceIndexes: [1],
+        },
+      ],
+      edges: [
+        { source: "a", target: "b", type: "causes", sourceIndexes: [1] },
+      ],
+    })) as { success: boolean; nodeIds: Record<string, string> };
+    expect(mapped.success).toBe(true);
+    expect(await kv.get<GraphNode>("mem:graph:nodes", mapped.nodeIds.a)).toMatchObject({
+      sourceObservationIds: ["obs_1"],
+      sourceSessionIds: ["ses_1"],
+    });
+    expect(await kv.get<GraphNode>("mem:graph:nodes", mapped.nodeIds.b)).toMatchObject({
+      sourceObservationIds: ["obs_2"],
+      sourceSessionIds: ["ses_2"],
+    });
+    expect((await kv.list<GraphEdge>("mem:graph:edges"))[0]).toMatchObject({
+      sourceObservationIds: ["obs_2"],
+      sourceSessionIds: ["ses_2"],
+    });
+  });
+
+  it("dry-runs and idempotently reconciles exact live graph provenance", async () => {
+    for (const [sessionId, observationId] of [
+      ["ses_1", "obs_1"],
+      ["ses_2", "obs_2"],
+    ] as const) {
+      await kv.set("mem:sessions", sessionId, {
+        id: sessionId,
+        project: "/app",
+        cwd: "/app",
+        startedAt: "2026-01-01T00:00:00Z",
+        status: "completed",
+        observationCount: 1,
+      });
+      await kv.set(`mem:obs:${sessionId}`, observationId, {
+        ...testObs,
+        id: observationId,
+        sessionId,
+      });
+    }
+    const sources = [
+      { sessionId: "ses_1", observationIds: ["obs_1"] },
+      { sessionId: "ses_2", observationIds: ["obs_2"] },
+    ];
+    const upsert = (await sdk.trigger("mem::graph-upsert", {
+      project: "/app",
+      sources,
+      sharedSources: true,
+      nodes: [
+        { key: "a", type: "decision", name: "Decision A" },
+        { key: "b", type: "decision", name: "Decision B" },
+      ],
+      edges: [{ source: "a", target: "b", type: "causes" }],
+    })) as { success: boolean; nodeIds: Record<string, string> };
+    expect(upsert.success).toBe(true);
+    const before = (await sdk.trigger("mem::graph-query", {
+      project: "/app",
+    })) as GraphQueryResult;
+    const node = before.nodes.find((candidate) => candidate.id === upsert.nodeIds.a)!;
+    const edge = before.edges[0]!;
+    await kv.set("mem:graph:edge-history", edge.id, edge);
+    const targets = [
+      {
+        kind: "node",
+        id: node.id,
+        expectedUpdatedAt: node.updatedAt ?? node.createdAt,
+        sources: [{ sessionId: "ses_2", observationIds: ["obs_2"] }],
+      },
+      {
+        kind: "edge",
+        id: edge.id,
+        expectedUpdatedAt: edge.updatedAt ?? edge.createdAt,
+        sources: [{ sessionId: "ses_2", observationIds: ["obs_2"] }],
+      },
+    ];
+    const auditsBefore = await kv.list<{ id: string }>("mem:audit");
+
+    const preview = (await sdk.trigger("mem::graph-provenance-reconcile", {
+      project: "/app",
+      targets,
+      reason: "remove unrelated incident provenance",
+      dryRun: true,
+    })) as { success: boolean; dryRun: boolean; changedTargets: number };
+    expect(preview).toMatchObject({ success: true, dryRun: true, changedTargets: 2 });
+    expect(await kv.get<GraphNode>("mem:graph:nodes", node.id)).toMatchObject({
+      sourceObservationIds: ["obs_1", "obs_2"],
+      sourceSessionIds: ["ses_1", "ses_2"],
+    });
+    expect(await kv.list<{ id: string }>("mem:audit")).toHaveLength(auditsBefore.length);
+
+    const applied = (await sdk.trigger("mem::graph-provenance-reconcile", {
+      project: "/app",
+      targets,
+      reason: "remove unrelated incident provenance",
+    })) as { success: boolean; auditId: string; changedTargets: number };
+    expect(applied).toMatchObject({ success: true, changedTargets: 2 });
+    const correctedNode = await kv.get<GraphNode>("mem:graph:nodes", node.id);
+    const correctedEdge = await kv.get<GraphEdge>("mem:graph:edges", edge.id);
+    expect(correctedNode).toMatchObject({
+      sourceObservationIds: ["obs_1"],
+      sourceSessionIds: ["ses_1"],
+    });
+    expect(correctedEdge).toMatchObject({
+      sourceObservationIds: ["obs_1"],
+      sourceSessionIds: ["ses_1"],
+    });
+    expect(await kv.get<GraphEdge>("mem:graph:edge-history", edge.id)).toMatchObject({
+      sourceObservationIds: ["obs_1", "obs_2"],
+    });
+    const snapshot = await kv.get<{
+      topNodes: GraphNode[];
+      topEdges: GraphEdge[];
+      dirty: boolean;
+    }>("mem:graph:snapshot", "current");
+    expect(snapshot?.dirty).toBe(false);
+    expect(snapshot?.topNodes.find((candidate) => candidate.id === node.id)).toMatchObject({
+      sourceObservationIds: ["obs_1"],
+    });
+    expect(snapshot?.topEdges.find((candidate) => candidate.id === edge.id)).toMatchObject({
+      sourceObservationIds: ["obs_1"],
+    });
+    expect(await kv.get<{
+      details: {
+        phase: string;
+        targets: Array<{ id: string; removedObservationIds: string[] }>;
+      };
+    }>("mem:audit", applied.auditId)).toMatchObject({
+      details: {
+        phase: "completed",
+        targets: [
+          { id: node.id, removedObservationIds: ["obs_2"] },
+          { id: edge.id, removedObservationIds: ["obs_2"] },
+        ],
+      },
+    });
+
+    const repeated = (await sdk.trigger("mem::graph-provenance-reconcile", {
+      project: "/app",
+      targets: targets.map(({ expectedUpdatedAt: _expectedUpdatedAt, ...target }) => target),
+      reason: "repeat safely",
+    })) as { success: boolean; changedTargets: number; auditId?: string };
+    expect(repeated).toMatchObject({ success: true, changedTargets: 0 });
+    expect(repeated.auditId).toBeUndefined();
+    expect(await kv.list<{ id: string }>("mem:audit")).toHaveLength(
+      auditsBefore.length + 1,
+    );
+
+    const stale = (await sdk.trigger("mem::graph-provenance-reconcile", {
+      project: "/app",
+      targets: [targets[0]],
+      reason: "stale optimistic version",
+    })) as { success: boolean; error: string };
+    expect(stale.success).toBe(false);
+    expect(stale.error).toMatch(/changed after read/);
+
+    const finalSource = (await sdk.trigger("mem::graph-provenance-reconcile", {
+      project: "/app",
+      targets: [
+        {
+          kind: "node",
+          id: node.id,
+          sources: [{ sessionId: "ses_1", observationIds: ["obs_1"] }],
+        },
+      ],
+      reason: "must retain one source",
+    })) as { success: boolean; error: string };
+    expect(finalSource.success).toBe(false);
+    expect(finalSource.error).toMatch(/final source observation/);
+    expect(await kv.get<GraphNode>("mem:graph:nodes", node.id)).toEqual(correctedNode);
+  });
+
+  describe("reversible review retirement", () => {
+    async function fixture() {
+      for (const [sessionId, id] of [["ses_1", "obs_1"], ["ses_review", "obs_review"]]) {
+        await kv.set("mem:sessions", sessionId!, { id: sessionId, project: "/app", status: "completed" });
+        await kv.set("mem:obs:" + sessionId, id!, { ...testObs, id, sessionId });
+      }
+      const input = { project: "/app", sharedSources: true,
+        sources: [{ sessionId: "ses_1", observationIds: ["obs_1"] }],
+        nodes: [{ key: "a", type: "file", name: "src/index.ts" }, { key: "b", type: "function", name: "main" }],
+        edges: [{ source: "a", target: "b", type: "uses", weight: 0.7, properties: { note: "preserve" } }],
+      };
+      expect(await sdk.trigger("mem::graph-upsert", input)).toMatchObject({ success: true });
+      const edge = (await kv.list<GraphEdge>("mem:graph:edges"))[0]!;
+      await kv.set("mem:graph:edge-history", edge.id, structuredClone(edge));
+      const target = (row: GraphEdge) => ({ kind: "edge", id: row.id, expectedUpdatedAt: row.updatedAt ?? row.createdAt,
+        sources: [{ sessionId: "ses_review", observationIds: ["obs_review"] }] });
+      const call = (action: string, row = edge, extra = {}) => sdk.trigger("mem::graph-provenance-reconcile", {
+        action, project: "/app", targets: [target(row)], reason: "Relation is unsupported by its recorded source", ...extra,
+      });
+      await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+      return { input, edge, target, call };
+    }
+
+    it("previews, retires, and restores the same identity without replacing original provenance", async () => {
+      const { edge, call } = await fixture();
+      const before = structuredClone(await kv.get("mem:graph:snapshot", "current"));
+      const auditCount = (await kv.list("mem:audit")).length;
+      expect(await call("retire", edge, { dryRun: true })).toMatchObject({ success: true, changedTargets: 1 });
+      expect(await kv.get("mem:graph:edges", edge.id)).toEqual(edge);
+      expect(await kv.get("mem:graph:snapshot", "current")).toEqual(before);
+      expect(await kv.list("mem:audit")).toHaveLength(auditCount);
+      const result = await call("retire");
+      expect(result).toMatchObject({ success: true, changedTargets: 1 });
+      const retired = (await kv.get<GraphEdge>("mem:graph:edges", edge.id))!;
+      const retiredQuery = await sdk.trigger("mem::graph-query", { project: "/app" });
+      expect(retiredQuery.edges).toEqual([]);
+      expect(await kv.get("mem:graph:query-manifest", "current")).toMatchObject({ dirty: false, totalEdges: 0 });
+      expect(retired).toMatchObject({ ...edge, updatedAt: expect.any(String), stale: true,
+        reviewRetirement: { active: true, sourceObservationIds: ["obs_review"], sourceSessionIds: ["ses_review"] } });
+      expect(retired.sourceObservationIds).toEqual(["obs_1"]);
+      expect(await sdk.trigger("mem::graph-query", { project: "/app" })).toMatchObject({ totalNodes: 2, totalEdges: 0, edges: [] });
+      expect(await sdk.trigger("mem::graph-query", {})).toMatchObject({ totalEdges: 0, edges: [] });
+      expect(await kv.get("mem:graph:node-degree", edge.sourceNodeId)).toBe(0);
+      expect(await call("retire", retired)).toMatchObject({ success: true, changedTargets: 0 });
+      expect(await kv.list("mem:audit")).toHaveLength(auditCount + 1);
+      expect(await call("restore", retired)).toMatchObject({ success: true, changedTargets: 1 });
+      const restored = (await kv.get<GraphEdge>("mem:graph:edges", edge.id))!;
+      expect(restored).toMatchObject({ ...edge, updatedAt: expect.any(String), stale: false, reviewRetirement: { active: false } });
+      expect(await sdk.trigger("mem::graph-query", { project: "/app" })).toMatchObject({ totalNodes: 2, totalEdges: 1 });
+      expect(await kv.get("mem:graph:node-degree", edge.sourceNodeId)).toBe(1);
+      expect(await kv.get("mem:graph:edge-history", edge.id)).toEqual(edge);
+      expect(await kv.get("mem:obs:ses_1", "obs_1")).toEqual(testObs);
+      expect(await call("restore", restored)).toMatchObject({ success: true, changedTargets: 0 });
+    });
+
+    it("rejects invalid batches and versions before any writes", async () => {
+      const { edge, target, call } = await fixture();
+      const set = vi.spyOn(kv, "set");
+      for (const extra of [
+        { targets: [{ ...target(edge), expectedUpdatedAt: undefined }] },
+        { targets: [{ ...target(edge), expectedUpdatedAt: "old" }] },
+        { targets: [target(edge), { ...target(edge), id: "ge_missing" }] },
+        { targets: [{ ...target(edge), sources: [{ sessionId: "missing", observationIds: ["obs_review"] }] }] },
+        { targets: [{ ...target(edge), kind: "node", id: edge.sourceNodeId }] },
+        { project: "wrong-project" },
+      ]) expect(await call("retire", edge, extra)).toMatchObject({ success: false });
+      expect(await call("restore")).toMatchObject({ success: false });
+      expect(await call("invalid")).toMatchObject({ success: false });
+      expect(set).not.toHaveBeenCalled();
+    });
+
+    it("blocks automatic and manual resurrection until an explicit restore", async () => {
+      const { input, edge, call } = await fixture();
+      await call("retire");
+      const retired = structuredClone(await kv.get<GraphEdge>("mem:graph:edges", edge.id));
+      const set = vi.spyOn(kv, "set");
+      expect(await sdk.trigger("mem::graph-upsert", input)).toMatchObject({ success: false, error: expect.stringContaining("explicit restore") });
+      expect(set).not.toHaveBeenCalled();
+      mockProvider.compress.mockResolvedValueOnce('<entities><entity type="file" name="src/index.ts" source_observation_ids="obs_1"/><entity type="function" name="main" source_observation_ids="obs_1"/></entities><relationships><relationship type="uses" source="src/index.ts" target="main" source_observation_ids="obs_1"/></relationships>');
+      const extracted = await sdk.trigger("mem::graph-extract", { project: "/app", sessionId: "ses_1", observations: [testObs] });
+      expect(extracted).toMatchObject({ success: true, newEdges: 0 });
+      expect(await kv.list("mem:graph:edges")).toEqual([retired]);
+      expect(await call("restore", retired!)).toMatchObject({ success: true });
+      const restoredQuery = await sdk.trigger("mem::graph-query", { project: "/app" });
+      expect(restoredQuery.edges.map((row: GraphEdge) => row.id)).toContain(edge.id);
+      expect(await kv.get("mem:graph:query-manifest", "current")).toMatchObject({ dirty: false, totalEdges: 1 });
+      expect(await sdk.trigger("mem::graph-upsert", input)).toMatchObject({ success: true });
+    });
+
+    it("refuses restore after source deletion or a different lifecycle made the edge stale", async () => {
+      const { edge, call } = await fixture();
+      await kv.set("mem:graph:edges", edge.id, { ...edge, stale: true });
+      expect(await call("retire")).toMatchObject({ success: false, error: expect.stringContaining("another reason") });
+      await kv.set("mem:graph:edges", edge.id, edge);
+      await call("retire");
+      const retired = (await kv.get<GraphEdge>("mem:graph:edges", edge.id))!;
+      await kv.delete("mem:obs:ses_1", "obs_1");
+      expect(await call("restore", retired)).toMatchObject({ success: false, error: expect.stringContaining("original provenance") });
+      expect(await kv.get("mem:graph:edges", edge.id)).toEqual(retired);
+    });
+
+    it("reports partial mutation and leaves the snapshot dirty on a degree write failure", async () => {
+      const { edge, call } = await fixture();
+      const originalSet = kv.set;
+      kv.set = async <T>(scope: string, key: string, value: T): Promise<T> => {
+        if (scope === "mem:graph:node-degree") throw new Error("injected write failure");
+        return originalSet(scope, key, value);
+      };
+      expect(await call("retire")).toMatchObject({ success: false, error: expect.stringContaining("partial mutation") });
+      expect(await kv.get("mem:graph:edges", edge.id)).toMatchObject({ stale: true, sourceObservationIds: ["obs_1"] });
+      expect(await kv.get("mem:graph:snapshot", "current")).toMatchObject({ dirty: true });
+      expect(await kv.list("mem:audit")).toEqual(expect.arrayContaining([expect.objectContaining({ details: expect.objectContaining({ phase: "partial", action: "retire" }) })]));
+    });
   });
 
   it("physically purges one exact bounded project graph and preserves other stores", async () => {

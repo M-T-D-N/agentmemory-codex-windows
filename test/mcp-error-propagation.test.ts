@@ -54,6 +54,31 @@ describe("MCP error propagation", () => {
     registerMcpEndpoints(sdk as never, mockKV() as never);
   });
 
+  it("forwards official observation provenance through memory_save", async () => {
+    let captured: unknown;
+    sdk.overrideTrigger("mem::remember", async (payload: unknown) => {
+      captured = payload;
+      return { success: true };
+    });
+    const result = await sdk.getFunction("mcp::tools::call")!(request("memory_save", {
+      project: "project-a", content: "Verified decision", sourceObservationIds: ["obs_a", "obs_b"],
+    }));
+    expect(result.status_code).toBe(200);
+    expect(captured).toMatchObject({ project: "project-a", sourceObservationIds: ["obs_a", "obs_b"] });
+  });
+
+  it("rejects malformed provenance instead of silently saving without citations", async () => {
+    let invoked = false;
+    sdk.overrideTrigger("mem::remember", async () => { invoked = true; return { success: true }; });
+    for (const sourceObservationIds of ["obs_a", [""], [2]]) {
+      const result = await sdk.getFunction("mcp::tools::call")!(request("memory_save", {
+        project: "project-a", content: "Verified decision", sourceObservationIds,
+      }));
+      expect(result.status_code).toBe(400);
+    }
+    expect(invoked).toBe(false);
+  });
+
   it("returns non-2xx when graph query throws", async () => {
     sdk.overrideTrigger("mem::graph-query", async () => {
       throw new Error("graph unavailable");
@@ -144,6 +169,42 @@ describe("MCP error propagation", () => {
     expect(result.status_code).toBe(200);
     expect(result.body).toMatchObject({ isError: true });
     expect(result.body.content[0].text).toContain("exactly match");
+  });
+
+  it.each(["retire", "restore"])("forwards the explicit edge action %s", async (action) => {
+    let captured: unknown;
+    sdk.overrideTrigger("mem::graph-provenance-reconcile", async (payload: unknown) => { captured = payload; return { success: true }; });
+    const result = await sdk.getFunction("mcp::tools::call")!(request("memory_graph_provenance_reconcile", {
+      action, project: "project-a", reason: "review", dryRun: true,
+      targets: [{ kind: "edge", id: "ge_a", expectedUpdatedAt: "version", sources: [{ sessionId: "s", observationIds: ["obs_a"] }] }],
+    }));
+    expect(result.status_code).toBe(200);
+    expect(captured).toMatchObject({ action });
+  });
+
+  it("returns structured MCP isError when graph provenance correction is refused", async () => {
+    sdk.overrideTrigger("mem::graph-provenance-reconcile", async () => ({
+      success: false,
+      error: "reconciliation would remove the final source observation",
+    }));
+
+    const result = await sdk.getFunction("mcp::tools::call")!(
+      request("memory_graph_provenance_reconcile", {
+        project: "project-a",
+        targets: [
+          {
+            kind: "node",
+            id: "gn_a",
+            sources: [{ sessionId: "session-a", observationIds: ["obs-a"] }],
+          },
+        ],
+        reason: "remove unrelated source",
+      }),
+    );
+
+    expect(result.status_code).toBe(200);
+    expect(result.body).toMatchObject({ isError: true });
+    expect(result.body.content[0].text).toContain("final source observation");
   });
 
   it("forwards trackAccess=false for all reinforcing retrieval tools", async () => {

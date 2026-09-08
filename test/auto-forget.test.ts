@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mockKV as createMockKV } from "./helpers/mocks.js";
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -13,23 +14,10 @@ import { memoryToObservation } from "../src/state/memory-utils.js";
 import type { Memory, CompressedObservation, Session } from "../src/types.js";
 
 function mockKV() {
-  const store = new Map<string, Map<string, unknown>>();
   return {
-    get: async <T>(scope: string, key: string): Promise<T | null> => {
-      return (store.get(scope)?.get(key) as T) ?? null;
-    },
-    set: async <T>(scope: string, key: string, data: T): Promise<T> => {
-      if (!store.has(scope)) store.set(scope, new Map());
-      store.get(scope)!.set(key, data);
-      return data;
-    },
-    delete: async (scope: string, key: string): Promise<void> => {
-      store.get(scope)?.delete(key);
-    },
-    list: async <T>(scope: string): Promise<T[]> => {
-      const entries = store.get(scope);
-      return entries ? (Array.from(entries.values()) as T[]) : [];
-    },
+    ...createMockKV(),
+    assertRecoveryImportAllowed: () => {},
+    hasObservationRecovery: () => false,
   };
 }
 

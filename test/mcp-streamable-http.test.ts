@@ -1,3 +1,4 @@
+import { startOnFetchPort } from "./helpers/http-port.js";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -14,32 +15,15 @@ async function start() {
     method,
     params,
   }));
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const server = await startStreamableHttpServer({
-      host: "127.0.0.1",
-      port: 0,
-      secret,
-      handler,
-      serverName: "AgentMemoryCodex test",
-    });
-    try {
-      const probe = await fetch(server.baseUrl, { method: "HEAD" });
-      await probe.body?.cancel();
-      servers.push(server);
-      return { server, handler };
-    } catch (error) {
-      await server.stop();
-      if (
-        error instanceof TypeError &&
-        error.cause instanceof Error &&
-        error.cause.message === "bad port"
-      ) {
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error("Unable to allocate a fetch-safe loopback test port");
+  const server = await startOnFetchPort(port => startStreamableHttpServer({
+    host: "127.0.0.1",
+    port,
+    secret,
+    handler,
+    serverName: "AgentMemoryCodex test",
+  }));
+  servers.push(server);
+  return { server, handler };
 }
 
 async function mcp(

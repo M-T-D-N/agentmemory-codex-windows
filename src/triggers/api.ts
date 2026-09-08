@@ -6,8 +6,8 @@ import {
   prepareSessionStart,
   sessionLifecycleLockKey,
 } from "../functions/session-lifecycle.js";
-import type { SessionStubRecoveryCandidate } from "../functions/session-stub-recovery.js";
 import type { ContextReader } from "../functions/context.js";
+import { selectSessionPage } from "../functions/session-query.js";
 import { safeAudit } from "../functions/audit.js";
 import type { ObservationSourceInput } from "../functions/provenance.js";
 import { KV } from "../state/schema.js";
@@ -113,6 +113,63 @@ function reflectDisabledResponse(): Response {
     enableHow: "Set AGENTMEMORY_REFLECT=true (in ~/.agentmemory/.env or the shell) and restart. Requires AGENTMEMORY_SLOTS=true.",
     docsHref: "https://github.com/rohitg00/agentmemory#memory-slots",
   });
+}
+
+
+type GraphProvenanceTargetPayload = {
+  kind: "node" | "edge";
+  id: string;
+  sources: Array<{ sessionId: string; observationIds: string[] }>;
+  expectedUpdatedAt?: string;
+};
+
+function parseGraphProvenanceTargets(
+  value: unknown,
+): GraphProvenanceTargetPayload[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) return null;
+  const targets: GraphProvenanceTargetPayload[] = [];
+  for (const rawTarget of value) {
+    if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) {
+      return null;
+    }
+    const target = rawTarget as Record<string, unknown>;
+    const kind = target.kind;
+    const id = asNonEmptyString(target.id);
+    if ((kind !== "node" && kind !== "edge") || !id) return null;
+    if (!Array.isArray(target.sources) || target.sources.length === 0 || target.sources.length > 50) {
+      return null;
+    }
+    const sources: GraphProvenanceTargetPayload["sources"] = [];
+    for (const rawSource of target.sources) {
+      if (!rawSource || typeof rawSource !== "object" || Array.isArray(rawSource)) {
+        return null;
+      }
+      const source = rawSource as Record<string, unknown>;
+      const sessionId = asNonEmptyString(source.sessionId);
+      if (
+        !sessionId ||
+        !Array.isArray(source.observationIds) ||
+        source.observationIds.length === 0 ||
+        source.observationIds.length > 200
+      ) {
+        return null;
+      }
+      const observationIds = source.observationIds.map(asNonEmptyString);
+      if (observationIds.some((observationId) => observationId === null)) return null;
+      sources.push({ sessionId, observationIds: observationIds as string[] });
+    }
+    const expectedUpdatedAt = target.expectedUpdatedAt === undefined
+      ? undefined
+      : asNonEmptyString(target.expectedUpdatedAt);
+    if (target.expectedUpdatedAt !== undefined && !expectedUpdatedAt) return null;
+    targets.push({
+      kind,
+      id,
+      sources,
+      ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+    });
+  }
+  return targets;
 }
 
 function parseOptionalFiniteNumber(value: unknown): number | undefined | null {
@@ -694,7 +751,8 @@ export function registerApiTriggers(
             body: { error: "session project or cwd mismatch" },
           };
         }
-        if (existing.captureExcluded) {
+        if (existing.captureExcluded &&
+          !(existing.captureExclusionReason === "codex_internal_prompt" && reason !== "codex_internal_prompt")) {
           return {
             status_code: 200,
             body: {
@@ -706,27 +764,26 @@ export function registerApiTriggers(
           };
         }
 
-        const hasNormalCapture =
-          existing.observationCount > 0 ||
-          (typeof existing.firstPrompt === "string" &&
-            existing.firstPrompt.trim().length > 0 &&
-            !isCodexInternalAmbientText(existing.firstPrompt));
-        if (hasNormalCapture) {
-          return {
-            status_code: 200,
-            body: {
-              success: true,
-              captureExcluded: false,
-              sessionId,
-              preservedActiveSession: true,
-            },
-          };
+        const hasNormalCapture = !isExcludedCodexAmbientSession(existing) &&
+          (existing.observationCount > 0 ||
+            (!!existing.firstPrompt?.trim() && !isCodexInternalAmbientText(existing.firstPrompt)));
+        if (reason === "codex_internal_prompt" && hasNormalCapture) {
+          const internalTurnId = asNonEmptyString(body.turnId);
+          if (!internalTurnId || internalTurnId === existing.codexCaptureTurnId) {
+            await kv.update(KV.sessions, sessionId, [
+              { type: "set", path: "codexCaptureTurnId", value: null },
+              { type: "set", path: "updatedAt", value: new Date().toISOString() },
+            ]);
+            await safeAudit(kv, "session_exclude", "api::session::exclude", [sessionId],
+              { project, reason, preservedActiveSession: true, turnId: internalTurnId });
+          }
+          return { status_code: 200, body: { success: true, preservedActiveSession: true, sessionId } };
         }
-
         const captureExclusionReason = reason.slice(0, 128);
         const updatedAt = new Date().toISOString();
         await kv.update<Session>(KV.sessions, sessionId, [
           { type: "set", path: "captureExcluded", value: true },
+          { type: "set", path: "codexCaptureTurnId", value: null },
           {
             type: "set",
             path: "captureExclusionReason",
@@ -771,10 +828,7 @@ export function registerApiTriggers(
       }
       const completed = await completeExistingSession(kv, sessionId);
       if (!completed.success) {
-        return {
-          status_code: completed.error === "session_not_found" ? 404 : 409,
-          body: completed,
-        };
+        return { status_code: 200, body: { success: true, skipped: true, reason: "session_missing_or_incomplete" } };
       }
       // Fan out session-stopped lifecycle (non-blocking).
       try {
@@ -978,17 +1032,6 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const sessions = await kv.list<Session>(KV.sessions);
-      const normalizedAgentId =
-        typeof req.query_params?.["agentId"] === "string"
-          ? req.query_params["agentId"].trim()
-          : undefined;
-      const wildcardAgent = normalizedAgentId === "*";
-      const explicitAgentId =
-        normalizedAgentId && !wildcardAgent ? normalizedAgentId : undefined;
-      const filterAgentId = wildcardAgent
-        ? undefined
-        : explicitAgentId ??
-          (isAgentScopeIsolated() ? getAgentId() : undefined);
       const project = normalizeReadProject(req.query_params?.["project"]);
       if (!project) {
         return {
@@ -1017,17 +1060,11 @@ export function registerApiTriggers(
         0,
         parseOptionalInt(req.query_params?.["offset"]) ?? 0,
       );
-      const filtered = sessions
-        .filter(
-          (session) => includeExcluded || !isExcludedCodexAmbientSession(session),
-        )
-        .filter((session) => project === "*" || session.project === project)
-        .filter((session) => !sessionId || session.id === sessionId)
-        .filter((session) => !filterAgentId || session.agentId === filterAgentId)
-        .sort((a, b) =>
-          String(a.startedAt ?? "").localeCompare(String(b.startedAt ?? "")),
-        );
-      const page = filtered.slice(offset, offset + limit);
+      const selected = selectSessionPage(sessions, {
+        project, sessionId: sessionId ?? undefined, includeExcluded, limit, offset, order: "asc",
+        agentId: typeof req.query_params?.["agentId"] === "string" ? req.query_params["agentId"] : undefined,
+      });
+      const page = selected.sessions;
       // Bounded fan-out: each kv.get is a full engine invocation, so
       // Promise.all over hundreds of sessions saturates the invocation
       // pool. Batch in chunks of 10 (parallel within a chunk, sequential
@@ -1050,10 +1087,10 @@ export function registerApiTriggers(
         status_code: 200,
         body: {
           sessions: withSummary,
-          total: filtered.length,
+          total: selected.total,
           limit,
           offset,
-          nextOffset: offset + page.length < filtered.length ? offset + page.length : null,
+          nextOffset: selected.nextOffset,
         },
       };
     },
@@ -1277,6 +1314,11 @@ export function registerApiTriggers(
         sessionId?: string;
         observationIds?: string[];
         memoryId?: string;
+        project?: string;
+        dryRun?: boolean;
+        action?: string;
+        expectedVersion?: number;
+        reason?: string;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1287,7 +1329,16 @@ export function registerApiTriggers(
           body: { error: "sessionId or memoryId is required" },
         };
       }
-      const result = await sdk.trigger({ function_id: "mem::forget", payload: req.body });
+      const result = await sdk.trigger({ function_id: "mem::forget", payload: {
+        sessionId: req.body.sessionId,
+        observationIds: req.body.observationIds,
+        memoryId: req.body.memoryId,
+        project: req.body.project,
+        dryRun: req.body.dryRun,
+        action: req.body.action,
+        expectedVersion: req.body.expectedVersion,
+        reason: req.body.reason,
+      } });
       return { status_code: 200, body: result };
     },
   );
@@ -1343,13 +1394,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::migrate",
     async (
-      req: ApiRequest<{
-        dbPath?: string;
-        step?: string;
-        dryRun?: boolean;
-        candidates?: SessionStubRecoveryCandidate[];
-        sessionIds?: string[];
-      }>,
+      req: ApiRequest<{ dbPath?: string; step?: string; dryRun?: boolean }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
@@ -1363,23 +1408,12 @@ export function registerApiTriggers(
           body: { error: "Either step (string) or dbPath (string) is required" },
         };
       }
-      const oversized = checkPayloadFrameSize(
-        req.body,
-        "reduce the number or size of migration candidates",
-      );
-      if (oversized) return { status_code: 413, body: oversized };
       const result = await sdk.trigger({
         function_id: "mem::migrate",
         payload: {
           ...(req.body.step !== undefined && { step: req.body.step }),
           ...(req.body.dbPath !== undefined && { dbPath: req.body.dbPath }),
           ...(req.body.dryRun !== undefined && { dryRun: req.body.dryRun }),
-          ...(req.body.candidates !== undefined && {
-            candidates: req.body.candidates,
-          }),
-          ...(req.body.sessionIds !== undefined && {
-            sessionIds: req.body.sessionIds,
-          }),
         },
       });
       return { status_code: 200, body: result };
@@ -1805,6 +1839,7 @@ export function registerApiTriggers(
         payload: {
           project,
           sources: body.sources,
+          sharedSources: body.sharedSources,
           nodes: body.nodes,
           edges: body.edges,
         },
@@ -1820,6 +1855,49 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::graph-upsert",
     config: { api_path: "/agentmemory/graph/upsert", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::graph-provenance-reconcile",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as unknown as Record<string, unknown>;
+      const project = asNonEmptyString(body.project);
+      const reason = asNonEmptyString(body.reason);
+      const targets = parseGraphProvenanceTargets(body.targets);
+      if (!project || project === "*" || !reason || !targets) {
+        return {
+          status_code: 400,
+          body: { error: "exact project, non-empty reason, and valid targets are required" },
+        };
+      }
+      if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+        return { status_code: 400, body: { error: "dryRun must be a boolean" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::graph-provenance-reconcile",
+        payload: {
+          project,
+          targets,
+          reason,
+          dryRun: body.dryRun,
+          action: body.action,
+        },
+      });
+      const failed =
+        result &&
+        typeof result === "object" &&
+        (result as { success?: boolean }).success === false;
+      return { status_code: failed ? 422 : 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::graph-provenance-reconcile",
+    config: {
+      api_path: "/agentmemory/graph/provenance/reconcile",
+      http_method: "POST",
+    },
   });
 
   sdk.registerFunction("api::graph-project-purge",

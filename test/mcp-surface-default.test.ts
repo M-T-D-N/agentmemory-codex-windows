@@ -24,6 +24,9 @@ describe("MCP tool surface default (#553)", () => {
     expect(visible.length).toBe(all.length);
     expect(visible.map((tool) => tool.name)).toContain("memory_lesson_delete");
     expect(visible.map((tool) => tool.name)).toContain("memory_graph_upsert");
+    expect(visible.map((tool) => tool.name)).toContain(
+      "memory_graph_provenance_reconcile",
+    );
     expect(visible.map((tool) => tool.name)).toContain("memory_graph_purge");
     expect(new Set(visible.map((tool) => tool.name)).size).toBe(visible.length);
   });

@@ -34,49 +34,42 @@ only canonical stores.
 - Excludes ambient UI, title/fork traffic, known internal host prompts, and
   subagent traffic from durable capture.
 - Keeps writes, deletion, curation, and provenance exact-project scoped.
+- Supports audited, target-scoped live graph provenance correction with dry-run
+  previews. Manual graph writes with multiple source groups must map every node
+  and edge through zero-based `sourceIndexes`, or explicitly opt into shared
+  provenance with `sharedSources: true`.
+- Supports audited recovery of proven empty observations through the existing
+  REST forget endpoint, with exact IDs, version checks and preserved graph cursors.
 - Supports bounded, source-labelled federated recall across projects without
   allowing wildcard writes.
 - Can use a credential-free, loopback-only local Qwen worker for typed graph
-  extraction. Graph completions use streamed SSE so long-running llama.cpp
-  responses remain live and incomplete streams fail closed. Every other
-  AgentMemory LLM feature receives the noop provider; external fallbacks remain
-  disabled.
-- Serves exact project, text, pagination, and bounded-walk graph reads from a
-  rebuildable sharded index. A dirty or unavailable index falls back to an
-  explicit bounded snapshot and never starts a full canonical graph scan.
+  extraction. Every other AgentMemory LLM feature receives the noop provider;
+  external fallbacks remain disabled.
 - Uses an authenticated loopback MCP endpoint for Codex and retains a packaged
   stdio launcher only as a compatibility path.
 
-The upstream-compatible source surface contains 56 MCP tools. Its MCP surface
-is 56 tools, 6 resources, and 3 prompts; it also has 133 endpoints on port 3111,
+The upstream-compatible source surface contains 57 MCP tools. Its MCP surface
+is 57 tools, 6 resources, and 3 prompts; it also has 134 endpoints on port 3111,
 12 portable hooks, and 17 skills. The supported Windows profile intentionally
 activates only the four managed hooks listed above.
 
-### Non-reinforcing retrieval
+For audits, MCP `memory_recall`, `memory_smart_search`, and `memory_timeline`
+accept `trackAccess: false` to avoid access-count reinforcement. The default
+remains true; visibility, project boundaries, and recovery guards still apply.
+Graph query shards are rebuildable indexes in the same iii StateModule as the
+canonical graph. Missing or dirty indexes use a bounded snapshot with a warning;
+only an explicit snapshot rebuild refreshes them.
 
-`memory_recall`, `memory_smart_search`, and `memory_timeline` reinforce the
-access-based retention signal by default. Set `trackAccess` to `false` for
-administrative inspection, evaluation, reporting, previews, or other
-analytical reads that should not change that signal. This option does not
-bypass project scoping, agent isolation, result limits, or existing auditing.
-
-### Legacy empty session-end stubs
-
-Internal qualification revision `r62` adds a narrow maintenance migration for
-legacy rows that contain exactly a valid `endedAt` and `status: "completed"`
-but no recoverable session or observation data. It accepts explicit session
-IDs only, defaults to dry-run, refuses the entire batch if any row differs or
-has a session, observation, summary, memory, lesson, commit, crystal, or graph
-reference, and is audited and idempotent when applied. It is not a general
-session deletion API and does not authorize direct state-store edits.
+This source includes unreleased changes beyond the latest public preview;
+see [CHANGELOG.md](CHANGELOG.md). Qualification comes from each build manifest.
 
 ## Version identities
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.2` | Public source-preview version |
+| Downstream release | `0.1.0-preview.2` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
-| Qualification revision | `r62` | Internal build provenance, not a public version line |
+| Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
 
 The exact upstream tag, commit, tree, and pristine package hash are recorded in
@@ -90,7 +83,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 - The official iii engine `0.11.2` Windows executable whose SHA-256 matches
   [`packaging/windows-codex/config/third-party-inputs.json`](packaging/windows-codex/config/third-party-inputs.json)
 
-No prebuilt or signed installer is attached to this source preview.
+No prebuilt or signed installer is attached to the first source preview.
 
 ## Build and evaluate from source
 

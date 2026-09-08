@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import type { Memory, CompressedObservation, Session } from "../types.js";
 import { KV } from "../state/schema.js";
@@ -22,7 +23,7 @@ interface AutoForgetResult {
 }
 
 export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::auto-forget", 
+  registerObservationWriter(sdk, "mem::auto-forget",
     async (data: { dryRun?: boolean }): Promise<AutoForgetResult> => {
       const dryRun = data?.dryRun ?? false;
       const now = Date.now();
@@ -147,7 +148,7 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
-      const sessions = await kv.list<Session>(KV.sessions);
+      const sessions = (await kv.list<Session>(KV.sessions)).filter(session => !kv.hasObservationRecovery(session.id));
       const obsPerSession: CompressedObservation[][] = [];
       for (let batch = 0; batch < sessions.length; batch += 10) {
         const chunk = sessions.slice(batch, batch + 10);

@@ -1,20 +1,16 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
-import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { logger } from "../logger.js";
+import { homedir } from "node:os";
+import { KV, generateId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
-import { generateId, KV } from "../state/schema.js";
 import type {
-  CompressedObservation,
   Memory,
   Session,
+  CompressedObservation,
   SessionSummary,
 } from "../types.js";
-import {
-  recoverCodexSessionStubs,
-  type SessionStubRecoveryCandidate,
-} from "./session-stub-recovery.js";
-import { purgeEmptySessionEndStubs } from "./session-stub-purge.js";
+import { logger } from "../logger.js";
 
 const ALLOWED_DIRS = [resolve(homedir(), ".agentmemory")];
 
@@ -91,62 +87,14 @@ export async function inferMemoryProjects(
 }
 
 export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction(
-    "mem::migrate",
-    async (data: {
-      dbPath?: string;
-      step?: string;
-      dryRun?: boolean;
-      candidates?: SessionStubRecoveryCandidate[];
-      sessionIds?: string[];
-    }) => {
+  registerObservationWriter(sdk, "mem::migrate",
+    async (data: { dbPath?: string; step?: string; dryRun?: boolean }) => {
       // In-place KV migration steps (no SQLite dependency).
       if (data.step === "infer-memory-projects") {
         const dryRun = data.dryRun ?? false;
         logger.info("Migration step: infer-memory-projects", { dryRun });
         const result = await inferMemoryProjects(kv, dryRun);
         return { success: true, step: "infer-memory-projects", ...result };
-      }
-
-      if (data.step === "repair-codex-session-stubs") {
-        const dryRun = data.dryRun !== false;
-        if (!Array.isArray(data.candidates) || data.candidates.length === 0) {
-          return {
-            success: false,
-            error: "candidates are required for repair-codex-session-stubs",
-          };
-        }
-        logger.info("Migration step: repair-codex-session-stubs", {
-          dryRun,
-          candidates: data.candidates.length,
-        });
-        const result = await recoverCodexSessionStubs(kv, data.candidates, dryRun);
-        return {
-          success: result.invalid === 0 && result.conflicts === 0 && result.missing === 0,
-          step: "repair-codex-session-stubs",
-          ...result,
-        };
-      }
-
-      if (data.step === "purge-empty-session-end-stubs") {
-        const dryRun = data.dryRun !== false;
-        if (!Array.isArray(data.sessionIds) || data.sessionIds.length === 0) {
-          return {
-            success: false,
-            error: "sessionIds are required for purge-empty-session-end-stubs",
-          };
-        }
-        logger.info("Migration step: purge-empty-session-end-stubs", {
-          dryRun,
-          sessionIds: data.sessionIds.length,
-        });
-        const result = await purgeEmptySessionEndStubs(kv, data.sessionIds, dryRun);
-        return {
-          success:
-            result.invalid === 0 && result.conflicts === 0 && result.referenced === 0,
-          step: "purge-empty-session-end-stubs",
-          ...result,
-        };
       }
 
       if (!data.dbPath) {
@@ -192,21 +140,6 @@ export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
         const sessions = db
           .prepare("SELECT * FROM sessions ORDER BY created_at DESC")
           .all() as any[];
-        for (const row of sessions) {
-          const session: Session = {
-            id: row.session_id || row.id,
-            project: row.project_path || row.project || "unknown",
-            cwd: row.cwd || row.project_path || "",
-            startedAt:
-              row.created_at || row.started_at || new Date().toISOString(),
-            endedAt: row.ended_at || row.updated_at,
-            status: "completed",
-            observationCount: 0,
-          };
-          await kv.set(KV.sessions, session.id, session);
-          sessionCount++;
-        }
-
         let observations: any[] = [];
         try {
           observations = db
@@ -222,6 +155,31 @@ export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
           } catch {
             logger.warn("No observation tables found");
           }
+        }
+
+        let summaries: any[] = [];
+        try {
+          summaries = db
+            .prepare("SELECT * FROM session_summaries")
+            .all() as any[];
+        } catch {
+          logger.warn("No summaries table found");
+        }
+
+        kv.assertRecoveryImportAllowed({ sessions, observations, summaries });
+        for (const row of sessions) {
+          const session: Session = {
+            id: row.session_id || row.id,
+            project: row.project_path || row.project || "unknown",
+            cwd: row.cwd || row.project_path || "",
+            startedAt:
+              row.created_at || row.started_at || new Date().toISOString(),
+            endedAt: row.ended_at || row.updated_at,
+            status: "completed",
+            observationCount: 0,
+          };
+          await kv.set(KV.sessions, session.id, session);
+          sessionCount++;
         }
 
         for (const row of observations) {
@@ -241,15 +199,6 @@ export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
           };
           await kv.set(KV.observations(sessionId), obs.id, obs);
           obsCount++;
-        }
-
-        let summaries: any[] = [];
-        try {
-          summaries = db
-            .prepare("SELECT * FROM session_summaries")
-            .all() as any[];
-        } catch {
-          logger.warn("No summaries table found");
         }
 
         for (const row of summaries) {

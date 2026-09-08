@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import type {
   GraphNode,
@@ -15,11 +16,14 @@ import type { StateKV } from "../state/kv.js";
 import {
   GRAPH_EXTRACTION_SYSTEM,
   buildGraphExtractionPrompt,
+  toGraphExtractionObservation,
 } from "../prompts/graph-extraction.js";
 import { isGraphExtractionEnabled } from "../config.js";
 import { recordAudit, safeAudit } from "./audit.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
+import { isCodexApprovalReviewText } from "./observation-visibility.js";
+import { semanticGraphCursorsAtEnd } from "./semantic-graph-backlog.js";
 import {
   validateObservationProvenance,
   type ObservationSourceInput,
@@ -66,6 +70,8 @@ import {
 // fan out faster than nodes.
 const MAX_GRAPH_PURGE_NODES = 500;
 const MAX_GRAPH_PURGE_EDGES = 1000;
+const MAX_GRAPH_PROVENANCE_TARGETS = 100;
+const MAX_GRAPH_PROVENANCE_OBSERVATION_REFERENCES = 500;
 export const GRAPH_WRITE_LOCK = "mem:graph-write";
 
 // #814: the precomputed snapshot covers the top-degree subgraph used by
@@ -1026,7 +1032,7 @@ async function updateGraphQueryIndexDelta(
     } satisfies GraphQueryIndexManifest);
     return true;
   } catch (error) {
-    logger.warn("Graph query index delta failed; next safe read will rebuild it", {
+    logger.warn("Graph query index delta failed; explicit snapshot rebuild required", {
       error: error instanceof Error ? error.message : String(error),
     });
     try {
@@ -1036,7 +1042,7 @@ async function updateGraphQueryIndexDelta(
       });
     } catch {
       // Canonical graph writes remain authoritative. The missing / stale
-      // derived manifest makes indexed reads fail closed into rebuild/fallback.
+      // derived manifest makes indexed reads fail closed into bounded fallback.
     }
     return false;
   }
@@ -1071,14 +1077,37 @@ function cleanGraphProperties(
   return result;
 }
 
+function normalizeSourceIndexes(
+  value: unknown,
+  sourceCount: number,
+  label: string,
+): number[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > sourceCount) {
+    throw new Error(`${label} must contain 1 to ${sourceCount} source indexes`);
+  }
+  const indexes = value.map((item) =>
+    typeof item === "number" && Number.isInteger(item) ? item : -1,
+  );
+  if (indexes.some((index) => index < 0 || index >= sourceCount)) {
+    throw new Error(`${label} contains an out-of-range source index`);
+  }
+  if (new Set(indexes).size !== indexes.length) {
+    throw new Error(`${label} must not contain duplicates`);
+  }
+  return indexes;
+}
+
 interface ManualGraphUpsertInput {
   project?: string;
   sources?: ObservationSourceInput[];
+  sharedSources?: boolean;
   nodes?: Array<{
     key?: string;
+    existingNodeId?: string;
     type?: string;
     name?: string;
     properties?: Record<string, unknown>;
+    sourceIndexes?: number[];
   }>;
   edges?: Array<{
     source?: string;
@@ -1086,6 +1115,7 @@ interface ManualGraphUpsertInput {
     type?: string;
     weight?: number;
     properties?: Record<string, unknown>;
+    sourceIndexes?: number[];
   }>;
 }
 
@@ -1094,6 +1124,19 @@ interface GraphProjectPurgeInput {
   nodeIds?: unknown;
   edgeIds?: unknown;
   reason?: string;
+}
+
+interface GraphProvenanceReconcileInput {
+  action?: "detach" | "retire" | "restore";
+  project?: string;
+  targets?: Array<{
+    kind?: "node" | "edge";
+    id?: string;
+    sources?: ObservationSourceInput[];
+    expectedUpdatedAt?: string;
+  }>;
+  reason?: string;
+  dryRun?: boolean;
 }
 
 function normalizeExactGraphIds(
@@ -1706,6 +1749,419 @@ async function purgeProjectGraph(
   }
 }
 
+function graphRecordVersion(record: GraphNode | GraphEdge): string {
+  return record.updatedAt ?? record.createdAt;
+}
+
+function nextGraphRecordVersion(record: GraphNode | GraphEdge): string {
+  const current = Date.parse(graphRecordVersion(record));
+  const next = Number.isFinite(current)
+    ? Math.max(Date.now(), current + 1)
+    : Date.now();
+  return new Date(next).toISOString();
+}
+
+async function edgeBelongsToProject(
+  kv: StateKV,
+  edge: GraphEdge,
+  project: string,
+): Promise<boolean> {
+  if (edge.project !== undefined) return edge.project === project;
+  const [source, target] = await Promise.all([
+    kv.get<GraphNode>(KV.graphNodes, edge.sourceNodeId),
+    kv.get<GraphNode>(KV.graphNodes, edge.targetNodeId),
+  ]);
+  return (
+    source !== null &&
+    target !== null &&
+    graphNodeProject(source) === project &&
+    graphNodeProject(target) === project
+  );
+}
+
+async function retainedSourceSessionIds(
+  kv: StateKV,
+  currentSessionIds: string[],
+  requestedSessionIds: Set<string>,
+  remainingObservationIds: string[],
+): Promise<string[]> {
+  const retained: string[] = [];
+  for (const sessionId of currentSessionIds) {
+    if (!requestedSessionIds.has(sessionId)) {
+      retained.push(sessionId);
+      continue;
+    }
+    const observations = await Promise.all(
+      remainingObservationIds.map((observationId) =>
+        kv.get<CompressedObservation>(KV.observations(sessionId), observationId),
+      ),
+    );
+    if (observations.some((observation) => observation?.sessionId === sessionId)) {
+      retained.push(sessionId);
+    }
+  }
+  return [...new Set(retained)];
+}
+
+async function reconcileGraphProvenance(
+  kv: StateKV,
+  data: GraphProvenanceReconcileInput,
+): Promise<Record<string, unknown>> {
+  try {
+    const action = data?.action === undefined ? "detach" : data.action;
+    if (!["detach", "retire", "restore"].includes(action)) {
+      throw new Error("action must be detach, retire, or restore");
+    }
+    const project = typeof data?.project === "string" ? data.project.trim() : "";
+    const reason = typeof data?.reason === "string" ? data.reason.trim() : "";
+    if (!project || project === "*" || project.length > 512) {
+      throw new Error(
+        "project is required, must not be '*', and must be at most 512 characters",
+      );
+    }
+    if (!reason || reason.length > 1000) {
+      throw new Error("reason is required and must be at most 1000 characters");
+    }
+    if (data.dryRun !== undefined && typeof data.dryRun !== "boolean") {
+      throw new Error("dryRun must be a boolean");
+    }
+    if (
+      !Array.isArray(data.targets) ||
+      data.targets.length === 0 ||
+      data.targets.length > MAX_GRAPH_PROVENANCE_TARGETS
+    ) {
+      throw new Error(
+        `targets must contain 1 to ${MAX_GRAPH_PROVENANCE_TARGETS} entries`,
+      );
+    }
+
+    const snap = await readSnapshot(kv);
+    if (!snap || snap.dirty) {
+      throw new Error("a clean graph snapshot is required before provenance reconciliation");
+    }
+
+    const seenTargets = new Set<string>();
+    let totalRequestedObservationReferences = 0;
+    const prepared: Array<{
+      kind: "node" | "edge";
+      id: string;
+      before: GraphNode | GraphEdge;
+      after: GraphNode | GraphEdge;
+      removedObservationIds: string[];
+      removedSessionIds: string[];
+      changed: boolean;
+    }> = [];
+
+    for (const target of data.targets) {
+      const kind = target?.kind;
+      const id = typeof target?.id === "string" ? target.id.trim() : "";
+      if (kind !== "node" && kind !== "edge") {
+        throw new Error(`target contains an invalid kind or ID: ${id || "<empty>"}`);
+      }
+      const expectedPrefix = kind === "node" ? "gn_" : "ge_";
+      if (!id.startsWith(expectedPrefix) || id.length > 128) {
+        throw new Error(`target contains an invalid kind or ID: ${id || "<empty>"}`);
+      }
+      const targetKey = `${kind}:${id}`;
+      if (seenTargets.has(targetKey)) {
+        throw new Error(`targets must not contain duplicates: ${targetKey}`);
+      }
+      seenTargets.add(targetKey);
+      if (!Array.isArray(target.sources) || target.sources.length === 0) {
+        throw new Error(`target sources must not be empty: ${targetKey}`);
+      }
+      const requested = await validateObservationProvenance(kv, {
+        project,
+        sources: target.sources,
+      });
+      totalRequestedObservationReferences += requested.sourceObservationIds.length;
+      if (
+        totalRequestedObservationReferences >
+        MAX_GRAPH_PROVENANCE_OBSERVATION_REFERENCES
+      ) {
+        throw new Error(
+          `targets may cite at most ${MAX_GRAPH_PROVENANCE_OBSERVATION_REFERENCES} observation references in total`,
+        );
+      }
+      const requestedObservationIds = new Set(requested.sourceObservationIds);
+      const requestedSessionIds = new Set(requested.sourceSessionIds);
+
+      const record = kind === "node"
+        ? await kv.get<GraphNode>(KV.graphNodes, id)
+        : await kv.get<GraphEdge>(KV.graphEdges, id);
+      if (!record || !isVisibleAfterReset({ ...record, stale: false }, snap.resetAt) ||
+          (action === "detach" && record.stale)) {
+        throw new Error(`unknown or non-live graph target: ${targetKey}`);
+      }
+      const belongs = kind === "node"
+        ? graphNodeProject(record as GraphNode) === project
+        : await edgeBelongsToProject(kv, record as GraphEdge, project);
+      if (!belongs) {
+        throw new Error(`graph target project mismatch: ${targetKey}`);
+      }
+      if (
+        target.expectedUpdatedAt !== undefined &&
+        (typeof target.expectedUpdatedAt !== "string" ||
+          target.expectedUpdatedAt !== graphRecordVersion(record))
+      ) {
+        throw new Error(`graph target changed after read: ${targetKey}`);
+      }
+
+      if (action !== "detach") {
+        if (kind !== "edge" || target.expectedUpdatedAt === undefined) {
+          throw new Error("retire/restore requires exact edge targets with expectedUpdatedAt");
+        }
+        const edge = record as GraphEdge;
+        const retired = edge.reviewRetirement?.active === true;
+        if (edge.stale && !retired) {
+          throw new Error("edge is stale for another reason: " + targetKey);
+        }
+        if (action === "restore" && edge.reviewRetirement === undefined) {
+          throw new Error("edge was not retired by this lifecycle: " + targetKey);
+        }
+        const indexedId = await kv.get<string>(
+          KV.graphEdgeKey, edgeIndexKey(edge.sourceNodeId, edge.targetNodeId, edge.type),
+        );
+        if (indexedId !== edge.id) {
+          throw new Error("edge identity index changed: " + targetKey);
+        }
+        if (action === "restore") {
+          for (const endpoint of [edge.sourceNodeId, edge.targetNodeId]) {
+            const node = await kv.get<GraphNode>(KV.graphNodes, endpoint);
+            if (!node || graphNodeProject(node) !== project || !isVisibleAfterReset(node, snap.resetAt)) {
+              throw new Error("restore requires live same-project endpoints: " + targetKey);
+            }
+          }
+          for (const observationId of edge.sourceObservationIds) {
+            let found = 0;
+            for (const sessionId of edge.sourceSessionIds ?? []) {
+              const observation = await kv.get<CompressedObservation>(KV.observations(sessionId), observationId);
+              if (observation?.id === observationId && observation.sessionId === sessionId) {
+                await validateObservationProvenance(kv, {
+                  project, sources: [{ sessionId, observationIds: [observationId] }],
+                });
+                found++;
+              }
+            }
+            if (found !== 1) throw new Error("restore requires exact original provenance: " + observationId);
+          }
+          if (edge.sourceObservationIds.length === 0) {
+            throw new Error("restore requires original source observations");
+          }
+        }
+        const active = action === "retire";
+        const changed = retired !== active;
+        const updatedAt = changed ? nextGraphRecordVersion(edge) : graphRecordVersion(edge);
+        prepared.push({
+          kind, id, before: edge,
+          after: changed ? {
+            ...edge, stale: active, updatedAt,
+            reviewRetirement: {
+              active, reason, updatedAt,
+              sourceObservationIds: requested.sourceObservationIds,
+              sourceSessionIds: requested.sourceSessionIds,
+            },
+          } : edge,
+          changed, removedObservationIds: [], removedSessionIds: [],
+        });
+        continue;
+      }
+
+      const nextObservationIds = record.sourceObservationIds.filter(
+        (observationId) => !requestedObservationIds.has(observationId),
+      );
+      const currentSessionIds = record.sourceSessionIds ?? [];
+      const nextSessionIds = await retainedSourceSessionIds(
+        kv,
+        currentSessionIds,
+        requestedSessionIds,
+        nextObservationIds,
+      );
+      const removedObservationIds = record.sourceObservationIds.filter(
+        (observationId) => !nextObservationIds.includes(observationId),
+      );
+      const removedSessionIds = currentSessionIds.filter(
+        (sessionId) => !nextSessionIds.includes(sessionId),
+      );
+      const changed = removedObservationIds.length > 0 || removedSessionIds.length > 0;
+      if (changed && nextObservationIds.length === 0) {
+        throw new Error(
+          `reconciliation would remove the final source observation: ${targetKey}`,
+        );
+      }
+      prepared.push({
+        kind,
+        id,
+        before: record,
+        after: changed
+          ? {
+              ...record,
+              sourceObservationIds: nextObservationIds,
+              sourceSessionIds: nextSessionIds,
+              updatedAt: nextGraphRecordVersion(record),
+            }
+          : record,
+        removedObservationIds,
+        removedSessionIds,
+        changed,
+      });
+    }
+
+    const results = prepared.map((target) => ({
+      kind: target.kind,
+      id: target.id,
+      changed: target.changed,
+      before: {
+        sourceObservationIds: target.before.sourceObservationIds,
+        sourceSessionIds: target.before.sourceSessionIds ?? [],
+        updatedAt: graphRecordVersion(target.before),
+        ...(action !== "detach" ? { stale: target.before.stale === true, reviewRetirement: (target.before as GraphEdge).reviewRetirement } : {}),
+      },
+      after: {
+        sourceObservationIds: target.after.sourceObservationIds,
+        sourceSessionIds: target.after.sourceSessionIds ?? [],
+        updatedAt: graphRecordVersion(target.after),
+        ...(action !== "detach" ? { stale: target.after.stale === true, reviewRetirement: (target.after as GraphEdge).reviewRetirement } : {}),
+      },
+      removedObservationIds: target.removedObservationIds,
+      removedSessionIds: target.removedSessionIds,
+    }));
+    const changedTargets = prepared.filter((target) => target.changed);
+    if (data.dryRun || changedTargets.length === 0) {
+      return {
+        success: true,
+        action,
+        project,
+        dryRun: data.dryRun === true,
+        changedTargets: changedTargets.length,
+        results,
+      };
+    }
+
+    let lifecycleSnapshot: GraphSnapshot | undefined;
+    const lifecycleDegrees = new Map<string, number>();
+    if (action !== "detach") {
+      const nodes = await kv.list<GraphNode>(KV.graphNodes);
+      const replacements = new Map(changedTargets.map((target) => [target.id, target.after as GraphEdge]));
+      const edges = (await kv.list<GraphEdge>(KV.graphEdges)).map((edge) => replacements.get(edge.id) ?? edge);
+      lifecycleSnapshot = buildSnapshotFromArrays(nodes, edges, snap.resetAt);
+      const liveIds = new Set(nodes.filter((node) => isVisibleAfterReset(node, snap.resetAt)).map((node) => node.id));
+      for (const target of changedTargets) {
+        const edge = target.after as GraphEdge;
+        lifecycleDegrees.set(edge.sourceNodeId, 0);
+        lifecycleDegrees.set(edge.targetNodeId, 0);
+      }
+      for (const edge of edges) {
+        if (!isVisibleAfterReset(edge, snap.resetAt) || !liveIds.has(edge.sourceNodeId) || !liveIds.has(edge.targetNodeId)) continue;
+        for (const id of [edge.sourceNodeId, edge.targetNodeId]) {
+          if (lifecycleDegrees.has(id)) lifecycleDegrees.set(id, lifecycleDegrees.get(id)! + 1);
+        }
+      }
+    }
+    const audit = await recordAudit(
+      kv,
+      "graph_provenance_reconcile",
+      "mem::graph-provenance-reconcile",
+      changedTargets.map((target) => target.id),
+      {
+        project,
+        action,
+        reason,
+        phase: "validated",
+        changedTargets: changedTargets.length,
+        removedObservationIds: [
+          ...new Set(changedTargets.flatMap((target) => target.removedObservationIds)),
+        ],
+        removedSessionIds: [
+          ...new Set(changedTargets.flatMap((target) => target.removedSessionIds)),
+        ],
+        targets: changedTargets.map((target) => ({
+          kind: target.kind,
+          id: target.id,
+          removedObservationIds: target.removedObservationIds,
+          removedSessionIds: target.removedSessionIds,
+          beforeUpdatedAt: graphRecordVersion(target.before),
+          afterUpdatedAt: graphRecordVersion(target.after),
+          ...(action !== "detach" ? {
+            beforeStale: target.before.stale === true,
+            afterStale: target.after.stale === true,
+            reviewSourceObservationIds: (target.after as GraphEdge).reviewRetirement?.sourceObservationIds,
+            reviewSourceSessionIds: (target.after as GraphEdge).reviewRetirement?.sourceSessionIds,
+          } : {}),
+        })),
+        snapshotUpdatedAt: snap.updatedAt,
+      },
+    );
+
+    const queryIndexManifest = await prepareGraphQueryIndexUpdate(kv, snap);
+    try {
+      await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, { ...snap, dirty: true });
+      for (const target of changedTargets) {
+        if (target.kind === "node") {
+          await kv.set(KV.graphNodes, target.id, target.after as GraphNode);
+          const index = snap.topNodes.findIndex((node) => node.id === target.id);
+          if (index !== -1) snap.topNodes[index] = target.after as GraphNode;
+        } else {
+          await kv.set(KV.graphEdges, target.id, target.after as GraphEdge);
+          if (action === "detach") {
+            const index = snap.topEdges.findIndex((edge) => edge.id === target.id);
+            if (index !== -1) snap.topEdges[index] = target.after as GraphEdge;
+          }
+        }
+      }
+      if (lifecycleSnapshot) {
+        for (const [id, degree] of lifecycleDegrees) await kv.set(KV.graphNodeDegree, id, degree);
+        Object.assign(snap, lifecycleSnapshot);
+      }
+      const completedAt = new Date(
+        Math.max(
+          Date.now(),
+          ...changedTargets.map((target) => Date.parse(graphRecordVersion(target.after))),
+        ),
+      ).toISOString();
+      snap.updatedAt = completedAt;
+      snap.dirty = false;
+      await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
+      await updateGraphQueryIndexDelta(
+        kv, queryIndexManifest, snap,
+        changedTargets.filter((target) => target.kind === "node").map((target) => target.after as GraphNode),
+        changedTargets.filter((target) => target.kind === "edge").map((target) => target.after as GraphEdge),
+        changedTargets.filter((target) => target.kind === "edge").map((target) => target.before as GraphEdge),
+      );
+      await kv.set(KV.audit, audit.id, {
+        ...audit,
+        details: {
+          ...audit.details,
+          phase: "completed",
+          completedAt,
+        },
+      });
+      return {
+        success: true,
+        action,
+        project,
+        dryRun: false,
+        auditId: audit.id,
+        changedTargets: changedTargets.length,
+        results,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await kv.set(KV.audit, audit.id, {
+        ...audit,
+        details: { ...audit.details, phase: "partial", error: message },
+      });
+      throw new Error(
+        `graph provenance reconciliation stopped after partial mutation: ${message}`,
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("Graph provenance reconciliation failed", { error: message });
+    return { success: false, error: message };
+  }
+}
+
 async function upsertManualGraph(
   kv: StateKV,
   data: ManualGraphUpsertInput,
@@ -1721,12 +2177,22 @@ async function upsertManualGraph(
     if (sources.length === 0) {
       throw new Error("sources must contain at least one provenance entry");
     }
+    if (
+      data.sharedSources !== undefined &&
+      typeof data.sharedSources !== "boolean"
+    ) {
+      throw new Error("sharedSources must be a boolean");
+    }
     const provenance = await validateObservationProvenance(kv, {
       project,
       sources,
     });
     const obsIds = provenance.sourceObservationIds;
     const sessionIds = provenance.sourceSessionIds;
+    const normalizedSourceGroups = sources.map((source) => ({
+      sessionId: source.sessionId.trim(),
+      observationIds: [...new Set(source.observationIds.map((id) => id.trim()))],
+    }));
 
     const inputNodes = Array.isArray(data?.nodes) ? data.nodes : [];
     const inputEdges =
@@ -1737,12 +2203,58 @@ async function upsertManualGraph(
     if (!inputEdges || inputEdges.length > 500) {
       throw new Error("edges must be an array with at most 500 entries");
     }
+    const allInputs = [...inputNodes, ...inputEdges];
+    const explicitSourceTargets = allInputs.filter(
+      (input) => input.sourceIndexes !== undefined,
+    ).length;
+    if (data.sharedSources === true && explicitSourceTargets > 0) {
+      throw new Error("sharedSources cannot be combined with per-record sourceIndexes");
+    }
+    if (explicitSourceTargets > 0 && explicitSourceTargets !== allInputs.length) {
+      throw new Error("sourceIndexes must be provided for every node and edge in the request");
+    }
+    if (
+      sources.length > 1 &&
+      allInputs.length > 1 &&
+      data.sharedSources !== true &&
+      explicitSourceTargets === 0
+    ) {
+      throw new Error(
+        "multiple sources with multiple graph records require per-record sourceIndexes or sharedSources=true",
+      );
+    }
+    const allSourceIndexes = normalizedSourceGroups.map((_source, index) => index);
+    const usedSourceIndexes = new Set<number>();
+    const sourceProvenanceFor = (
+      value: unknown,
+      label: string,
+    ): { sourceObservationIds: string[]; sourceSessionIds: string[] } => {
+      const indexes = value === undefined
+        ? allSourceIndexes
+        : normalizeSourceIndexes(value, normalizedSourceGroups.length, label);
+      indexes.forEach((index) => usedSourceIndexes.add(index));
+      return {
+        sourceObservationIds: [
+          ...new Set(
+            indexes.flatMap(
+              (index) => normalizedSourceGroups[index]!.observationIds,
+            ),
+          ),
+        ],
+        sourceSessionIds: [
+          ...new Set(indexes.map((index) => normalizedSourceGroups[index]!.sessionId)),
+        ],
+      };
+    };
 
     const normalizedNodes: Array<{
       key: string;
+      existingNodeId?: string;
       type: GraphNode["type"];
       name: string;
       properties: Record<string, string>;
+      sourceObservationIds: string[];
+      sourceSessionIds: string[];
     }> = [];
     const seenKeys = new Set<string>();
     for (const input of inputNodes) {
@@ -1760,12 +2272,21 @@ async function upsertManualGraph(
       if (!name || name.length > 512) {
         throw new Error("node name is required and must be at most 512 characters");
       }
+      if (input.existingNodeId !== undefined && (
+        typeof input.existingNodeId !== "string" || !input.existingNodeId.trim() || input.existingNodeId.length > 128
+      )) throw new Error("existingNodeId must be a non-empty string up to 128 characters");
       seenKeys.add(key);
+      const selectedSources = sourceProvenanceFor(
+        input.sourceIndexes,
+        `node ${key}.sourceIndexes`,
+      );
       normalizedNodes.push({
         key,
+        ...(input.existingNodeId !== undefined && { existingNodeId: input.existingNodeId.trim() }),
         type: type as GraphNode["type"],
         name,
         properties: cleanGraphProperties(input.properties, "node.properties"),
+        ...selectedSources,
       });
     }
 
@@ -1775,6 +2296,8 @@ async function upsertManualGraph(
       type: GraphEdge["type"];
       weight: number;
       properties: Record<string, string>;
+      sourceObservationIds: string[];
+      sourceSessionIds: string[];
     }> = [];
     for (const input of inputEdges) {
       const source = typeof input?.source === "string" ? input.source.trim() : "";
@@ -1787,6 +2310,10 @@ async function upsertManualGraph(
         throw new Error(`unsupported edge type: ${type || "<empty>"}`);
       }
       const parsedWeight = Number(input.weight);
+      const selectedSources = sourceProvenanceFor(
+        input.sourceIndexes,
+        `edge ${source}->${target}.sourceIndexes`,
+      );
       normalizedEdges.push({
         source,
         target,
@@ -1795,14 +2322,20 @@ async function upsertManualGraph(
           ? Math.max(0, Math.min(1, parsedWeight))
           : 0.5,
         properties: cleanGraphProperties(input.properties, "edge.properties"),
+        ...selectedSources,
       });
+    }
+    if (
+      explicitSourceTargets > 0 &&
+      usedSourceIndexes.size !== normalizedSourceGroups.length
+    ) {
+      throw new Error("every sources entry must be referenced by at least one sourceIndexes array");
     }
 
     const snap = (await readSnapshot(kv)) ?? emptySnapshot();
-    const queryIndexManifest = await prepareGraphQueryIndexUpdate(kv, snap);
+    const storedManifest = await readGraphQueryIndexManifest(kv);
+    const queryIndexManifest = queryIndexMatchesSnapshot(storedManifest, snap) ? storedManifest : null;
     const capturedAt = new Date().toISOString();
-    snap.dirty = true;
-    await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
     const requestedIdentities = new Set(
       normalizedNodes.map((node) => scopedNodeIdentity(project, node.type, node.name)),
     );
@@ -1825,6 +2358,60 @@ async function upsertManualGraph(
           snap.resetAt,
         )
       : await kv.list<GraphNode>(KV.graphNodes);
+
+    for (const input of normalizedNodes) {
+      if (input.existingNodeId && !storedNodes.some((node) => node.id === input.existingNodeId)) {
+        const target = await kv.get<GraphNode>(KV.graphNodes, input.existingNodeId);
+        if (target) storedNodes.push(target);
+      }
+    }
+    const exactTargets = new Set<string>();
+    for (const input of normalizedNodes) {
+      if (!input.existingNodeId) continue;
+      const target = storedNodes.find((node) => node.id === input.existingNodeId);
+      if (!target || graphNodeProject(target) !== project || target.type !== input.type || target.name !== input.name || !isVisibleAfterReset(target, snap.resetAt)) {
+        throw new Error(`existingNodeId must identify an exact live project/type/name match: ${input.existingNodeId}`);
+      }
+      if (exactTargets.has(input.existingNodeId)) throw new Error("existingNodeId must be unique within the request");
+      exactTargets.add(input.existingNodeId);
+      if (normalizedNodes.some((other) => other !== input && !other.existingNodeId && other.type === input.type && other.name === input.name)) {
+        throw new Error("exact and name-based targets cannot share an identity in one request");
+      }
+    }
+    const canonicalByKey = new Map<string, string>();
+    const identitiesBeingMerged = new Set<string>();
+    for (const input of normalizedNodes) {
+      const candidates = storedNodes.filter((node) =>
+        graphNodeProject(node) === project && node.type === input.type &&
+        node.name === input.name && isVisibleAfterReset(node, snap.resetAt) &&
+        (!input.existingNodeId || node.id === input.existingNodeId),
+      ).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+      if (candidates[0]) canonicalByKey.set(input.key, candidates[0].id);
+      if (candidates.length > 1) for (const node of candidates) identitiesBeingMerged.add(node.id);
+    }
+    for (const input of normalizedEdges) {
+      const source = canonicalByKey.get(input.source);
+      const target = canonicalByKey.get(input.target);
+      if (!source || !target) continue;
+      const existingId = await kv.get<string>(KV.graphEdgeKey, edgeIndexKey(source, target, input.type));
+      const edge = existingId ? await kv.get<GraphEdge>(KV.graphEdges, existingId) : null;
+      if (edge?.reviewRetirement?.active &&
+          isVisibleAfterReset({ ...edge, stale: false }, snap.resetAt)) {
+        throw new Error("edge is review-retired; use explicit restore first: " + edge.id);
+      }
+    }
+    if (identitiesBeingMerged.size) {
+      for (const edge of await kv.list<GraphEdge>(KV.graphEdges)) {
+        if (edge.reviewRetirement?.active &&
+            (identitiesBeingMerged.has(edge.sourceNodeId) || identitiesBeingMerged.has(edge.targetNodeId)) &&
+            isVisibleAfterReset({ ...edge, stale: false }, snap.resetAt)) {
+          throw new Error("node deduplication would change a review-retired edge: " + edge.id);
+        }
+      }
+    }
+    await prepareGraphQueryIndexUpdate(kv, snap);
+    snap.dirty = true;
+    await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
     const candidatesByIdentity = new Map<string, GraphNode[]>();
     for (const node of storedNodes) {
       const nodeProject = graphNodeProject(node);
@@ -1850,6 +2437,7 @@ async function upsertManualGraph(
       const indexKey = scopedNameIndexKey(project, input.type, input.name);
       const identity = scopedNodeIdentity(project, input.type, input.name);
       const candidates = [...(candidatesByIdentity.get(identity) ?? [])]
+        .filter((node) => !input.existingNodeId || node.id === input.existingNodeId)
         .sort(
           (a, b) =>
             String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")) ||
@@ -1862,8 +2450,8 @@ async function upsertManualGraph(
         name: input.name,
         properties: { ...input.properties, project },
         project,
-        sourceObservationIds: obsIds,
-        sourceSessionIds: sessionIds,
+        sourceObservationIds: input.sourceObservationIds,
+        sourceSessionIds: input.sourceSessionIds,
         createdAt: capturedAt,
       };
       if (existing) {
@@ -1900,17 +2488,22 @@ async function upsertManualGraph(
           ...mergeNode(existing, incoming, capturedAt),
           project,
           sourceSessionIds: [
-            ...new Set([...(existing.sourceSessionIds ?? []), ...sessionIds]),
+            ...new Set([
+              ...(existing.sourceSessionIds ?? []),
+              ...input.sourceSessionIds,
+            ]),
           ],
           stale: false,
         };
         await kv.set(KV.graphNodes, existing.id, merged);
         changedNodes.push(merged);
-        await kv.set(KV.graphNameIndex, indexKey, existing.id);
+        if (!input.existingNodeId) await kv.set(KV.graphNameIndex, indexKey, existing.id);
         const topIdx = snap.topNodes.findIndex((node) => node.id === existing!.id);
         if (topIdx !== -1) snap.topNodes[topIdx] = merged;
         nodeIds[input.key] = existing.id;
-        candidatesByIdentity.set(identity, [merged]);
+        candidatesByIdentity.set(identity, input.existingNodeId
+          ? (candidatesByIdentity.get(identity) ?? []).map((node) => node.id === merged.id ? merged : node)
+          : [merged]);
         mergedNodeCount++;
       } else {
         await kv.set(KV.graphNodes, incoming.id, incoming);
@@ -1950,8 +2543,8 @@ async function upsertManualGraph(
         weight: input.weight,
         properties: input.properties,
         project,
-        sourceObservationIds: obsIds,
-        sourceSessionIds: sessionIds,
+        sourceObservationIds: input.sourceObservationIds,
+        sourceSessionIds: input.sourceSessionIds,
         createdAt: capturedAt,
       };
       if (existing) {
@@ -1962,7 +2555,10 @@ async function upsertManualGraph(
           properties: { ...(existing.properties ?? {}), ...incoming.properties },
           project,
           sourceSessionIds: [
-            ...new Set([...(existing.sourceSessionIds ?? []), ...sessionIds]),
+            ...new Set([
+              ...(existing.sourceSessionIds ?? []),
+              ...input.sourceSessionIds,
+            ]),
           ],
           stale: false,
           updatedAt: capturedAt,
@@ -2120,6 +2716,8 @@ async function upsertManualGraph(
       project,
       sourceSessionIds: sessionIds,
       sourceObservationIds: obsIds,
+      sharedSources: data.sharedSources === true,
+      perRecordSources: explicitSourceTargets > 0,
       nodes: normalizedNodes.length,
       edges: normalizedEdges.length,
     });
@@ -2137,6 +2735,19 @@ async function upsertManualGraph(
     logger.error("Manual graph upsert failed", { error: message });
     return { success: false, error: message };
   }
+}
+
+function singleSourceCitationRegeneration(
+  error: unknown,
+  observationIds: string[],
+): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return observationIds.length === 1
+    && /^(?:entity|relationship) .+ cites an observation outside the input batch: [^\r\n]+$/.test(message);
+}
+
+function graphSourceRegenerationPrompt(originalPrompt: string, observationId: string): string {
+  return `The previous extraction cited an observation outside the input batch. Regenerate a fresh result using only the original observations below. Do not infer or substitute an intended citation from the previous output. Every entity and relationship must cite one or more of these exact source_observation_ids: ${observationId}. Return only valid <entities>...</entities><relationships>...</relationships> XML.\n\nORIGINAL OBSERVATIONS:\n${originalPrompt}`;
 }
 
 const HEURISTIC_EDGE_WEIGHT = 0.4;
@@ -2351,6 +2962,10 @@ export async function persistGraphDelta(
     let existing: GraphEdge | null = null;
     if (existingId) {
       existing = await kv.get<GraphEdge>(KV.graphEdges, existingId);
+      if (existing?.reviewRetirement?.active &&
+          isVisibleAfterReset({ ...existing, stale: false }, snap.resetAt)) {
+        continue;
+      }
       // Same #825 orphan check as the node path above.
       if (existing && !isVisibleAfterReset(existing, snap.resetAt)) {
         existing = null;
@@ -2409,20 +3024,22 @@ export function registerGraphFunction(
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
-  sdk.registerFunction(
-    "mem::graph-upsert",
+  registerObservationWriter(sdk, "mem::graph-upsert",
     async (data: ManualGraphUpsertInput) =>
       withKeyedLock(GRAPH_WRITE_LOCK, () => upsertManualGraph(kv, data)),
   );
 
-  sdk.registerFunction(
-    "mem::graph-project-purge",
+  registerObservationWriter(sdk, "mem::graph-project-purge",
     async (data: GraphProjectPurgeInput) =>
       withKeyedLock(GRAPH_WRITE_LOCK, () => purgeProjectGraph(kv, data)),
   );
 
-  sdk.registerFunction(
-    "mem::graph-extract",
+  registerObservationWriter(sdk, "mem::graph-provenance-reconcile",
+    async (data: GraphProvenanceReconcileInput) =>
+      withKeyedLock(GRAPH_WRITE_LOCK, () => reconcileGraphProvenance(kv, data)),
+  );
+
+  registerObservationWriter(sdk, "mem::graph-extract",
     async (data: {
       project?: string;
       sessionId?: string;
@@ -2512,7 +3129,13 @@ export function registerGraphFunction(
         if (preparationResult) return preparationResult;
       }
 
+      const processedObservationIds = observations.map((observation) => observation.id);
+      const excludedObservationIds = observations
+        .filter((observation) => isCodexApprovalReviewText(observation.narrative))
+        .map((observation) => observation.id);
+      observations = observations.filter((observation) => !isCodexApprovalReviewText(observation.narrative));
       const obsIds = observations.map((observation) => observation.id);
+      const onlyApprovalReviews = observations.length === 0 && excludedObservationIds.length > 0;
 
       let nodes: GraphNode[] = [];
       let edges: GraphEdge[] = [];
@@ -2547,16 +3170,9 @@ export function registerGraphFunction(
       let llmError: string | undefined;
       let semanticCompleted = false;
       let semanticRepairAttempted = false;
-      if (llmEnabled) {
+      if (llmEnabled && !onlyApprovalReviews) {
         const prompt = buildGraphExtractionPrompt(
-          observations.map((o) => ({
-            id: o.id,
-            title: o.title,
-            narrative: o.narrative,
-            concepts: o.concepts,
-            files: o.files,
-            type: o.type,
-          })),
+          observations.map(toGraphExtractionObservation),
         );
         try {
           const response = await provider.compress(
@@ -2567,13 +3183,16 @@ export function registerGraphFunction(
           try {
             parsed = parseGraphXml(response, obsIds);
           } catch (parseError) {
-            if (provider.name !== "local-qwen" || !repairableGraphXmlError(parseError)) {
+            const regenerateFromSource = singleSourceCitationRegeneration(parseError, obsIds);
+            if (provider.name !== "local-qwen" || (!regenerateFromSource && !repairableGraphXmlError(parseError))) {
               throw parseError;
             }
             semanticRepairAttempted = true;
             const repaired = await provider.compress(
               GRAPH_EXTRACTION_SYSTEM,
-              graphXmlRepairPrompt(response, parseError, obsIds),
+              regenerateFromSource
+                ? graphSourceRegenerationPrompt(prompt, obsIds[0]!)
+                : graphXmlRepairPrompt(response, parseError, obsIds),
             );
             parsed = parseGraphXml(repaired, obsIds, true);
           }
@@ -2601,17 +3220,23 @@ export function registerGraphFunction(
       }
 
       const persistExtraction = async () => {
-        try {
-          const persisted = nodes.length > 0 || edges.length > 0
-            ? await persistGraphDelta(kv, nodes, edges, obsIds, {
-                ...(project ? { project } : {}),
-                ...(sessionId ? { sourceSessionIds: [sessionId] } : {}),
-              })
-            : { newNodeCount: 0, newEdgeCount: 0 };
-          const { newNodeCount, newEdgeCount } = persisted;
+      try {
+        const persisted = nodes.length > 0 || edges.length > 0
+          ? await persistGraphDelta(kv, nodes, edges, obsIds, {
+              ...(project ? { project } : {}),
+              ...(sessionId ? { sourceSessionIds: [sessionId] } : {}),
+            })
+          : { newNodeCount: 0, newEdgeCount: 0 };
+        const { newNodeCount, newEdgeCount } = persisted;
 
-          if (sessionId && llmEnabled) {
-            if (semanticCompleted) {
+        const processingCompleted = semanticCompleted || onlyApprovalReviews;
+        if (sessionId && (llmEnabled || onlyApprovalReviews)) {
+          {
+            const currentSession = await kv.get<Session>(KV.sessions, sessionId);
+            if (!currentSession || currentSession.id !== sessionId || currentSession.project !== project) {
+              throw new Error("session identity changed during graph extraction; metadata was not updated");
+            }
+            if (processingCompleted) {
               const runtime = provider.getRuntimeInfo?.();
               const cursorMode = data.cursorMode === "bootstrap_backfill"
                 ? "bootstrap_backfill"
@@ -2622,17 +3247,12 @@ export function registerGraphFunction(
                   path: cursorMode === "bootstrap_backfill"
                     ? "semanticGraphBackfillThroughObservationId"
                     : "semanticGraphThroughObservationId",
-                  value: obsIds[obsIds.length - 1],
+                  value: processedObservationIds[processedObservationIds.length - 1],
                 },
                 {
                   type: "set",
                   path: "semanticGraphAnalyzer",
-                  value: runtime?.fingerprint ?? provider.name,
-                },
-                {
-                  type: "set",
-                  path: "semanticGraphStatus",
-                  value: data.semanticHasMore ? "pending" : "complete",
+                  value: onlyApprovalReviews ? "deterministic:codex-approval-review-skip" : runtime?.fingerprint ?? provider.name,
                 },
                 { type: "set", path: "semanticGraphLastError", value: "" },
               ];
@@ -2642,16 +3262,22 @@ export function registerGraphFunction(
                   path: "semanticGraphBootstrapSkipped",
                   value: 0,
                 });
-              } else if (
-                cursorMode === "forward" &&
-                data.bootstrapSkipped !== undefined
-              ) {
+              } else if (cursorMode === "forward" && data.bootstrapSkipped !== undefined) {
                 updates.push({
                   type: "set",
                   path: "semanticGraphBootstrapSkipped",
                   value: Math.max(0, Math.floor(data.bootstrapSkipped)),
                 });
               }
+              const currentObservations = await kv.list<CompressedObservation>(KV.observations(sessionId));
+              const projectedSession = {
+                ...currentSession,
+                ...Object.fromEntries(updates.map((update) => [update.path, update.value])),
+              } as Session;
+              updates.push({
+                type: "set", path: "semanticGraphStatus",
+                value: semanticGraphCursorsAtEnd(projectedSession, currentObservations) ? "complete" : "pending",
+              });
               await kv.update(KV.sessions, sessionId, updates);
             } else {
               await kv.update(KV.sessions, sessionId, [
@@ -2659,89 +3285,64 @@ export function registerGraphFunction(
                 {
                   type: "set",
                   path: "semanticGraphLastError",
-                  value: (
-                    llmError ?? "semantic graph extraction did not complete"
-                  ).slice(0, 1000),
+                  value: (llmError ?? "semantic graph extraction did not complete").slice(0, 1000),
                 },
               ]);
             }
           }
-
-          await recordAudit(kv, "observe", "mem::graph-extract", obsIds, {
-            ...(project ? { project } : {}),
-            ...(sessionId ? { sessionId } : {}),
-            nodesExtracted: nodes.length,
-            edgesExtracted: edges.length,
-            semanticCompleted,
-            semanticRepairAttempted,
-            ...(llmError ? { semanticError: llmError.slice(0, 1000) } : {}),
-            ...(provider.getRuntimeInfo?.()
-              ? { providerRuntime: provider.getRuntimeInfo?.() }
-              : {}),
-          });
-
-          logger.info("Graph extraction complete", {
-            nodes: nodes.length,
-            edges: edges.length,
-            newNodes: newNodeCount,
-            newEdges: newEdgeCount,
-            llm: llmEnabled && !llmError,
-          });
-          return {
-            success:
-              semanticCompleted || !llmEnabled || nodes.length > 0 || edges.length > 0,
-            nodesAdded: nodes.length,
-            edgesAdded: edges.length,
-            newNodes: newNodeCount,
-            newEdges: newEdgeCount,
-            semanticCompleted,
-            semanticRepairAttempted,
-            ...(llmError ? { semanticError: llmError } : {}),
-          };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.error("Graph extraction failed", { error: msg });
-          return { success: false, error: msg };
         }
+
+        await recordAudit(kv, "observe", "mem::graph-extract", processedObservationIds, {
+          ...(project ? { project } : {}),
+          ...(sessionId ? { sessionId } : {}),
+          nodesExtracted: nodes.length,
+          edgesExtracted: edges.length,
+          processingCompleted,
+          ...(excludedObservationIds.length ? { excludedObservationIds, exclusionReason: "codex_approval_review" } : {}),
+          semanticCompleted,
+          semanticRepairAttempted,
+          ...(llmError ? { semanticError: llmError.slice(0, 1000) } : {}),
+          ...(provider.getRuntimeInfo?.()
+            ? { providerRuntime: provider.getRuntimeInfo?.() }
+            : {}),
+        });
+
+        logger.info("Graph extraction complete", {
+          nodes: nodes.length,
+          edges: edges.length,
+          newNodes: newNodeCount,
+          newEdges: newEdgeCount,
+          llm: llmEnabled && !onlyApprovalReviews && !llmError,
+        });
+        return {
+          success: processingCompleted || !llmEnabled || nodes.length > 0 || edges.length > 0,
+          processingCompleted,
+          ...(excludedObservationIds.length ? { excludedObservationIds, exclusionReason: "codex_approval_review" } : {}),
+          nodesAdded: nodes.length,
+          edgesAdded: edges.length,
+          newNodes: newNodeCount,
+          newEdges: newEdgeCount,
+          semanticCompleted,
+          semanticRepairAttempted,
+          ...(llmError ? { semanticError: llmError } : {}),
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error("Graph extraction failed", { error: msg });
+        return { success: false, error: msg };
+      }
       };
-
       if (!sessionId) return persistExtraction();
-
-      return withKeyedLock(
-        `mem:session-lifecycle:${sessionId}`,
-        async () => {
-          const currentSession = await kv.get<Session>(KV.sessions, sessionId);
-          const currentObservations = await Promise.all(
-            obsIds.map((observationId) =>
-              kv.get<CompressedObservation>(
-                KV.observations(sessionId),
-                observationId,
-              ),
-            ),
-          );
-          if (
-            !currentSession ||
-            currentSession.project !== project ||
-            currentObservations.some((observation) => !observation)
-          ) {
-            logger.info("Graph extraction discarded after source deletion", {
-              sessionId,
-              observations: obsIds.length,
-            });
-            return {
-              success: true,
-              skipped: "source_deleted",
-              nodesAdded: 0,
-              edgesAdded: 0,
-              newNodes: 0,
-              newEdges: 0,
-              semanticCompleted: false,
-              semanticRepairAttempted,
-            };
-          }
-          return persistExtraction();
-        },
-      );
+      return withKeyedLock(`mem:session-lifecycle:${sessionId}`, async () => {
+        try {
+          await validateObservationProvenance(kv, {
+            project, sources: [{ sessionId, observationIds: processedObservationIds }],
+          });
+        } catch (error) {
+          return { success: false, error: error instanceof Error ? error.message : String(error), skipped: "source_deleted", nodesAdded: 0, edgesAdded: 0, newNodes: 0, newEdges: 0, semanticCompleted: false, semanticRepairAttempted };
+        }
+        return persistExtraction();
+      });
       }),
   );
 
@@ -2897,8 +3498,7 @@ export function registerGraphFunction(
   // run on corpora large enough that the response payload would
   // block the worker heartbeat. Above the ceiling the only safe path
   // is mem::graph-reset followed by incremental re-extraction.
-  sdk.registerFunction(
-    "mem::graph-snapshot-rebuild",
+  registerObservationWriter(sdk, "mem::graph-snapshot-rebuild",
     async (data?: { force?: boolean }) =>
       withKeyedLock(GRAPH_WRITE_LOCK, async () => {
       const started = Date.now();
@@ -3079,7 +3679,7 @@ export function registerGraphFunction(
   // read by any post-#816 code path. Cleanup is deferred to a future
   // chunked-vacuum job; #816's broken vacuum-via-list strategy is
   // what we are leaving behind here.
-  sdk.registerFunction("mem::graph-reset", async () =>
+  registerObservationWriter(sdk, "mem::graph-reset", async () =>
     withKeyedLock(GRAPH_WRITE_LOCK, async () => {
       const started = Date.now();
       // Stamp resetAt=now on the empty snapshot. Future

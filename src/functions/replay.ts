@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import { homedir } from "node:os";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
@@ -287,8 +288,7 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction(
-    "mem::replay::import-jsonl",
+  registerObservationWriter(sdk, "mem::replay::import-jsonl",
     async (
       data: { path?: string; maxFiles?: number } = {},
     ): Promise<
@@ -386,6 +386,11 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
 
         const parsed = parseJsonlText(text, generateId("sess"));
         if (parsed.observations.length === 0) continue;
+        if (kv.hasObservationRecovery(parsed.sessionId)) {
+          logger.warn("Replay skipped a session with recoverable observations", { sessionId: parsed.sessionId });
+          continue;
+        }
+        kv.assertRecoveryImportAllowed(parsed);
 
         const firstPromptObs = parsed.observations.find(
           (o) => typeof o.userPrompt === "string" && o.userPrompt.trim().length > 0,

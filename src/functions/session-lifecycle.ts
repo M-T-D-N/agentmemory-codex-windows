@@ -78,7 +78,13 @@ export function prepareSessionStart(
   now = new Date().toISOString(),
 ): SessionStartResult {
   if (existing) {
-    if (existing.project !== input.project) {
+    if (existing.id && existing.id !== input.sessionId) {
+      return { success: false, error: "Session id mismatch" };
+    }
+    if (!existing.project && existing.cwd && existing.cwd !== input.cwd) {
+      return { success: false, error: "Incomplete session cwd mismatch" };
+    }
+    if (existing.project && existing.project !== input.project) {
       return {
         success: false,
         error: `Session project mismatch: ${existing.project} != ${input.project}`,
@@ -90,6 +96,11 @@ export function prepareSessionStart(
       reused: true,
       session: {
         ...resumable,
+        id: existing.id || input.sessionId,
+        project: existing.project || input.project,
+        cwd: existing.cwd || input.cwd,
+        startedAt: existing.startedAt || now,
+        observationCount: existing.observationCount ?? 0,
         status: "active",
         updatedAt: now,
       },

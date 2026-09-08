@@ -21,6 +21,8 @@ function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   const setCalls: Array<{ scope: string; key: string | undefined; value: any }> = [];
   return {
+    assertRecoveryImportAllowed: () => {},
+    hasObservationRecovery: () => false,
     get: async <T>(scope: string, key: string): Promise<T | null> =>
       (store.get(scope)?.get(key) as T) ?? null,
     set: async <T>(scope: string, key: string, value: T): Promise<T> => {

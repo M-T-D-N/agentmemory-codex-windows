@@ -223,7 +223,10 @@ async function main() {
 
   const sdk = registerWorker(config.engineUrl, {
     workerName: "agentmemory",
-    invocationTimeoutMs: 180000,
+    // The adapter's 32K output ceiling is an emergency runaway fuse, not a
+    // normal generation target. Keep the invocation layer above Qwen's 20m
+    // bound so it never becomes the lower, hidden cutoff that repeats a batch.
+    invocationTimeoutMs: 1500000,
     otel: {
       serviceName: OTEL_CONFIG.serviceName,
       serviceVersion: OTEL_CONFIG.serviceVersion,
@@ -246,6 +249,7 @@ async function main() {
   writeWorkerPidfile();
 
   const kv = new StateKV(sdk);
+  await kv.initializeObservationRecovery();
   const secret = getEnvVar("AGENTMEMORY_SECRET");
   const metricsStore = new MetricsStore(kv);
   const dedupMap = new DedupMap();
@@ -296,7 +300,7 @@ async function main() {
   }
 
   registerGraphFunction(sdk, kv, graphProvider);
-  registerSemanticGraphBacklogFunction(sdk, kv);
+  registerSemanticGraphBacklogFunction(sdk, kv, graphProvider);
   const semanticGraphBacklogScheduler = localQwenGraphOnly
     ? startSemanticGraphBacklogScheduler(sdk, graphProvider, graphProviderRuntime)
     : null;
@@ -571,7 +575,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 133 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 134 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,

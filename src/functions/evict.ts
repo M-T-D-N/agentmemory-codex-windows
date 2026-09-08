@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import type {
   Session,
@@ -38,6 +39,7 @@ interface EvictionStats {
   expiredMemories: number;
   nonLatestMemories: number;
   dryRun: boolean;
+  protectedSessionsSkipped?: number;
 }
 
 function isValidRecoveryResult(result: unknown): boolean {
@@ -108,7 +110,7 @@ async function runRecoveredSessionConsolidation(sdk: ISdk): Promise<void> {
 }
 
 export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::evict", 
+  registerObservationWriter(sdk, "mem::evict",
     async (data: { dryRun?: boolean }): Promise<EvictionStats> => {
       const dryRun = data?.dryRun ?? false;
       const { decrementImageRef } = await import("./image-refs.js");
@@ -129,7 +131,9 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
       };
 
       let recoveredStaleSessions = 0;
-      const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
+      const allSessions = await kv.list<Session>(KV.sessions).catch(() => []);
+      const sessions = allSessions.filter(session => !kv.hasObservationRecovery(session.id));
+      const protectedSessionsSkipped = allSessions.length - sessions.length;
       const summaries = await kv
         .list<SessionSummary>(KV.summaries)
         .catch(() => []);
@@ -359,7 +363,7 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       logger.info("Eviction complete", { stats });
-      return stats;
+      return { ...stats, protectedSessionsSkipped };
     },
   );
 }

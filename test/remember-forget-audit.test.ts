@@ -19,6 +19,8 @@ import type { Memory } from "../src/types.js";
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
+    assertRecoveryImportAllowed: () => {},
+    hasObservationRecovery: () => false,
     get: async <T>(scope: string, key: string): Promise<T | null> =>
       (store.get(scope)?.get(key) as T) ?? null,
     set: async <T>(scope: string, key: string, data: T): Promise<T> => {
@@ -29,6 +31,7 @@ function mockKV() {
     delete: async (scope: string, key: string): Promise<void> => {
       store.get(scope)?.delete(key);
     },
+    listGroups: async () => [...store.keys()],
     list: async <T>(scope: string): Promise<T[]> => {
       const entries = store.get(scope);
       return entries ? (Array.from(entries.values()) as T[]) : [];
@@ -52,6 +55,66 @@ function mockSdk() {
 }
 
 describe("mem::forget audit coverage (issue #125)", () => {
+  it("previews actual content and history references without changing any data", async () => {
+    const sdk = mockSdk(); const kv = mockKV(); registerRememberFunction(sdk as never, kv as never);
+    await kv.set("mem:sessions", "s", { id: "s", project: "p", status: "completed", observationCount: 999 });
+    await kv.set("mem:obs:s", "blank", { id: "blank", sessionId: "s", title: "assistant_response", narrative: "", facts: [], files: [] });
+    await kv.set("mem:obs:s", "raw", { id: "raw", sessionId: "s", title: "assistant_response", narrative: "", raw: { userPrompt: "real input" } });
+    await kv.set("mem:graph:edge-history", "history", { id: "history", sourceObservationIds: ["blank"], sourceSessionIds: ["s"] });
+    await kv.set("mem:lessons", "retired", { id: "retired", deleted: true, sourceIds: ["blank"] });
+    const before = await kv.list("mem:obs:s");
+    const result = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "s", observationIds: ["blank", "raw"], dryRun: true } }) as { success: boolean; targets: Array<{ id: string; empty: boolean }>; referenceCount: number; actualObservationCount: number };
+    expect(result).toMatchObject({ success: true, referenceCount: 2, actualObservationCount: 2 });
+    expect(result.targets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "blank", empty: true }), expect.objectContaining({ id: "raw", empty: false })]));
+    expect(await kv.list("mem:obs:s")).toEqual(before);
+    expect(await kv.list("mem:audit")).toEqual([]);
+    expect(await kv.get("mem:sessions", "s")).toMatchObject({ observationCount: 999 });
+  });
+
+  it("inspects ID-less and orphan buckets through official scope enumeration", async () => {
+    const sdk = mockSdk(); const kv = mockKV(); registerRememberFunction(sdk as never, kv as never);
+    await kv.set("mem:sessions", "s", { id: "s", project: "p" });
+    await kv.set("mem:sessions", "legacy", { project: "p" });
+    await kv.set("mem:sessions", "blank-id", { id: " ", project: "p" });
+    await kv.set("mem:obs:s", "blank", { id: "blank", sessionId: "s", title: "assistant_response", narrative: "" });
+    const result = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "s", observationIds: ["blank"], dryRun: true } });
+    expect(result).toMatchObject({ success: true, dryRun: true, referenceInventoryComplete: true,
+      uninspectableSessionCount: 2, referenceCount: 0, targets: [{ id: "blank", empty: true }] });
+    await kv.set("mem:obs:legacy", "derived", { id: "derived", sourceObservationIds: ["blank"] });
+    await kv.set("mem:enriched:orphan", "chunk", { id: "chunk", originalObsId: "blank" });
+    const referenced = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "s", observationIds: ["blank"], dryRun: true } });
+    expect(referenced).toMatchObject({ success: true, referenceInventoryComplete: true, referenceCount: 2 });
+    kv.listGroups = async () => { throw new Error("LIST_GROUPS_ERROR"); };
+    const failed = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "s", observationIds: ["blank"], dryRun: true } });
+    expect(failed).toMatchObject({ success: false, error: "LIST_GROUPS_ERROR" });
+    expect(await kv.get("mem:obs:s", "blank")).not.toBeNull();
+    expect(await kv.list("mem:audit")).toEqual([]);
+  });
+
+  it("never expands empty observationIds to a whole-session deletion", async () => {
+    const sdk = mockSdk(); const kv = mockKV(); registerRememberFunction(sdk as never, kv as never);
+    await kv.set("mem:sessions", "s", { id: "s", project: "p" });
+    await kv.set("mem:obs:s", "o", { id: "o", narrative: "keep" });
+    const result = await sdk.trigger({ function_id: "mem::forget", payload: { sessionId: "s", observationIds: [] } }) as { success: boolean };
+    expect(result.success).toBe(false);
+    expect(await kv.get("mem:obs:s", "o")).toMatchObject({ narrative: "keep" });
+    expect(await kv.list("mem:audit")).toEqual([]);
+  });
+
+  it("rejects unscoped previews and propagates incomplete reference reads", async () => {
+    const sdk = mockSdk(); const kv = mockKV(); registerRememberFunction(sdk as never, kv as never);
+    await kv.set("mem:sessions", "s", { id: "s", project: "p" });
+    for (const project of [undefined, "*", " * ", "other"]) {
+      const result = await sdk.trigger({ function_id: "mem::forget", payload: { project, sessionId: "s", dryRun: true } }) as { success: boolean };
+      expect(result.success).toBe(false);
+    }
+    const realList = kv.list;
+    kv.list = async <T>(scope: string): Promise<T[]> => { if (scope === "mem:graph:edges") throw new Error("reference read failed"); return realList<T>(scope); };
+    const result = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "s", dryRun: true } }) as { success: boolean; error: string };
+    expect(result).toMatchObject({ success: false, error: "reference read failed" });
+    expect(await kv.get("mem:sessions", "s")).not.toBeNull();
+  });
+
   it("emits a single audit row when a memory is forgotten", async () => {
     const sdk = mockSdk();
     const kv = mockKV();

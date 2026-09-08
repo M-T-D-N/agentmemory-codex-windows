@@ -24,6 +24,87 @@ interface LocalQwenDiscovery {
   slotsIdle: boolean;
 }
 
+interface ChatCompletionChoice {
+  finish_reason?: string | null;
+  delta?: {
+    content?: string;
+    reasoning?: string;
+    reasoning_content?: string;
+  };
+  message?: {
+    content?: string;
+    reasoning?: string;
+    reasoning_content?: string;
+  };
+}
+
+function choiceContent(choice: ChatCompletionChoice | undefined): string {
+  return (
+    choice?.delta?.content ??
+    choice?.delta?.reasoning_content ??
+    choice?.delta?.reasoning ??
+    choice?.message?.content ??
+    choice?.message?.reasoning_content ??
+    choice?.message?.reasoning ??
+    ""
+  );
+}
+
+async function streamingChatContent(
+  response: Response,
+  maxTokens: number,
+): Promise<string> {
+  if (!response.body) throw new Error("local_qwen_empty_stream");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let content = "";
+  let finishReason: string | null = null;
+  let completed = false;
+
+  const consumeLine = (rawLine: string): void => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(":")) return;
+    if (!line.startsWith("data:")) return;
+    const data = line.slice(5).trim();
+    if (!data) return;
+    if (data === "[DONE]") { completed = true; return; }
+    let parsed: { choices?: ChatCompletionChoice[] };
+    try {
+      parsed = JSON.parse(data) as { choices?: ChatCompletionChoice[] };
+    } catch {
+      throw new Error("local_qwen_invalid_stream_chunk");
+    }
+    const choice = parsed.choices?.[0];
+    content += choiceContent(choice);
+    if (typeof choice?.finish_reason === "string") {
+      finishReason = choice.finish_reason;
+    }
+  };
+
+  try {
+  for (;;) {
+    const { done, value } = await reader.read();
+    buffered += decoder.decode(value, { stream: !done });
+    const lines = buffered.split(/\r?\n/);
+    buffered = lines.pop() ?? "";
+    for (const line of lines) consumeLine(line);
+    if (done) break;
+  }
+  if (buffered) consumeLine(buffered);
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  if (finishReason === "length") {
+    throw new Error(`local_qwen_output_truncated:${maxTokens}`);
+  }
+  if (!completed) throw new Error("local_qwen_stream_incomplete");
+  return content;
+}
+
 function positiveInt(raw: string | undefined, fallback: number): number {
   if (!raw || !/^\d+$/.test(raw.trim())) return fallback;
   const parsed = Number(raw);
@@ -93,60 +174,6 @@ async function fetchJson(
     throw new Error(`local_qwen_probe_http_${response.status}`);
   }
   return response.json();
-}
-
-async function streamedChatContent(response: Response): Promise<string> {
-  if (!response.body) throw new Error("local_qwen_stream_missing_body");
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let content = "";
-  let completed = false;
-
-  const consumeLine = (rawLine: string) => {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (!line.startsWith("data:")) return;
-    const data = line.slice(5).trim();
-    if (!data) return;
-    if (data === "[DONE]") {
-      completed = true;
-      return;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      throw new Error("local_qwen_stream_invalid_json");
-    }
-    const choices = objectValue(parsed)?.choices;
-    const choice = Array.isArray(choices) ? objectValue(choices[0]) : null;
-    const delta = objectValue(choice?.delta) ?? objectValue(choice?.message);
-    const chunk = delta?.content ?? delta?.reasoning_content ?? delta?.reasoning;
-    if (typeof chunk === "string") content += chunk;
-  };
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        consumeLine(buffer.slice(0, newline));
-        buffer = buffer.slice(newline + 1);
-        newline = buffer.indexOf("\n");
-      }
-      if (done) break;
-    }
-    if (buffer) consumeLine(buffer);
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
-  } finally {
-    reader.releaseLock();
-  }
-
-  if (!completed) throw new Error("local_qwen_stream_incomplete");
-  return content;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -370,7 +397,10 @@ export class LocalQwenProvider implements MemoryProvider {
       const response = await fetch(v1Endpoint(this.baseUrl, "/chat/completions"), {
         method: "POST",
         redirect: "error",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
         body: JSON.stringify({
           model: info.model,
           max_tokens: maxTokens,
@@ -389,7 +419,19 @@ export class LocalQwenProvider implements MemoryProvider {
         const detail = (await response.text()).slice(0, 1000);
         throw new Error(`local_qwen_http_${response.status}:${detail}`);
       }
-      const content = await streamedChatContent(response);
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      let content: string;
+      if (contentType.includes("text/event-stream")) {
+        content = await streamingChatContent(response, maxTokens);
+      } else {
+        const choice = (
+          (await response.json()) as { choices?: ChatCompletionChoice[] }
+        ).choices?.[0];
+        if (choice?.finish_reason === "length") {
+          throw new Error(`local_qwen_output_truncated:${maxTokens}`);
+        }
+        content = choiceContent(choice);
+      }
       if (!content?.trim()) throw new Error("local_qwen_empty_response");
       return content;
     } catch (error) {

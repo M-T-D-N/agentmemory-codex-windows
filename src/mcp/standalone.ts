@@ -12,7 +12,7 @@ import { getStandalonePersistPath } from "../config.js";
 import { VERSION } from "../version.js";
 import { generateId } from "../state/schema.js";
 import type { Session } from "../types.js";
-import { isExcludedCodexAmbientSession } from "../functions/observation-visibility.js";
+import { parseSessionQuery, selectSessionPage, type SessionQuery } from "../functions/session-query.js";
 import {
   resolveHandle,
   invalidateHandle,
@@ -43,6 +43,9 @@ const SERVER_INFO = {
   name: "agentmemory",
   version: VERSION,
 };
+
+const TOOLS_LIST_STARTUP_ATTEMPTS = 8;
+const TOOLS_LIST_STARTUP_RETRY_DELAY_MS = 1_000;
 
 let fallbackKv: InMemoryKV | undefined;
 let modeAnnounced = false;
@@ -76,6 +79,40 @@ function announceMode(handle: Handle): void {
       `[@agentmemory/mcp] no server reachable at ${displayAgentmemoryUrl()}; running reduced LOCAL FALLBACK with ${IMPLEMENTED_TOOLS.size} of ${fullToolCount} tools. Start 'npx @agentmemory/agentmemory' (and point AGENTMEMORY_URL at it) to unlock all ${fullToolCount} tools.\n`,
     );
   }
+}
+
+function isRetryableToolsListStartupError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (!(error instanceof Error)) return false;
+  return (
+    /^GET \/agentmemory\/mcp\/tools -> 404\b/.test(error.message) ||
+    /\b(?:ECONNREFUSED|ECONNRESET|EPIPE|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)\b/.test(
+      error.message,
+    )
+  );
+}
+
+async function waitForToolsListRetry(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, TOOLS_LIST_STARTUP_RETRY_DELAY_MS);
+  });
+}
+
+async function fetchProxyToolsList(handle: ProxyHandle): Promise<unknown> {
+  for (let attempt = 1; attempt <= TOOLS_LIST_STARTUP_ATTEMPTS; attempt++) {
+    try {
+      return await handle.call("/agentmemory/mcp/tools", { method: "GET" });
+    } catch (error) {
+      if (
+        attempt === TOOLS_LIST_STARTUP_ATTEMPTS ||
+        !isRetryableToolsListStartupError(error)
+      ) {
+        throw error;
+      }
+      await waitForToolsListRetry();
+    }
+  }
+  throw new Error("AgentMemory tools/list startup retry exhausted");
 }
 
 function normalizeList(value: unknown): string[] {
@@ -116,6 +153,7 @@ function textResponse(payload: unknown, pretty = false): {
 
 interface Validated {
   tool: string;
+  sessionQuery?: SessionQuery;
   content?: string;
   type?: string;
   concepts?: string[];
@@ -178,7 +216,9 @@ function validate(toolName: string, args: Record<string, unknown>): Validated {
       return v;
     }
     case "memory_sessions": {
-      v.limit = parseLimit(args["limit"], 20);
+      const query = parseSessionQuery(args);
+      if ("error" in query) throw new Error(query.error);
+      v.sessionQuery = query;
       return v;
     }
     case "memory_governance_delete": {
@@ -250,12 +290,9 @@ async function handleLocal(
     }
 
     case "memory_sessions": {
-      const sessions =
-        (await kvInstance.list<Session>("mem:sessions")).filter(
-          (session) => !isExcludedCodexAmbientSession(session),
-        );
-      const limit = v.limit ?? 20;
-      return textResponse({ sessions: sessions.slice(0, limit) }, true);
+      return textResponse(selectSessionPage(
+        await kvInstance.list<Session>("mem:sessions"), v.sessionQuery!,
+      ), true);
     }
 
     case "memory_governance_delete": {
@@ -303,7 +340,7 @@ async function handleProxyGeneric(
   handle: ProxyHandle,
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
   // Forward to the server's full MCP surface so non-Claude clients can
-  // reach all 56 tools (lessons, sentinels, slots, signals, graph, …)
+  // reach all 57 tools (lessons, sentinels, slots, signals, graph, …)
   // instead of being capped at the 7 IMPLEMENTED_TOOLS set baked into
   // this shim. The server validates arguments per tool.
   const result = (await handle.call("/agentmemory/mcp/call", {
@@ -391,9 +428,9 @@ export async function handleToolsList(): Promise<{ tools: unknown[] }> {
   }
   if (handle.mode === "proxy") {
     try {
-      const remote = (await handle.call("/agentmemory/mcp/tools", {
-        method: "GET",
-      })) as { tools?: unknown } | null;
+      const remote = (await fetchProxyToolsList(handle)) as {
+        tools?: unknown;
+      } | null;
       if (debug) {
         const shape = remote === null
           ? "null"

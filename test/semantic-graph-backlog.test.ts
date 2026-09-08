@@ -4,10 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 vi.mock("../src/config.js", () => ({
-  getEnvVar: (name: string) => name === "AGENTMEMORY_LOCAL_QWEN_TIMEOUT_MS"
-    ? "180000"
-    : undefined,
-  getGraphBatchSize: () => 2,
+  getEnvVar: (key: string) => process.env[key] ?? (key === "AGENTMEMORY_LOCAL_QWEN_TIMEOUT_MS" ? "180000" : undefined),
+  getGraphBatchSize: () => Number(process.env.GRAPH_EXTRACTION_BATCH_SIZE ?? 2),
   isGraphExtractionEnabled: () => true,
 }));
 vi.mock("../src/logger.js", () => ({
@@ -18,9 +16,14 @@ import {
   isReadySignalWatchFilename,
   registerSemanticGraphBacklogFunction,
   selectSemanticGraphBatch,
+  semanticGraphCatchupLimits,
   startSemanticGraphBacklogScheduler,
   subscribeReadySignalFile,
 } from "../src/functions/semantic-graph-backlog.js";
+import {
+  estimateGraphExtractionInputTokens,
+  toGraphExtractionObservation,
+} from "../src/prompts/graph-extraction.js";
 import type { CompressedObservation, Session } from "../src/types.js";
 
 function observations(sessionId: string, count: number): CompressedObservation[] {
@@ -137,6 +140,208 @@ describe("semantic graph backlog", () => {
       semanticBootstrapDone: true,
       semanticHasMore: false,
     });
+  });
+
+  it("expands catch-up batches only through the exact graph prompt input budget", () => {
+    const raw = observations("catch-up", 8).map((observation, index) => ({
+      ...observation,
+      narrative: `${index}:` + "x".repeat(2_000),
+    }));
+    const budget = estimateGraphExtractionInputTokens(
+      raw.slice(0, 5).map(toGraphExtractionObservation),
+    );
+
+    const batch = selectSemanticGraphBatch(
+      session("catch-up", "A"),
+      raw,
+      50,
+      budget,
+    );
+
+    expect(batch?.observations).toHaveLength(5);
+    expect(batch).toMatchObject({
+      semanticHasMore: true,
+      estimatedInputTokens: budget,
+      inputTokenBudget: budget,
+    });
+  });
+
+  it("stays single-item until the local Qwen runtime budget is known", () => {
+    expect(semanticGraphCatchupLimits({
+      name: "local-qwen",
+      getRuntimeInfo: () => null,
+    } as never)).toEqual({ batchSize: 1 });
+  });
+
+  it("fits an oversized single observation without changing the stored source", () => {
+    const raw = observations("oversized", 1);
+    raw[0]!.narrative = "x".repeat(100_000);
+
+    const batch = selectSemanticGraphBatch(
+      session("oversized", "A"),
+      raw,
+      50,
+      1_024,
+    );
+
+    expect(batch?.observations).toHaveLength(1);
+    expect(batch?.observations[0]?.id).toBe(raw[0]!.id);
+    expect(batch?.observations[0]?.narrative).toContain(
+      "[truncated for semantic graph input budget]",
+    );
+    expect(batch?.observations[0]?.narrative.length).toBeLessThan(
+      raw[0]!.narrative.length,
+    );
+    expect(batch?.estimatedInputTokens).toBeLessThanOrEqual(1_024);
+    expect(raw[0]!.narrative).toHaveLength(100_000);
+  });
+
+  it("uses two thirds of the discovered local Qwen input capacity", () => {
+    const previous = process.env.GRAPH_EXTRACTION_BATCH_SIZE;
+    process.env.GRAPH_EXTRACTION_BATCH_SIZE = "50";
+    try {
+      expect(semanticGraphCatchupLimits({
+        name: "local-qwen",
+        getRuntimeInfo: () => ({ maxInputTokens: 72_089 }),
+      } as never)).toEqual({
+        batchSize: 50,
+        inputTokenBudget: 48_059,
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.GRAPH_EXTRACTION_BATCH_SIZE;
+      } else {
+        process.env.GRAPH_EXTRACTION_BATCH_SIZE = previous;
+      }
+    }
+  });
+
+  it("ignores raw observations owned by another session", () => {
+    const owned = observations("a", 2);
+    const foreign = {
+      ...observations("foreign", 1)[0]!,
+      timestamp: "2026-08-24T00:01:00.000Z",
+    };
+    const batch = selectSemanticGraphBatch(
+      session("a", "A", {
+        semanticGraphStatus: "pending",
+        semanticGraphThroughObservationId: "a_obs_2",
+      }),
+      [...owned, foreign],
+      2,
+    );
+    expect(batch).toBeNull();
+  });
+
+  it("ignores ambient-only observations rejected by provenance validation", () => {
+    const owned = observations("a", 2);
+    const ambient = {
+      ...observations("a", 1)[0]!,
+      id: "a_obs_3",
+      timestamp: "2026-08-24T00:01:00.000Z",
+      narrative: "<recommended_plugins>internal host state</recommended_plugins>",
+    };
+    const batch = selectSemanticGraphBatch(
+      session("a", "A", {
+        semanticGraphStatus: "pending",
+        semanticGraphThroughObservationId: "a_obs_2",
+      }),
+      [...owned, ambient],
+      2,
+    );
+    expect(batch).toBeNull();
+  });
+
+  it("strips ambient UI blocks before sending an otherwise valid observation", () => {
+    const visible = {
+      ...observations("a", 1)[0]!,
+      narrative:
+        '<context source="ambient-ui-state">internal state</context>Keep this user request',
+    };
+    const batch = selectSemanticGraphBatch(session("a", "A"), [visible], 2);
+    expect(batch?.observations).toHaveLength(1);
+    expect(batch?.observations[0]?.narrative).toBe("Keep this user request");
+  });
+
+  it("normalizes a completed session whose cursor already covers every owned observation", async () => {
+    const current = session("a", "A", {
+      semanticGraphStatus: "pending",
+      semanticGraphLastError: "unknown source observation",
+      semanticGraphThroughObservationId: "a_obs_2",
+    });
+    const rawObservations = [
+      ...observations("a", 2),
+      {
+        ...observations("foreign", 1)[0]!,
+        timestamp: "2026-08-24T00:01:00.000Z",
+      },
+    ];
+    const handlers = new Map<string, (payload: unknown) => Promise<unknown>>();
+    const graphExtract = vi.fn(async () => ({ success: true }));
+    handlers.set("mem::graph-extract", graphExtract);
+    const sdk = {
+      registerFunction: (id: string, handler: (payload: unknown) => Promise<unknown>) => handlers.set(id, handler),
+      trigger: async ({ function_id, payload }: { function_id: string; payload: unknown }) => {
+        const handler = handlers.get(function_id);
+        if (!handler) throw new Error(`missing ${function_id}`);
+        return handler(payload);
+      },
+    };
+    const update = vi.fn(async () => undefined);
+    const kv = {
+      get: async () => current,
+      list: async (scope: string) => scope === "mem:sessions"
+        ? [current]
+        : rawObservations,
+      update,
+    };
+    registerSemanticGraphBacklogFunction(sdk as never, kv as never);
+
+    const result = await handlers.get("mem::graph-backlog-step")!({}) as {
+      normalizedSessions: number;
+      skipped: string;
+    };
+
+    expect(result).toMatchObject({
+      normalizedSessions: 1,
+      skipped: "backlog_empty",
+    });
+    expect(graphExtract).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith(
+      "mem:sessions",
+      "a",
+      expect.arrayContaining([
+        { type: "set", path: "semanticGraphStatus", value: "complete" },
+        { type: "set", path: "semanticGraphLastError", value: "" },
+      ]),
+    );
+  });
+
+  it.each([
+    ["local-qwen", "entity n1 cites an observation outside the input batch: malformed", 1],
+    ["local-qwen", "local_qwen_empty_response", 1],
+    ["local-qwen", "graph response is missing the required XML roots", 1],
+    ["local-qwen", "local_qwen_deferred:foreground_requested", 2],
+    ["test", "entity contains an invalid key, type, or name", 2],
+  ] as const)("bounds only local malformed-output retries: %s %s", async (providerName, error, expectedSize) => {
+    const current = session("retry", "A", { semanticGraphStatus: "deferred", semanticGraphLastError: error });
+    const handlers = new Map<string, (payload: unknown) => Promise<unknown>>();
+    const graphExtract = vi.fn(async (_payload: unknown) => ({ success: true }));
+    handlers.set("mem::graph-extract", graphExtract);
+    const sdk = {
+      registerFunction: (id: string, handler: (payload: unknown) => Promise<unknown>) => handlers.set(id, handler),
+      trigger: async ({ function_id, payload }: { function_id: string; payload: unknown }) => handlers.get(function_id)!(payload),
+    };
+    const kv = { get: async (scope: string, key: string) => scope === "mem:sessions" ? current : observations("retry", 4).find(o => o.id === key), list: async (scope: string) => scope === "mem:sessions" ? [current] : observations("retry", 4), update: vi.fn(async () => undefined) };
+    const provider = { name: providerName, getRuntimeInfo: () => ({ maxInputTokens: 72089 }) };
+    registerSemanticGraphBacklogFunction(sdk as never, kv as never, provider as never);
+    await handlers.get("mem::graph-backlog-step")!({});
+    expect(graphExtract).toHaveBeenLastCalledWith(expect.objectContaining({ observations: expect.any(Array) }));
+    expect((graphExtract.mock.calls[0]![0] as { observations: unknown[] }).observations).toHaveLength(expectedSize);
+    current.semanticGraphLastError = "";
+    current.semanticGraphThroughObservationId = "retry_obs_1";
+    await handlers.get("mem::graph-backlog-step")!({});
+    expect((graphExtract.mock.calls[1]![0] as { observations: CompressedObservation[] }).observations.map(o => o.id)).toEqual(["retry_obs_2", "retry_obs_3"]);
   });
 
   it("selects one session from the least-recently-attempted project", async () => {
@@ -288,7 +493,7 @@ describe("semantic graph backlog", () => {
         sessions.find((item) => item.id === key) ?? { id: key },
       update: vi.fn(async () => undefined),
     };
-    registerSemanticGraphBacklogFunction(sdk as never, kv as never);
+    registerSemanticGraphBacklogFunction(sdk as never, kv as never, { name: "local-qwen" } as never);
 
     await handlers.get("mem::graph-backlog-step")!({});
 
@@ -370,6 +575,47 @@ describe("semantic graph backlog", () => {
         { type: "set", path: "semanticGraphLastError", value: "unknown source observation: obs_bad" },
       ]),
     ]);
+  });
+
+  it("does not rerun a batch that already hit the current deterministic output ceiling", async () => {
+    const previous = process.env.AGENTMEMORY_LOCAL_QWEN_MAX_OUTPUT_TOKENS;
+    process.env.AGENTMEMORY_LOCAL_QWEN_MAX_OUTPUT_TOKENS = "32768";
+    try {
+      const current = session("truncated", "A", {
+        semanticGraphStatus: "deferred",
+        semanticGraphLastError: "local_qwen_output_truncated:32768",
+      });
+      const handlers = new Map<string, (payload: unknown) => Promise<unknown>>();
+      const graphExtract = vi.fn(async () => ({ success: true }));
+      handlers.set("mem::graph-extract", graphExtract);
+      const sdk = {
+        registerFunction: (id: string, handler: (payload: unknown) => Promise<unknown>) => handlers.set(id, handler),
+        trigger: async ({ function_id, payload }: { function_id: string; payload: unknown }) => {
+          const handler = handlers.get(function_id);
+          if (!handler) throw new Error(`missing ${function_id}`);
+          return handler(payload);
+        },
+      };
+      const kv = {
+        get: async () => current,
+        list: async (scope: string) => scope === "mem:sessions"
+          ? [current]
+          : observations("truncated", 2),
+        update: vi.fn(async () => undefined),
+      };
+      registerSemanticGraphBacklogFunction(sdk as never, kv as never);
+
+      await expect(handlers.get("mem::graph-backlog-step")!({})).resolves.toMatchObject({
+        skipped: "backlog_empty",
+      });
+      expect(graphExtract).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AGENTMEMORY_LOCAL_QWEN_MAX_OUTPUT_TOKENS;
+      } else {
+        process.env.AGENTMEMORY_LOCAL_QWEN_MAX_OUTPUT_TOKENS = previous;
+      }
+    }
   });
 
   it("requires two stable probes after a model fingerprint change before backlog work", async () => {

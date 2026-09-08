@@ -35,7 +35,26 @@ function jsonResponse(value: unknown): Response {
   });
 }
 
-function sseResponse(content: string, completed = true): Response {
+function sseResponse(content: string, finishReason = "stop"): Response {
+  const encoded = new TextEncoder().encode(
+    `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n` +
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+      "data: [DONE]\n\n",
+  );
+  return new Response(new ReadableStream({
+    start(controller) {
+      const split = Math.max(1, Math.floor(encoded.length / 2));
+      controller.enqueue(encoded.slice(0, split));
+      controller.enqueue(encoded.slice(split));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+function publicSseResponse(content: string, completed = true): Response {
   const payload = [
     ": keepalive\n\n",
     `data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(0, 5) } }] })}\n\n`,
@@ -76,12 +95,17 @@ function installFetchMock(): ReturnType<typeof vi.fn> {
     }
     if (url.endsWith("/v1/chat/completions")) {
       completions += 1;
-      const body = JSON.parse(String(init?.body)) as { model: string; stream: boolean };
+      const body = JSON.parse(String(init?.body)) as {
+        model: string;
+        stream: boolean;
+      };
       expect(body.model).toBe("better-qwen");
       expect(body.stream).toBe(true);
-      return sseResponse(completions === 1
-        ? "<ok>LOCAL_QWEN_OK</ok>"
-        : "<entities></entities><relationships></relationships>");
+      return sseResponse(
+        completions === 1
+          ? "<ok>LOCAL_QWEN_OK</ok>"
+          : "<entities></entities><relationships></relationships>",
+      );
     }
     return new Response("not found", { status: 404 });
   });
@@ -150,6 +174,34 @@ describe("LocalQwenProvider", () => {
     });
   });
 
+  it("reports a hard output cutoff instead of returning partial XML for repair", async () => {
+    let completionCount = 0;
+    globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return jsonResponse({ status: "ok" });
+      if (url.endsWith("/props")) return jsonResponse({
+        default_generation_settings: { n_ctx: 131072 },
+        model_alias: "qwen",
+      });
+      if (url.endsWith("/v1/models")) return jsonResponse({ data: [{ id: "qwen" }] });
+      if (url.endsWith("/slots")) return jsonResponse([{ is_processing: false, n_ctx: 131072 }]);
+      if (url.endsWith("/v1/chat/completions")) {
+        completionCount += 1;
+        return completionCount === 1
+          ? sseResponse("<ok>LOCAL_QWEN_OK</ok>")
+          : sseResponse("<entities><entity", "length");
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
+
+    await expect(provider.compress("system", "user")).rejects.toThrow(
+      "local_qwen_output_truncated:2048",
+    );
+    expect(completionCount).toBe(2);
+    expect(existsSync(join(coordinationDir, "qwen-use.lock"))).toBe(false);
+  });
+
   it("fails closed when a streamed completion ends without DONE", async () => {
     let completions = 0;
     const fetchMock = installFetchMock();
@@ -164,7 +216,7 @@ describe("LocalQwenProvider", () => {
       if (url.endsWith("/slots")) return jsonResponse([{ is_processing: false, n_ctx: 262144 }]);
       if (url.endsWith("/v1/chat/completions")) {
         completions += 1;
-        return sseResponse(
+        return publicSseResponse(
           completions === 1
             ? "<ok>LOCAL_QWEN_OK</ok>"
             : "<entities></entities><relationships></relationships>",
@@ -214,9 +266,9 @@ describe("LocalQwenProvider", () => {
     };
 
     expect(contract.fixed_environment.AGENTMEMORY_LOCAL_QWEN_MAX_OUTPUT_TOKENS)
-      .toBe("4096");
+      .toBe("32768");
     expect(contract.fixed_environment.AGENTMEMORY_LOCAL_QWEN_TIMEOUT_MS)
-      .toBe("180000");
+      .toBe("1200000");
   });
 
   it("aborts an in-flight background generation when Swarm publishes foreground intent", async () => {

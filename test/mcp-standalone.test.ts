@@ -18,6 +18,8 @@ vi.mock("../src/mcp/transport.js", () => ({
 
 vi.mock("../src/config.js", () => ({
   getStandalonePersistPath: vi.fn(() => "/tmp/test-standalone.json"),
+  isAgentScopeIsolated: vi.fn(() => false),
+  getAgentId: vi.fn(() => undefined),
 }));
 
 import {
@@ -68,18 +70,30 @@ describe("Tools Registry", () => {
       "memory_obsidian_export",
       "memory_save",
       "memory_recall",
+      "memory_graph_provenance_reconcile",
       "memory_graph_purge",
     ]) {
       expect(tools.some((t) => t.name === required)).toBe(true);
     }
   });
 
+  it("publishes deliberate graph provenance mapping and correction schemas", () => {
+    const tools = getAllTools();
+    const upsert = tools.find((tool) => tool.name === "memory_graph_upsert")!;
+    const reconcile = tools.find(
+      (tool) => tool.name === "memory_graph_provenance_reconcile",
+    )!;
+    expect(upsert.inputSchema.properties).toHaveProperty("sharedSources");
+    expect(JSON.stringify(upsert.inputSchema)).toContain("sourceIndexes");
+    expect(reconcile.inputSchema.required).toEqual(["project", "targets", "reason"]);
+  });
+
   it("CORE_TOOLS has 14 items", () => {
     expect(CORE_TOOLS.length).toBe(14);
   });
 
-  it("V040_TOOLS has 10 items", () => {
-    expect(V040_TOOLS.length).toBe(10);
+  it("V040_TOOLS has 11 items", () => {
+    expect(V040_TOOLS.length).toBe(11);
   });
 
   it("all tools have required name, description, inputSchema fields", () => {
@@ -447,7 +461,7 @@ describe("handleToolCall", () => {
     }
     const result = await handleToolCall(
       "memory_sessions",
-      { limit: 2 },
+      { project: "demo", limit: 2 },
       kv,
     );
     const parsed = JSON.parse(result.content[0].text);

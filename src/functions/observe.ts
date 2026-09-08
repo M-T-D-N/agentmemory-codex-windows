@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import { TriggerAction, type ISdk } from "iii-sdk";
 import type { RawObservation, HookPayload, Origin, Session } from "../types.js";
 
@@ -53,7 +54,7 @@ export function registerObserveFunction(
   dedupMap?: DedupMap,
   maxObservationsPerSession?: number,
 ): void {
-  sdk.registerFunction("mem::observe", 
+  registerObservationWriter(sdk, "mem::observe",
     async (payload: HookPayload) => {
 
       if (
@@ -87,10 +88,17 @@ export function registerObserveFunction(
         };
       }
 
+      const captureData = payload.data && typeof payload.data === "object"
+        ? payload.data as Record<string, unknown> : {};
+      const isCodexCapture = Object.hasOwn(captureData, "codex_turn_id");
+      const codexTurnId = typeof captureData.codex_turn_id === "string"
+        ? captureData.codex_turn_id.trim() : "";
+      if (isCodexCapture && (!codexTurnId || codexTurnId.length > 512)) {
+        return { success: true, skipped: true, reason: "missing_codex_turn_id" };
+      }
       const obsId = generateId("obs");
 
       let dedupHash: string | undefined;
-      let dedupDetected = false;
       if (dedupMap) {
         const dataIsObject =
           typeof payload.data === "object" && payload.data !== null;
@@ -120,7 +128,6 @@ export function registerObserveFunction(
           toolName,
           dedupInput,
         );
-        dedupDetected = dedupMap.isDuplicate(dedupHash);
       }
 
       let sanitizedRaw: unknown = payload.data;
@@ -195,13 +202,19 @@ export function registerObserveFunction(
             error: `Session project mismatch: ${existingSession.project} != ${requestedProject}`,
           };
         }
-        const excludedSession = isExcludedCodexAmbientSession(existingSession);
-        const normalPromptReactivatesSession =
-          excludedSession &&
-          payload.hookType === "prompt_submit" &&
-          typeof raw.userPrompt === "string" &&
-          raw.userPrompt.trim().length > 0;
-        if (excludedSession && !normalPromptReactivatesSession) {
+        if (isCodexCapture && (
+          !requestedProject || requestedProject === "*" || requestedProject.length > 512 ||
+          typeof payload.cwd !== "string" || !payload.cwd.trim() ||
+          (existingSession && (existingSession.project !== requestedProject || existingSession.cwd !== payload.cwd))
+        )) {
+          return { success: false, error: "Codex session project or cwd mismatch" };
+        }
+        const normalCodexPrompt = isCodexCapture && payload.hookType === "prompt_submit"
+          && typeof raw.userPrompt === "string" && !!raw.userPrompt.trim()
+          && !isCodexInternalAmbientText(raw.userPrompt);
+        const reactivate = normalCodexPrompt && existingSession?.captureExcluded === true
+          && existingSession.captureExclusionReason === "codex_internal_prompt";
+        if (isExcludedCodexAmbientSession(existingSession) && !reactivate) {
           return {
             success: true,
             skipped: true,
@@ -209,11 +222,36 @@ export function registerObserveFunction(
             sessionId: payload.sessionId,
           };
         }
-        // A normal prompt is authoritative evidence that an ambient-only
-        // classification was provisional. Capture it even when the same
-        // text is still inside the dedup window so the session cannot remain
-        // poisoned solely because the recovery prompt was repeated.
-        if (dedupDetected && !normalPromptReactivatesSession) {
+        if (isCodexCapture && !normalCodexPrompt &&
+          (raw.toolName !== "assistant_response" || existingSession?.codexCaptureTurnId !== codexTurnId)) {
+          return { success: true, skipped: true, reason: "unmatched_codex_turn" };
+        }
+        const captureUpdates: Array<{ type: "set"; path: string; value: unknown }> = [];
+        if (normalCodexPrompt) {
+          captureUpdates.push({ type: "set", path: "codexCaptureTurnId", value: codexTurnId });
+        }
+        if (reactivate) {
+          captureUpdates.push(
+            { type: "set", path: "captureExcluded", value: false },
+            { type: "set", path: "captureExclusionReason", value: null },
+          );
+          if (isCodexInternalAmbientText(existingSession?.firstPrompt)) {
+            captureUpdates.push({ type: "set", path: "firstPrompt",
+              value: raw.userPrompt!.replace(/\s+/g, " ").trim().slice(0, 200) });
+          }
+        }
+        const auditReactivation = async () => {
+          if (reactivate) await safeAudit(kv, "session_capture_reactivated", "mem::observe",
+            [payload.sessionId], { project: requestedProject, turnId: codexTurnId,
+              previousReason: "codex_internal_prompt" });
+        };
+        if (dedupMap && dedupHash && dedupMap.isDuplicate(dedupHash)) {
+          if (existingSession && captureUpdates.length) {
+            await kv.update(KV.sessions, payload.sessionId, [
+              ...captureUpdates, { type: "set", path: "updatedAt", value: new Date().toISOString() },
+            ]);
+            await auditReactivation();
+          }
           return { deduplicated: true, sessionId: payload.sessionId };
         }
         if (maxObservationsPerSession && maxObservationsPerSession > 0) {
@@ -316,16 +354,8 @@ export function registerObserveFunction(
               value: (session.observationCount || 0) + 1,
             },
           ];
-          // A completed session can receive another turn without a fresh
-          // session-start hook. If the process stops before session-end,
-          // the backlog must still see the new tail after restart. Preserve
-          // the existing cursor and only reopen semantic graph work.
           if (isGraphExtractionEnabled()) {
-            updates.push({
-              type: "set",
-              path: "semanticGraphStatus",
-              value: "pending",
-            });
+            updates.push({ type: "set", path: "semanticGraphStatus", value: "pending" });
           }
           if (!session.firstPrompt && typeof raw.userPrompt === "string") {
             const trimmed = raw.userPrompt.replace(/\s+/g, " ").trim();
@@ -337,32 +367,8 @@ export function registerObserveFunction(
               });
             }
           }
-          if (normalPromptReactivatesSession) {
-            const trimmed = raw.userPrompt?.replace(/\s+/g, " ").trim() ?? "";
-            updates.push(
-              { type: "set", path: "captureExcluded", value: false },
-              { type: "set", path: "captureExclusionReason", value: "" },
-            );
-            if (
-              trimmed.length > 0 &&
-              (!session.firstPrompt || isCodexInternalAmbientText(session.firstPrompt))
-            ) {
-              updates.push({
-                type: "set",
-                path: "firstPrompt",
-                value: trimmed.slice(0, 200),
-              });
-            }
-          }
-          await kv.update(KV.sessions, payload.sessionId, updates);
-          if (normalPromptReactivatesSession) {
-            await safeAudit(kv, "observe", "mem::observe", [payload.sessionId], {
-              action: "session_capture_reactivated",
-              project: session.project,
-              previousReason: session.captureExclusionReason,
-              observationId: obsId,
-            });
-          }
+          await kv.update(KV.sessions, payload.sessionId, [...updates, ...captureUpdates]);
+          await auditReactivation();
         } else if (
           typeof payload.project === "string" &&
           payload.project.trim().length > 0 &&
@@ -390,6 +396,7 @@ export function registerObserveFunction(
             updatedAt: ts,
             status: "active",
             observationCount: 1,
+            ...(normalCodexPrompt ? { codexCaptureTurnId: codexTurnId } : {}),
             ...(inheritedAgentId ? { agentId: inheritedAgentId } : {}),
             ...(trimmedPrompt && trimmedPrompt.length > 0
               ? { firstPrompt: trimmedPrompt }

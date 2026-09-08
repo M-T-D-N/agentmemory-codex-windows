@@ -9,12 +9,17 @@
 > of upstream support. Build and evaluate it from source; do not substitute an
 > upstream `npx` install for the steps in this guide.
 
+This source contains unreleased reconciliation changes; the public version is
+a release baseline, not evidence that this checkout was packaged or installed.
+Use an explicit new `-ReleaseRevision` and the exact source identity for each
+qualified build. Existing versioned installation targets are not replaced.
+
 This directory is the source authority for the Windows/Codex adapter around the
 upstream AgentMemory TypeScript package. The adapter keeps iii-engine,
 AgentMemory's official state scopes, and the normal memory, lesson, graph,
 audit, and provenance lifecycles. It introduces no secondary database or queue.
 
-Internal qualification revision `r62` consolidates the supported behavior into
+The public `r62` baseline and the reconciled source organize supported behavior into
 clearer boundaries without changing the upstream-compatible API or data model:
 
 - four managed Codex hooks capture normal main-task prompts and final responses
@@ -53,15 +58,9 @@ clearer boundaries without changing the upstream-compatible API or data model:
   graph dispatch share one per-session lifecycle boundary, so ending an unknown
   or concurrently forgotten session cannot materialize an incomplete row in
   iii's file-backed state store; and
-- legacy two-field Codex session-end stubs can be repaired only through an
-  exact-match, dry-run-first migration that preserves supplied task identity,
-  observation provenance, and the original completion timestamp while rejecting
-  ambiguous or conflicting rows; and
-- irrecoverable exact two-field session-end stubs can be removed only through a
-  separate explicit-ID migration. It defaults to dry-run, requires zero
-  canonical and graph reverse references, rejects the whole batch on any
-  conflict, and applies through an audited, idempotent official API rather than
-  direct state-store mutation.
+- historical stub repair and purge migrations are not included in this source.
+  Use the supported exact-project inspection and recoverable empty-observation
+  lifecycle described below; do not replay an old migration against current data.
 
 The detailed failure lessons later in this guide explain why these constraints
 exist. They are operational history, not additional product surfaces.
@@ -102,20 +101,18 @@ The preview is intentionally narrow:
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
   downstream release version.
-- `r62` is internal qualification provenance, not a public version line.
-  Release revisions are path-safe build identifiers rather than a numeric-only
-  version sequence, so a source identity suffix can be used without inventing a
-  new public release.
+- `r62` identifies the historical public qualification, not a public version
+  line or the qualification of this checkout. Each new build uses a fresh numeric
+  revision such as `r81`; the builder accepts `r` followed by a positive integer.
 - Public source snapshots and generated release-folder names use the downstream
   version.
   The installed runtime directory and CLI still use AgentMemory compatibility
   version `0.9.29` so existing data and integrations are not relabelled.
 - Native Windows and Codex are the supported downstream host profile.
-- Reinstalling different contents under the same internal revision first stops
-  the owned runtime and moves the predecessor package into the timestamped
-  release backup. The installer then copies and verifies the replacement; a
-  failed cutover restores the predecessor package. Canonical `data` is never
-  replaced by this workflow.
+- Existing versioned runtime directories are preserved. Build changed contents
+  with a fresh internal revision before cutover; the installer refuses a
+  different payload at an existing versioned target. Failed cutover restores the
+  predecessor configuration. Canonical `data` is never replaced by this workflow.
 - Existing AgentMemory memory, lesson, graph, audit, and provenance stores stay
   authoritative.
 - Local Qwen is optional and capability-scoped to typed graph extraction over
@@ -152,7 +149,8 @@ Run from Windows PowerShell 5.1 or newer. The output directory must not exist.
 ```powershell
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe
+  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
+  -ReleaseRevision r81
 ```
 
 The normal build uses the pinned `pnpm-lock.yaml`, runs the existing skill
@@ -207,13 +205,94 @@ clients.
 The installed profile uses four managed hooks: `SessionStart`,
 `UserPromptSubmit`, `Stop`, and `SessionEnd`. Normal main-agent user prompts and
 final assistant responses enter the official session/observation lifecycle;
-ambient UI, title/fork, and subagent traffic is excluded. Writes, deletion, and
-provenance remain exact-project scoped. The managed user-prompt hook performs
+ambient UI, title/fork, and subagent traffic is excluded. Capture requires the
+documented Codex `turn_id` on both prompt and Stop events. An assistant response
+is accepted only for the most recently accepted normal prompt's turn in the
+same project and working directory. Unmatched or missing turn identity fails
+closed. Internal requests preserve existing normal session history; only the
+automatic `codex_internal_prompt` exclusion can recover on a later normal
+Codex prompt, with an audit entry. Other exclusion reasons remain in force.
+
+`memory_sessions` requires `project` (explicit `*` for cross-project reads),
+returns newest sessions first, defaults to 20 rows, caps requests at 500, and
+returns `total`, `offset`, and `nextOffset`. Excluded sessions may be inspected
+only with an exact project and session ID. Listings omit legacy rows without
+a usable session ID and project. SessionEnd is a no-op for missing or incomplete
+sessions. An explicit SessionStart fills missing identity while preserving
+observations and capture policy; known identity is never reassigned.
+REST session listings retain the
+oldest-first order used by the curation backlog. Oversized curation candidates
+are skipped within the existing context budget so a fitting later source can
+still be offered with its complete text and provenance.
+
+Durable writes and graph provenance remain exact-project scoped. The legacy
+session/observation `POST /agentmemory/forget` apply path is irreversible and does
+not reconcile all derived references; do not use it for an unverified cleanup.
+Pass `dryRun: true`, an exact `project` and `sessionId`, and optionally a non-empty
+`observationIds` array for a read-only content and reference inventory. Empty ID
+arrays are rejected rather than expanding to a whole-session deletion. This
+preview neither authorizes deletion nor provides a transaction against concurrent
+writers. The pinned iii-engine 0.11.2 `state::list_groups` API enumerates every
+observation and enriched-chunk bucket, including legacy sessions without IDs and
+orphan buckets. A failed scope/read operation fails the preview; it never silently
+claims complete coverage. The ID-less session count remains diagnostic metadata.
+It does not remove records or create a recovery copy.
+
+Local revision r80 adds recoverable empty-observation actions to this same REST
+endpoint (no new MCP tool or REST endpoint). Pass `action: "delete-empty"`, one
+exact `project`, `sessionId`, a one-element `observationIds` array, and
+`dryRun: true`. Apply with `dryRun: false`, the returned `expectedVersion`, and a
+non-empty `reason`. `action: "restore-empty"` uses the same preview/apply contract.
+The original observation ID and empty fields remain in the canonical observation
+row, with versioned `emptyDeletion` audit metadata; no recovery database, side
+queue, original-content copy or session snapshot is created. Ordinary observation
+reads and graph inputs hide deleted rows. Restore exposes the same row and ID.
+
+This action only accepts observations with no content in known or unknown fields,
+apart from metadata and the empty `assistant_response`/`prompt_submit` labels.
+Deletion requires a completed session and completed graph processing, zero
+bootstrap/backfill, a valid forward cursor strictly after the target, and a
+complete zero-reference inventory. One observation is changed per request.
+Cursors remain unchanged; active session counts are recalculated from real rows.
+The same-version retry repairs count/search side effects without creating a new
+version. Recovery metadata stays protected after restore as well.
+
+The supported single-worker service rebuilds its in-memory protection index from
+official observation buckets before registering writers. An exclusive lifecycle
+attempt returns a no-change busy result while an ordinary writer is active;
+ordinary writes wait during recovery. Source writes reject deleted IDs, old-row
+overwrites and permanent deletion of protected observations/sessions are blocked,
+and import/mesh/snapshot payloads are checked before application. JSONL replay
+skips protected sessions, and eviction/auto-forget retain them. Snapshot restore
+reads the requested Git object without changing its working tree before validation.
+Legacy migration checks sessions, observations and summaries before writing.
+
+An ambiguous canonical SDK write disables further mutations in that worker.
+Verify the engine outcome and restart the worker before retrying; errors explicitly
+distinguish a committed change, unknown commit outcome, and a preflight failure.
+Search visibility rechecks canonical rows, while index persistence is best effort
+and runs after the exclusive interval. Whole-install backups preserve recovery
+rows; older workers do not implement their visibility or protection semantics.
+Keep a recovery-capable worker with this data when restoring an installation.
+
+The managed user-prompt hook performs
 bounded federated recall across projects, boosts the current project, labels
 every source project, and treats `*` as a read-only scope. Durable promotion is
 performed by the current Codex turn through the official memory,
 lesson, and manual graph tools. Local Qwen may add graph entities and relations
 only after validating the exact project, session, and observation provenance.
+`memory_graph_provenance_reconcile` (and `POST /agentmemory/graph/provenance/reconcile`)
+also accepts `action: "retire"` or `"restore"` for exact versioned edge IDs. For
+these actions, target `sources` cite the review evidence; the edge's original
+supporting observations and sessions stay unchanged. Retirement hides the edge
+from active queries, preserves its ID, endpoints, properties, history and original
+provenance, and blocks re-creation through manual upsert, typed extraction and
+graphify import. An explicit restore requires the current `expectedUpdatedAt`,
+live same-project endpoints and valid original provenance. A graph reset/purge
+or full-state replacement remains a separate lifecycle; portable temporal/mesh
+writers are outside this supported profile. Default `action: "detach"` retains
+the existing final-source guard. All actions preflight the whole bounded batch,
+audit changes, and report partial storage failures without claiming success.
 Summary, consolidation, reflection, crystallization, and automatic compression
 stay disabled. Deterministic structural graph extraction remains available
 when Qwen is busy or unavailable. The existing local-AI launcher atomically
@@ -227,6 +306,15 @@ retained only for missed events and AgentMemory restarts. Every batch still
 selects the least-recently-serviced project and keeps forward and r30-prefix
 backfill cursors separate. Foreground Qwen markers abort background work without
 advancing either cursor; malformed graph XML gets one bounded repair attempt.
+An explicit invalid citation in a single-observation
+local-Qwen response uses that same one-attempt budget to regenerate from the
+original observation, then passes through unchanged exact-ID validation. No
+prefix matching or citation substitution is performed. After local malformed or
+empty output, the existing backlog retries one observation; success restores the
+configured batch size. Output-budget and foreground-preemption controls remain
+separate. New observations reopen semantic work while preserving both cursors. After extraction, completion is calculated under the observation
+lock against the latest official observations, including any tail captured during
+the provider request.
 
 ## Failure history and lessons
 
@@ -337,6 +425,15 @@ every lesson was extracted automatically by AgentMemory.
     calls now receive bounded 30-second layers of headroom; the provider
     deadline, fail-closed parser, cursor rules, and every non-graph invocation
     remain unchanged.
+
+Historical Codex approval-assessment envelopes (both initial and delta forms)
+are consumed by graph replay without deriving nodes or relationships. Their
+original observations and chronological cursors remain intact. The official
+extraction audit records exact excluded IDs and `processingCompleted`; an
+internal-only batch reports `semanticCompleted=false` and makes no provider call.
+Normal observations in a mixed batch retain strict, separately filtered citation
+validation. New hook capture skips both envelope forms without excluding the
+normal user session.
 
 ## Release retention and cleanup
 

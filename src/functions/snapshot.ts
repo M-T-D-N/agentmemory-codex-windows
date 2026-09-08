@@ -1,7 +1,8 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   SnapshotMeta,
@@ -165,7 +166,7 @@ export function registerSnapshotFunction(
     }
   });
 
-  sdk.registerFunction("mem::snapshot-restore", 
+  registerObservationWriter(sdk, "mem::snapshot-restore",
     async (data: { commitHash: string } | undefined) => {
       if (!data || typeof data.commitHash !== "string" || !data.commitHash.trim()) {
         return { success: false, error: "commitHash is required" };
@@ -175,13 +176,7 @@ export function registerSnapshotFunction(
       }
 
       try {
-        await gitExec(snapshotDir, [
-          "checkout",
-          data.commitHash,
-          "--",
-          "state.json",
-        ]);
-        const content = readFileSync(join(snapshotDir, "state.json"), "utf-8");
+        const content = await gitExec(snapshotDir, ["show", `${data.commitHash}:state.json`]);
         const state = JSON.parse(content) as {
           sessions?: Array<{ id: string } & Record<string, unknown>>;
           memories?: Array<{ id: string } & Record<string, unknown>>;
@@ -192,6 +187,8 @@ export function registerSnapshotFunction(
           >;
           accessLogs?: AccessLogExport[];
         };
+
+        kv.assertRecoveryImportAllowed(state);
 
         if (state.sessions) {
           for (const session of state.sessions) {
@@ -223,8 +220,6 @@ export function registerSnapshotFunction(
             await kv.set(KV.accessLog, log.memoryId, log);
           }
         }
-
-        await gitExec(snapshotDir, ["checkout", "HEAD", "--", "state.json"]);
 
         await recordAudit(kv, "import", "mem::snapshot-restore", [], {
           commitHash: data.commitHash,

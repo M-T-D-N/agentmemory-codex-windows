@@ -1,12 +1,27 @@
 # Changelog
 
-This file records public releases of **AgentMemory for Codex on Windows** only.
+This file records public releases and unreleased source changes of **AgentMemory for Codex on Windows**.
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
 ## Unreleased
 
-No unreleased changes.
+- Reconciled the public development branch with the later local recovery and
+  provenance fixes. Restored bounded graph queries, strict graph XML parsing,
+  neutral MCP retrieval, session lifecycle serialization, and Qwen readiness
+  event drains without replacing the canonical iii data store.
+- Kept r80 cursor-tail completion, approval-review exclusion, exact capture-turn
+  matching, recoverable empty observations, and explicit edge retirement/restore.
+  Provenance edits now maintain the restored query index; derived graph writes
+  also reject references to recoverably deleted observations.
+- Kept the local Qwen JSON fallback, adaptive input budget, 32768 output budget,
+  and 1200000 ms timeout, while restoring incomplete SSE stream rejection.
+- Excluded the historical one-off session-stub recovery/purge migration from
+  this source integration: it predates the current protected recovery and
+  reference scopes. No live data migration is performed.
+- Retained immutable versioned installation targets; the public same-revision
+  package replacement path is not adopted. Publication and runtime installation
+  are separate from this source update.
 
 ## 0.1.0-preview.2 — 2026-08-30
 

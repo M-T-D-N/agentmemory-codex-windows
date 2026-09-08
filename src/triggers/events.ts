@@ -19,7 +19,7 @@ import {
   sessionLifecycleLockKey,
 } from "../functions/session-lifecycle.js";
 import type { ContextReader } from "../functions/context.js";
-import { selectSemanticGraphBatch } from "../functions/semantic-graph-backlog.js";
+import { orderedSessionObservations, selectSemanticGraphBatch } from "../functions/semantic-graph-backlog.js";
 
 // Global marker recording when corpus consolidation last ran, used to debounce
 // the per-turn session-stop fan-out.
@@ -136,12 +136,7 @@ export function registerEventTriggers(
           const observations = await kv.list<CompressedObservation>(
             KV.observations(data.sessionId),
           );
-          const compressed = observations
-            .filter((o) => o.title)
-            .sort(
-              (a, b) =>
-                a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id),
-            );
+          const compressed = orderedSessionObservations(data.sessionId, observations);
           if (!session || compressed.length === 0) return null;
           let selected = compressed;
           let semanticBatch: ReturnType<typeof selectSemanticGraphBatch> = null;

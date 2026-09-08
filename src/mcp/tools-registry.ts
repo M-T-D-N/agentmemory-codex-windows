@@ -72,6 +72,12 @@ export const CORE_TOOLS: McpToolDef[] = [
           type: "string",
           description: "The insight or decision to remember",
         },
+        sourceObservationIds: {
+          type: "array",
+          maxItems: 500,
+          items: { type: "string", minLength: 1 },
+          description: "Official observation IDs in the exact project supporting this memory",
+        },
         type: {
           type: "string",
           description:
@@ -131,8 +137,19 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_sessions",
     description:
-      "List recent sessions with their status and observation counts.",
-    inputSchema: { type: "object", properties: {} },
+      "List recent sessions in an explicit project, newest first. Use '*' only for deliberate cross-project reads; follow nextOffset for more.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Exact project, or '*' for deliberate cross-project reads" },
+        sessionId: { type: "string", description: "Optional exact session ID" },
+        agentId: { type: "string", description: "Optional agent ID; '*' reads across agents" },
+        includeExcluded: { type: "boolean", description: "Inspect an excluded session; requires exact project and sessionId" },
+        limit: { type: "integer", minimum: 1, maximum: 500, default: 20 },
+        offset: { type: "integer", minimum: 0, default: 0 },
+      },
+      required: ["project"],
+    },
   },
   {
     name: "memory_smart_search",
@@ -368,6 +385,11 @@ export const V040_TOOLS: McpToolDef[] = [
             required: ["sessionId", "observationIds"],
           },
         },
+        sharedSources: {
+          type: "boolean",
+          description:
+            "Explicitly attach every source group to every node and edge. Required when multiple sources intentionally support multiple records and sourceIndexes are omitted.",
+        },
         nodes: {
           type: "array",
           minItems: 1,
@@ -377,6 +399,10 @@ export const V040_TOOLS: McpToolDef[] = [
             type: "object",
             properties: {
               key: { type: "string", maxLength: 128 },
+              existingNodeId: {
+                type: "string", minLength: 1, maxLength: 128,
+                description: "Update only this existing live node after exact project/type/name validation; preserve other same-name nodes",
+              },
               type: {
                 type: "string",
                 enum: [
@@ -390,6 +416,15 @@ export const V040_TOOLS: McpToolDef[] = [
                 type: "object",
                 maxProperties: 32,
                 additionalProperties: { type: "string" },
+              },
+              sourceIndexes: {
+                type: "array",
+                minItems: 1,
+                maxItems: 50,
+                uniqueItems: true,
+                items: { type: "integer", minimum: 0 },
+                description:
+                  "Zero-based indexes into sources that support this node",
               },
             },
             required: ["key", "type", "name"],
@@ -418,12 +453,89 @@ export const V040_TOOLS: McpToolDef[] = [
                 maxProperties: 32,
                 additionalProperties: { type: "string" },
               },
+              sourceIndexes: {
+                type: "array",
+                minItems: 1,
+                maxItems: 50,
+                uniqueItems: true,
+                items: { type: "integer", minimum: 0 },
+                description:
+                  "Zero-based indexes into sources that support this edge",
+              },
             },
             required: ["source", "target", "type"],
           },
         },
       },
       required: ["project", "sources", "nodes"],
+    },
+  },
+  {
+    name: "memory_graph_provenance_reconcile",
+    description:
+      "Reconcile exact graph provenance or reversibly retire/restore exact edges. Detach preserves a final source. Retire/restore preserve original provenance and require expectedUpdatedAt plus separate canonical review evidence. Edge history is unchanged.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string", enum: ["detach", "retire", "restore"],
+          description: "Default detach removes requested provenance. Retire/restore changes exact edge visibility; target sources are review evidence, not replacement relation support.",
+        },
+        project: {
+          type: "string",
+          maxLength: 512,
+          description: "Exact registered project identifier",
+        },
+        targets: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["node", "edge"] },
+              id: { type: "string", maxLength: 128 },
+              sources: {
+                type: "array",
+                minItems: 1,
+                maxItems: 50,
+                items: {
+                  type: "object",
+                  properties: {
+                    sessionId: {
+                      type: "string",
+                      description: "Existing AgentMemory session ID in this project",
+                    },
+                    observationIds: {
+                      type: "array",
+                      minItems: 1,
+                      maxItems: 200,
+                      items: { type: "string" },
+                    },
+                  },
+                  required: ["sessionId", "observationIds"],
+                },
+              },
+              expectedUpdatedAt: {
+                type: "string",
+                description:
+                  "Optimistic concurrency value from updatedAt or createdAt; required for retire/restore",
+              },
+            },
+            required: ["kind", "id", "sources"],
+          },
+        },
+        reason: {
+          type: "string",
+          maxLength: 1000,
+          description: "Required audit reason for applying the correction",
+        },
+        dryRun: {
+          type: "boolean",
+          description: "Preview exact before/after provenance without mutation",
+        },
+      },
+      required: ["project", "targets", "reason"],
     },
   },
   {

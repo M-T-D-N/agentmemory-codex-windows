@@ -132,7 +132,7 @@ describe("MCP Resources", () => {
     const fn = sdk.getFunction("mcp::tools::call")!;
     const result = (await fn(makeReq({
       name: "memory_sessions",
-      arguments: {},
+      arguments: { project: "/test" },
     }))) as { status_code: number; body: { content: Array<{ text: string }> } };
     const sessions = JSON.parse(result.body.content[0].text).sessions;
 

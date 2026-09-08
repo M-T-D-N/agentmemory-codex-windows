@@ -24,8 +24,7 @@ impact.
 
 | Version | Status |
 |---|---|
-| 0.1.0-preview.2 | Best-effort fixes during the Technical Preview |
-| 0.1.0-preview.1 | Superseded; update to the current Technical Preview |
+| 0.1.0-preview.1 | Best-effort fixes during the Technical Preview |
 | Older or private revisions | Not publicly supported |
 
 There is no security-response SLA during the Technical Preview.

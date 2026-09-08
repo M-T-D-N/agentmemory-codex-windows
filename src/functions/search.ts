@@ -565,7 +565,6 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // sessionId, so the observation key never exists (#265).
       const obsResults = await Promise.all(
         candidates.map(async (r) => {
-          if (r.observation) return r.observation
           const obs = await kv
             .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
             .catch(() => null)

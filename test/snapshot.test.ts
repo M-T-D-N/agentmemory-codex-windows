@@ -19,7 +19,7 @@ vi.mock("node:util", async () => {
   >;
   return {
     ...actual,
-    promisify: () => async () => ({ stdout: "abc1234\n", stderr: "" }),
+    promisify: () => async (_command: string, args: string[]) => ({ stdout: args[0] === "show" ? JSON.stringify({ version: "0.4.0", sessions: [], memories: [] }) : "abc1234\n", stderr: "" }),
   };
 });
 
@@ -38,6 +38,8 @@ import type { Session, Memory, SnapshotMeta } from "../src/types.js";
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
+    assertRecoveryImportAllowed: () => {},
+    hasObservationRecovery: () => false,
     get: async <T>(scope: string, key: string): Promise<T | null> => {
       return (store.get(scope)?.get(key) as T) ?? null;
     },

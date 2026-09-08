@@ -57,6 +57,8 @@ describe("mem::remember stamps agentId on the Memory (#554)", () => {
   function mockKV() {
     const store = new Map<string, Map<string, unknown>>();
     return {
+    assertRecoveryImportAllowed: () => {},
+    hasObservationRecovery: () => false,
       store,
       get: async <T>(scope: string, key: string): Promise<T | null> =>
         (store.get(scope)?.get(key) as T) ?? null,

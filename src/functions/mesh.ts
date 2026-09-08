@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
@@ -220,7 +221,7 @@ export function registerMeshFunction(
     },
   );
 
-  sdk.registerFunction("mem::mesh-sync",
+  registerObservationWriter(sdk, "mem::mesh-sync",
     async (data: { peerId?: string; scopes?: string[]; direction?: "push" | "pull" | "both" }) => {
       if (!meshAuthToken) {
         return {
@@ -359,11 +360,12 @@ export function registerMeshFunction(
     },
   );
 
-  sdk.registerFunction("mem::mesh-receive",
+  registerObservationWriter(sdk, "mem::mesh-receive",
     async (data: MeshSyncPayload) => {
       if (!data || typeof data !== "object") {
         return { success: false, error: "payload required" };
       }
+      kv.assertRecoveryImportAllowed(data);
       let accepted = 0;
 
       accepted += await lwwMergeList(kv, KV.memories, data.memories, "mem:memory", "updatedAt");
@@ -488,6 +490,7 @@ async function applySyncData(
   data: MeshSyncPayload,
   scopes: string[],
 ): Promise<number> {
+  kv.assertRecoveryImportAllowed(data);
   let applied = 0;
 
   if (scopes.includes("memories")) {

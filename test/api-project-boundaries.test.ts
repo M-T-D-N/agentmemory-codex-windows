@@ -79,8 +79,8 @@ describe("REST exact-project and provenance boundaries", () => {
     })) as { status_code: number; body: unknown };
 
     expect(response).toEqual({
-      status_code: 404,
-      body: { success: false, error: "session_not_found" },
+      status_code: 200,
+      body: { success: true, skipped: true, reason: "session_missing_or_incomplete" },
     });
     await expect(kv.get("mem:sessions", "missing-session")).resolves.toBeNull();
     expect(sdk.downstream).toEqual([]);
@@ -164,6 +164,100 @@ describe("REST exact-project and provenance boundaries", () => {
         },
       },
     ]);
+  });
+
+  it.each(["retire", "restore"])("forwards graph lifecycle action %s", async (action) => {
+    await sdk.trigger("api::graph-provenance-reconcile", { body: {
+      action, project: "project-a", reason: "review", dryRun: true,
+      targets: [{ kind: "edge", id: "ge_a", expectedUpdatedAt: "version", sources: [{ sessionId: "s", observationIds: ["obs_a"] }] }],
+    }, headers: {} });
+    expect(sdk.downstream[0]).toMatchObject({ payload: { action } });
+  });
+
+  it("whitelists exact graph provenance correction targets", async () => {
+    const response = (await sdk.trigger("api::graph-provenance-reconcile", {
+      body: {
+        project: "project-a",
+        targets: [
+          {
+            kind: "node",
+            id: "gn_a",
+            sources: [
+              {
+                sessionId: "session-a",
+                observationIds: ["obs-a"],
+                injected: true,
+              },
+            ],
+            expectedUpdatedAt: "2026-01-01T00:00:00.000Z",
+            force: true,
+          },
+        ],
+        reason: "remove unrelated source",
+        dryRun: true,
+        force: true,
+      },
+      headers: {},
+    })) as { status_code: number };
+
+    expect(response.status_code).toBe(200);
+    expect(sdk.downstream).toEqual([
+      {
+        functionId: "mem::graph-provenance-reconcile",
+        payload: {
+          project: "project-a",
+          targets: [
+            {
+              kind: "node",
+              id: "gn_a",
+              sources: [
+                { sessionId: "session-a", observationIds: ["obs-a"] },
+              ],
+              expectedUpdatedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+          reason: "remove unrelated source",
+          dryRun: true,
+        },
+      },
+    ]);
+  });
+
+  it("rejects malformed or unauthenticated graph provenance correction", async () => {
+    const malformed = (await sdk.trigger("api::graph-provenance-reconcile", {
+      body: {
+        project: "project-a",
+        targets: [{ kind: "node", id: "gn_a", sources: "obs-a" }],
+        reason: "bad target",
+      },
+      headers: {},
+    })) as { status_code: number };
+    expect(malformed.status_code).toBe(400);
+    expect(sdk.downstream).toEqual([]);
+
+    const protectedSdk = apiSdk();
+    registerApiTriggers(protectedSdk as never, mockKV() as never, readContext, "test-secret");
+    const unauthorized = (await protectedSdk.trigger(
+      "api::graph-provenance-reconcile",
+      {
+        body: {
+          project: "project-a",
+          targets: [
+            {
+              kind: "node",
+              id: "gn_a",
+              sources: [
+                { sessionId: "session-a", observationIds: ["obs-a"] },
+              ],
+            },
+          ],
+          reason: "remove unrelated source",
+        },
+        headers: {},
+      },
+    )) as { status_code: number };
+    expect(unauthorized.status_code).toBe(401);
+    expect(protectedSdk.downstream).toEqual([]);
   });
 
   it("rejects incomplete or unauthenticated physical graph purge requests", async () => {
@@ -420,6 +514,7 @@ describe("REST exact-project and provenance boundaries", () => {
       startedAt: "2026-01-01T00:00:00Z",
       status: "active",
       observationCount: 7,
+      codexCaptureTurnId: "accepted-turn",
     });
 
     const response = (await sdk.trigger("api::session::exclude", {
@@ -427,7 +522,8 @@ describe("REST exact-project and provenance boundaries", () => {
         sessionId: "session-excluded",
         project: "project-a",
         cwd: "/a",
-        reason: `codex_internal_${"x".repeat(200)}`,
+        reason: "codex_internal_prompt",
+        turnId: "unrelated-internal-turn",
       },
     })) as { status_code: number; body: { success: boolean } };
     const session = await kv.get<Record<string, unknown>>(
@@ -445,65 +541,7 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(session?.captureExcluded).toBeUndefined();
     expect(auditRows).toEqual([]);
     expect(response.body).toMatchObject({
-      captureExcluded: false,
       preservedActiveSession: true,
-    });
-  });
-
-  it("forwards bounded session-stub recovery candidates to mem::migrate", async () => {
-    const candidate = {
-      sessionId: "legacy-stub",
-      project: "project-a",
-      cwd: "/project-a",
-      startedAt: "2026-01-01T00:00:00.000Z",
-      observations: [
-        {
-          sourceItemId: "user-1",
-          timestamp: "2026-01-01T00:01:00.000Z",
-          kind: "prompt_submit",
-          text: "recover this prompt",
-        },
-      ],
-    };
-
-    const response = (await sdk.trigger("api::migrate", {
-      body: {
-        step: "repair-codex-session-stubs",
-        dryRun: true,
-        candidates: [candidate],
-      },
-      headers: {},
-    })) as { status_code: number };
-
-    expect(response.status_code).toBe(200);
-    expect(sdk.downstream).toContainEqual({
-      functionId: "mem::migrate",
-      payload: {
-        step: "repair-codex-session-stubs",
-        dryRun: true,
-        candidates: [candidate],
-      },
-    });
-  });
-
-  it("forwards exact session IDs for empty-stub purge", async () => {
-    const response = (await sdk.trigger("api::migrate", {
-      body: {
-        step: "purge-empty-session-end-stubs",
-        dryRun: true,
-        sessionIds: ["legacy-stub-a", "legacy-stub-b"],
-      },
-      headers: {},
-    })) as { status_code: number };
-
-    expect(response.status_code).toBe(200);
-    expect(sdk.downstream).toContainEqual({
-      functionId: "mem::migrate",
-      payload: {
-        step: "purge-empty-session-end-stubs",
-        dryRun: true,
-        sessionIds: ["legacy-stub-a", "legacy-stub-b"],
-      },
     });
   });
 

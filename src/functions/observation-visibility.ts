@@ -1,5 +1,11 @@
 import type { CompressedObservation, Session } from "../types.js";
 
+export function isCodexApprovalReviewText(value: unknown): boolean {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return text.startsWith("the following is the codex agent history whose request action you are assessing.")
+    || text.startsWith("the following is the codex agent history added since your last approval assessment.");
+}
+
 export function isCodexInternalAmbientText(value: unknown): boolean {
   const text = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (!text) return false;
@@ -65,6 +71,7 @@ const CODEX_AMBIENT_UI_PREFIX =
 export function sanitizeCodexAmbientObservation<
   T extends CompressedObservation,
 >(observation: T | null | undefined): T | null {
+  if (observation?.emptyDeletion?.state === "deleted") return null;
   if (!observation || typeof observation.narrative !== "string") {
     return observation ?? null;
   }

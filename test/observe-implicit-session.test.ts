@@ -93,6 +93,22 @@ describe("observe implicit session create (#638)", () => {
     expect(session.firstPrompt).toBe("ship the helm chart");
   });
 
+  it("reopens graph work after a completed session receives another observation and preserves both cursors", async () => {
+    vi.stubEnv("GRAPH_EXTRACTION_ENABLED", "true");
+    try {
+      const { registerObserveFunction } = await import("../src/functions/observe.js");
+      const sdk = mockSdk(); const kv = mockKV(); registerObserveFunction(sdk as never, kv as never);
+      await kv.set("mem:sessions", "tail", { id: "tail", project: "p", cwd: "/p", status: "completed",
+        observationCount: 1, semanticGraphStatus: "complete", semanticGraphThroughObservationId: "old",
+        semanticGraphBackfillThroughObservationId: "prefix", semanticGraphBootstrapSkipped: 3 });
+      await sdk.trigger("mem::observe", { sessionId: "tail", project: "p", cwd: "/p", hookType: "prompt_submit",
+        timestamp: "2026-09-08T00:00:00Z", data: { prompt: "new meaningful observation" } });
+      expect(await kv.get("mem:sessions", "tail")).toMatchObject({ semanticGraphStatus: "pending",
+        observationCount: 2, semanticGraphThroughObservationId: "old",
+        semanticGraphBackfillThroughObservationId: "prefix", semanticGraphBootstrapSkipped: 3 });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("does not implicit-create when project+cwd missing (test-payload back-compat)", async () => {
     const { registerObserveFunction } = await import("../src/functions/observe.js");
     const sdk = mockSdk();
@@ -200,7 +216,7 @@ describe("observe implicit session create (#638)", () => {
       status: "active",
       observationCount: 0,
       captureExcluded: true,
-      captureExclusionReason: "codex_internal",
+      captureExclusionReason: "codex_internal_prompt",
     });
 
     const result = await sdk.trigger("mem::observe", {
@@ -209,7 +225,7 @@ describe("observe implicit session create (#638)", () => {
       cwd: "/project/a",
       hookType: "prompt_submit",
       timestamp: new Date().toISOString(),
-      data: { prompt: "normal user recovery payload" },
+      data: { prompt: "normal user recovery payload", codex_capture: true, codex_turn_id: "turn-recovery" },
     });
 
     expect(result).toHaveProperty("observationId");
@@ -218,15 +234,15 @@ describe("observe implicit session create (#638)", () => {
     expect(session).toMatchObject({
       observationCount: 1,
       captureExcluded: false,
-      captureExclusionReason: "",
+      captureExclusionReason: null,
       firstPrompt: "normal user recovery payload",
     });
     expect([...((kv.store.get("mem:audit") ?? new Map()).values())]).toEqual([
       expect.objectContaining({
-        operation: "observe",
+        operation: "session_capture_reactivated",
         functionId: "mem::observe",
         targetIds: ["ses_internal"],
-        details: expect.objectContaining({ action: "session_capture_reactivated" }),
+        details: expect.objectContaining({ previousReason: "codex_internal_prompt" }),
       }),
     ]);
   });
@@ -245,7 +261,7 @@ describe("observe implicit session create (#638)", () => {
       status: "active",
       observationCount: 0,
       captureExcluded: true,
-      captureExclusionReason: "codex_internal",
+      captureExclusionReason: "codex_internal_prompt",
     });
 
     const result = await sdk.trigger("mem::observe", {
@@ -288,21 +304,21 @@ describe("observe implicit session create (#638)", () => {
       cwd: "/project/a",
       hookType: "prompt_submit",
       timestamp: new Date().toISOString(),
-      data: { prompt: "repeated normal prompt" },
+      data: { prompt: "repeated normal prompt", codex_capture: true, codex_turn_id: "turn-repeated" },
     };
     await sdk.trigger("mem::observe", payload);
     await kv.update("mem:sessions", "ses_repeated_recovery", [
       { path: "captureExcluded", value: true },
-      { path: "captureExclusionReason", value: "codex_internal" },
+      { path: "captureExclusionReason", value: "codex_internal_prompt" },
     ]);
 
     const result = await sdk.trigger("mem::observe", payload);
     dedup.stop();
 
-    expect(result).toHaveProperty("observationId");
+    expect(result).toMatchObject({ deduplicated: true });
     const session = kv.store.get("mem:sessions")!.get("ses_repeated_recovery") as Record<string, unknown>;
-    expect(session).toMatchObject({ observationCount: 2, captureExcluded: false });
-    expect(kv.store.get("mem:obs:ses_repeated_recovery")?.size).toBe(2);
+    expect(session).toMatchObject({ observationCount: 1, captureExcluded: false });
+    expect(kv.store.get("mem:obs:ses_repeated_recovery")?.size).toBe(1);
   });
 
   it("does not create a session for a structured Codex host prompt", async () => {

@@ -1,3 +1,4 @@
+import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import type {
   Session,
@@ -200,7 +201,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction("mem::import", 
+  registerObservationWriter(sdk, "mem::import",
     async (data: {
       exportData: ExportData;
       strategy?: "merge" | "replace" | "skip";
@@ -293,6 +294,8 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           error: `Too many total observations (max ${MAX_TOTAL_OBSERVATIONS})`,
         };
       }
+
+      kv.assertRecoveryImportAllowed(importData, strategy === "replace");
 
       const stats = {
         sessions: 0,
@@ -674,8 +677,8 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         (importData.graphEdges?.length ?? 0) > 0
       ) {
         // Canonical import rows are authoritative. Invalidate only the
-        // rebuildable query manifest; the next bounded graph read repairs the
-        // snapshot and shards together from the imported graph.
+        // rebuildable query manifest. Reads use the bounded fallback until an
+        // explicit snapshot rebuild refreshes the derived index.
         await kv.delete(KV.graphQueryManifest, "current");
       }
 

@@ -54,6 +54,8 @@ describe("frame-guard", () => {
 
 function mockKV(store = new Map<string, Map<string, unknown>>()) {
   return {
+    assertRecoveryImportAllowed: () => {},
+    hasObservationRecovery: () => false,
     get: async () => null,
     set: async <T>(s: string, k: string, d: T) => {
       if (!store.has(s)) store.set(s, new Map());
