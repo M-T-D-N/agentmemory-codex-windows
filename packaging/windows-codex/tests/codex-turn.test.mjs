@@ -1144,3 +1144,69 @@ test("current Codex model curates verified observations into official memory, le
     ?.some((citation) => citation.observationId === id
       && citation.sessionProject === "example-project")));
 });
+
+test("relocation registry v3 resolves exact batch roots and preserves fail-closed ownership", () => {
+  const temp = mkdtempSync(join(tmpdir(), "agentmemory-registry-v3-"));
+  try {
+    const target = join(temp, "Workspace"), legacy = join(temp, "legacy");
+    const library = join(target, "projects", "DifferentLibraryFolder");
+    const siteRoot = join(target, "projects", "site"), site = join(siteRoot, "nested-repo");
+    const siteSource = join(legacy, "site"), sourceRepo = join(siteSource, "nested-repo");
+    for (const path of [library, site, sourceRepo]) {
+      mkdirSync(path, { recursive: true });
+      const initialized = spawnSync("git", ["init", "--quiet", path], { encoding: "utf8" });
+      assert.equal(initialized.status, 0, initialized.stderr);
+    }
+    const digest = "a".repeat(64);
+    const registry = { schema_version: 3, projects: [
+      { id: "library-project", relocation_ref: { batch_id: "library-move" } },
+      { id: "site-project", relocation_ref: { batch_id: "site-copy", subpath: "nested-repo" } },
+    ] };
+    const manifest = {
+      schema_version: 1, target_root: target,
+      namespaces: { control: "control", projects: "projects/{project}" },
+      cutover_state: { control: "target", legacy_control_root: legacy,
+        registered_projects: { "library-project": "target", "site-project": "target" } },
+      batch_ledger: [
+        { batch_id: "library-move", status: "COMPLETE", source: join(legacy, "library"), destination: library },
+        { batch_id: "site-copy", status: "SOAKING", transport: "COPY_VERIFY_CUTOVER", source: siteSource, destination: siteRoot,
+          verification: { nested_git_repository: "nested-repo", source_file_count: 2, source_bytes: 10,
+            source_tree_sha256: digest, codex_project_id: "site-ui-id",
+            copy_result: { verified_file_count: 2, verified_bytes: 10, verified_at_utc: "2026-09-01T00:00:00Z",
+              source_and_destination_tree_sha256: digest, destination_reparse_or_special_count: 0, source_deleted: false },
+            primary_root_cutover: { verified_at_utc: "2026-09-02T00:00:00Z", source_retention_reason: "verified rollback",
+              project: { project_id: "site-ui-id", primary_root: siteRoot }, canonical_ref: siteRoot, source_deleted: false } },
+          rollback: { canonical_authority_after_cutover: siteRoot, source_remains_canonical_until_verified_cutover: false,
+            source_is_never_deleted_by_copy: true, source_retained_as_rollback_during_soak: true } },
+      ],
+    };
+    const registryPath = join(temp, "project-repositories.json"), manifestPath = join(temp, "workspace-relocation.json");
+    const read = (r = registry, m = manifest) => {
+      writeFileSync(registryPath, JSON.stringify(r)); writeFileSync(manifestPath, JSON.stringify(m));
+      return readProjectRegistry(registryPath, target);
+    };
+    const resolved = read();
+    assert.equal(projectFor(join(library, "src"), resolved), "library-project");
+    assert.equal(projectFor(join(site, "src"), resolved), "site-project");
+    assert.equal(resolved.projects.find(p => p.id === "site-project").gitCommonDir, join(site, ".git"));
+    assert.ok(!resolved.projects.some(p => p.path.startsWith(legacy)));
+    for (const change of [
+      r => { r.projects[0].path = "old-path"; },
+      r => { r.projects.push(structuredClone(r.projects[0])); },
+      r => { r.projects[0].relocation_ref.batch_id = "missing"; },
+      r => { r.projects[1].relocation_ref.subpath = "../escape"; },
+      r => { r.projects[1].relocation_ref.subpath = "other-repo"; },
+      r => { r.schema_version = 4; },
+    ]) { const r = structuredClone(registry); change(r); assert.throws(() => read(r)); }
+    for (const change of [
+      m => { m.batch_ledger.push(structuredClone(m.batch_ledger[0])); },
+      m => { m.batch_ledger[0].status = "PLANNED"; },
+      m => { m.batch_ledger[0].destination = join(temp, "outside"); },
+      m => { m.batch_ledger[0].destination = join(target, "projects", "missing"); },
+      m => { m.cutover_state.registered_projects["site-project"] = "source"; },
+      m => { m.batch_ledger[1].verification.copy_result.verified_bytes = 9; },
+      m => { m.batch_ledger[1].rollback.source_retained_as_rollback_during_soak = false; },
+      m => { m.batch_ledger[1].status = "COMPLETE"; },
+    ]) { const m = structuredClone(manifest); change(m); assert.throws(() => read(registry, m)); }
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});

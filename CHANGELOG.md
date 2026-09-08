@@ -6,6 +6,11 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+- Fixed managed hooks rejecting a version 3 project registry that uses
+  `relocation_ref`. Resolve exact batch destinations and declared nested Git
+  roots while preserving cutover, retained-source, and canonical-path checks.
+  This prevents unrelated reference entries from breaking normal turn capture.
+
 - Reconciled the public development branch with the later local recovery and
   provenance fixes. Restored bounded graph queries, strict graph XML parsing,
   neutral MCP retrieval, session lifecycle serialization, and Qwen readiness

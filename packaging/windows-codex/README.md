@@ -103,7 +103,7 @@ The preview is intentionally narrow:
   downstream release version.
 - `r62` identifies the historical public qualification, not a public version
   line or the qualification of this checkout. Each new build uses a fresh numeric
-  revision such as `r81`; the builder accepts `r` followed by a positive integer.
+  revision such as `r82`; the builder accepts `r` followed by a positive integer.
 - Public source snapshots and generated release-folder names use the downstream
   version.
   The installed runtime directory and CLI still use AgentMemory compatibility
@@ -150,7 +150,7 @@ Run from Windows PowerShell 5.1 or newer. The output directory must not exist.
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.11.2.exe `
-  -ReleaseRevision r81
+  -ReleaseRevision r82
 ```
 
 The normal build uses the pinned `pnpm-lock.yaml`, runs the existing skill
@@ -224,6 +224,13 @@ REST session listings retain the
 oldest-first order used by the curation backlog. Oversized curation candidates
 are skipped within the existing context budget so a fitting later source can
 still be offered with its complete text and provenance.
+
+Managed hooks accept the path-based project registry and version 3
+`relocation_ref` entries. References resolve the unique relocation batch
+destination, including an explicitly matching nested Git path. Missing or
+ambiguous targets, path escapes, linked checkouts, and unverified retained source
+identities fail closed. The registry and its sibling relocation manifest remain
+the routing authority; hooks do not rewrite them or create a parallel registry.
 
 Durable writes and graph provenance remain exact-project scoped. The legacy
 session/observation `POST /agentmemory/forget` apply path is irreversible and does
