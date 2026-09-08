@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1146,7 +1146,7 @@ test("current Codex model curates verified observations into official memory, le
 });
 
 test("relocation registry v3 resolves exact batch roots and preserves fail-closed ownership", () => {
-  const temp = mkdtempSync(join(tmpdir(), "agentmemory-registry-v3-"));
+  const temp = realpathSync.native(mkdtempSync(join(tmpdir(), "agentmemory-registry-v3-")));
   try {
     const target = join(temp, "Workspace"), legacy = join(temp, "legacy");
     const library = join(target, "projects", "DifferentLibraryFolder");
