@@ -6,7 +6,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
 > [!IMPORTANT]
-> 이 저장소는 소스 전용 Technical Preview `0.1.0-preview.2`입니다.
+> 이 저장소는 소스 전용 Technical Preview `0.1.0-preview.3`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -26,6 +26,8 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
   여러 source group을 수동 graph write에 사용할 때는 각 node·edge에 0부터 시작하는
   `sourceIndexes`를 지정하거나, 의도적인 공유 출처임을 `sharedSources: true`로
   명시해야 합니다.
+- 정확한 ID·버전·graph cursor를 보존하는 검증된 빈 observation의 삭제·복구를
+  기존 REST forget endpoint에서 지원합니다.
 - 프로젝트 간 읽기는 제한된 수량으로 수행하고 출처 프로젝트를 표시하며,
   wildcard 쓰기는 허용하지 않습니다.
 - 선택적으로 인증정보가 없는 loopback 전용 로컬 Qwen을 typed graph 추출에만
@@ -43,14 +45,34 @@ port 3111의 134 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 그래프 조회 색인은 정본 그래프와 같은 iii 저장소에 있습니다. 색인이 없거나
 오래되면 경고와 제한된 snapshot을 반환하며, 명시적 snapshot rebuild로 갱신합니다.
 
-현재 소스는 공개 preview 이후의 미발행 변경을 포함합니다.
-[변경 기록](../CHANGELOG.md)과 각 빌드 manifest로 실제 소스·검증 개정을 확인하세요.
+공개판 변경은 [변경 기록](../CHANGELOG.md)에 정리합니다. 소스 tag는 공개판을,
+각 빌드 manifest는 해당 산출물의 검증 개정을 식별합니다.
+
+## 그래프 갱신 시점
+
+1. 관리형 훅이 정상 대화를 observation으로 저장합니다. 새 observation의 저장이
+   완료되면 기존 backlog scheduler를 깨웁니다. 거부·중복 입력은 깨우지 않으며,
+   깨우기 실패도 이미 저장한 observation을 무효화하지 않습니다.
+2. 현재 Codex 모델이 작업 중 결정한 사안과 검증된 해결책 중 재사용할 내용을
+   공식 memory·lesson·graph 도구로 출처와 함께 선별 기록합니다. 최종 답변을
+   수집했다는 사실만으로 그 내용을 검증된 결정으로 승격하지 않습니다.
+3. 선택형 로컬 Qwen graph provider가 설정되어 있고 사용 가능하면 제한된 batch로
+   그래프를 보강합니다. runtime 준비 상태가 15초간 안정적인지 확인하며, 이미
+   안정적인 runtime은 observation 저장 때마다 다시 15초를 기다리지 않습니다.
+   drain당 최대 4 batch를 처리하고 모두 처리하면 30초 간격으로 이어갑니다.
+   신호 누락·재시작은 15분 복구 확인으로 처리하며 전경 Qwen 작업이 있으면 cursor를
+   넘기지 않고 미룹니다.
+
+AgentMemory 자체는 Qwen을 기동하지 않습니다. 별도로 구성한 호스트 launcher가
+수동 보류·메모리 여유·프로세스 소유권 정책에 따라 필요할 때 기동할 수 있습니다.
+이 공개판에는 해당 호스트 정책이나 모든 PC에 적용할 GPU/RAM 기준을 포함하지
+않습니다. provider 없는 수동 curation과 구조적 graph 추출도 사용할 수 있습니다.
 
 ## 버전 구분
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.2` | 저장소 공개판과 소스 tag |
+| 공개 다운스트림 버전 | `0.1.0-preview.3` | 저장소 공개판과 소스 tag |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
@@ -62,11 +84,12 @@ port 3111의 134 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 
 - PowerShell 5.1 이상이 있는 Windows; 현재 공개판은 Windows 11에서 검증
 - Node.js 20 이상
+- HTTP 회귀 테스트용 PATH의 Python 3 (CI는 Python 3.12 사용)
 - 저장소가 고정한 pnpm `11.19.0`
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)의
   SHA-256과 일치하는 공식 iii engine `0.11.2` Windows 실행 파일
 
-첫 소스 공개판에는 미리 빌드되거나 서명된 installer를 첨부하지 않습니다.
+이 소스 공개판에는 미리 빌드되거나 서명된 installer를 첨부하지 않습니다.
 
 ## 소스에서 빌드하기
 
@@ -74,12 +97,13 @@ Windows PowerShell에서 다음과 같이 실행합니다. 출력 폴더는 미�
 됩니다.
 
 ```powershell
-git clone https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.3 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe
+  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
+  -ReleaseRevision r83
 ```
 
 정상 빌드는 native 입력 hash, 고정 lockfile, skill 일관성, typecheck, build,
@@ -96,6 +120,16 @@ cutover, rollback, 보존, 인증 계약을 전부 검토하세요.
 > 대상으로 합니다. 무관한 폴더에 적용하거나 build 산출물을 사용자 데이터로
 > 취급하지 마세요. 정본 `data`, 비밀정보, log, task identity, rollback 자료는
 > 서로 독립된 수명주기를 가집니다.
+
+## 기존 설치 업데이트
+
+공개 tag의 소스와 새 staging 폴더에서 빌드하세요. 이미 설치한 개정과 다른
+`-ReleaseRevision rN`을 선택합니다. 예시의 `r83`은 빌드 표기이며 기존 r83
+runtime을 덮어쓸 권한을 뜻하지 않습니다. 동일한 소유 설치 경로에서 dry-run을
+실행하고 predecessor·target을 확인한 뒤 승인된 cutover·rollback 절차를 따릅니다.
+정본 데이터·비밀정보·인스턴스 정보는 설치 위치에 보존합니다. 이번 공개판에서
+제외한 과거 일회성 session-stub migration은 실행하지 않습니다.
+[에이전트 설치 안내](../INSTALL_FOR_AGENTS.md)에 상세 절차가 있습니다.
 
 ## 개인정보·보안 경계
 

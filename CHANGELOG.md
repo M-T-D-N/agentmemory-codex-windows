@@ -4,7 +4,22 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
-## Unreleased
+## 0.1.0-preview.3 — 2026-09-09
+
+Source-only prerelease collecting the changes on main since the published
+preview.1 GitHub release, including the preview.2 source line below.
+
+### Added
+
+- New committed observations wake the existing semantic graph backlog scheduler,
+  so arrivals while Qwen is already ready need not wait for a readiness event or
+  the 15-minute recovery probe. Rejected and duplicate observations do not wake
+  it; wake failures preserve successful observation storage.
+- Updated English, Korean, and Japanese guides and the agent installation runbook
+  with graph timing, verified-decision curation, host-owned Qwen startup boundaries,
+  pinned source evaluation, and immutable-revision update instructions.
+
+### Fixed
 
 - Fixed managed hooks rejecting a version 3 project registry that uses
   `relocation_ref`. Resolve exact batch destinations and declared nested Git
@@ -26,7 +41,22 @@ The upstream AgentMemory release history remains in the
   reference scopes. No live data migration is performed.
 - Retained immutable versioned installation targets; the public same-revision
   package replacement path is not adopted. Publication and runtime installation
-  are separate from this source update.
+  remain separate operations.
+
+### Compatibility and preview limits
+
+- Downstream version is 0.1.0-preview.3; package, CLI, MCP, API, plugins, and
+  export compatibility remain on upstream AgentMemory 0.9.29. No data schema
+  migration is introduced.
+- The source surface remains 57 MCP tools, 6 resources, 3 prompts, and 134 REST
+  endpoints. The supported Windows/Codex profile activates four managed hooks.
+- Source only: no npm publication, signed installer, or binary release asset.
+  Public Windows CI verifies source checks; a locally generated installer has
+  its own build manifest and requires separate cutover validation.
+- AgentMemory does not auto-start Qwen. Optional host startup policies and
+  machine-specific GPU/RAM measurements are outside this public repository.
+- AI-generated and user-tested; no owner manual source review or independent
+  third-party code/security audit is claimed.
 
 ## 0.1.0-preview.2 — 2026-08-30
 

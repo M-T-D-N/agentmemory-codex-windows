@@ -4,13 +4,13 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.2`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.3`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Build and evaluate it from source; do not substitute an
 > upstream `npx` install for the steps in this guide.
 
-This source contains unreleased reconciliation changes; the public version is
-a release baseline, not evidence that this checkout was packaged or installed.
+This public version identifies a source release. Each generated package and
+installed runtime has its own qualification and installation evidence.
 Use an explicit new `-ReleaseRevision` and the exact source identity for each
 qualified build. Existing versioned installation targets are not replaced.
 
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.2`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.3`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -150,13 +150,17 @@ Run from Windows PowerShell 5.1 or newer. The output directory must not exist.
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.11.2.exe `
-  -ReleaseRevision r82
+  -ReleaseRevision r83
 ```
 
 The normal build uses the pinned `pnpm-lock.yaml`, runs the existing skill
 consistency check, package tests, Codex hook tests, a single TypeScript build,
 `pnpm deploy --prod`, and a public index/CLI/MCP/source-map parity smoke. `-SkipTests` is only for local iteration; it is not a
 release qualification.
+
+Choose an unused runtime revision for every build intended for cutover. If r83
+is already installed, use a new `rN`; do not replace its immutable package. Python
+3 must be on PATH for the HTTP regression tests (public CI uses Python 3.12).
 
 ## Existing-install cutover
 
@@ -165,8 +169,8 @@ only validates release hashes, owner/manifest identity, exact paths, and the
 managed Codex requirements predecessor.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.2\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.2 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.3\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.3 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -313,6 +317,16 @@ retained only for missed events and AgentMemory restarts. Every batch still
 selects the least-recently-serviced project and keeps forward and r30-prefix
 backfill cursors separate. Foreground Qwen markers abort background work without
 advancing either cursor; malformed graph XML gets one bounded repair attempt.
+
+A newly stored observation also wakes the same scheduler after its canonical
+write succeeds. Wake failures preserve the stored observation and the periodic
+recovery path. The scheduler probes the configured provider; it does not launch
+Qwen or treat a stored response as a verified durable decision. The current Codex
+model selects reusable decisions and verified fixes through the official curation
+tools. A separately configured host launcher may connect extraction demand to
+its local-AI conditional start policy, including manual holds, resource admission,
+and exact-owned release. That host launcher and machine-specific admission
+thresholds are not included in this repository.
 An explicit invalid citation in a single-observation
 local-Qwen response uses that same one-attempt budget to regenerate from the
 original observation, then passes through unchanged exact-ID validation. No

@@ -7,7 +7,7 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.2-orange" alt="0.1.0-preview.2" />
+  <img src="https://img.shields.io/badge/release-0.1.0--preview.3-orange" alt="0.1.0-preview.3" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
@@ -60,14 +60,39 @@ Graph query shards are rebuildable indexes in the same iii StateModule as the
 canonical graph. Missing or dirty indexes use a bounded snapshot with a warning;
 only an explicit snapshot rebuild refreshes them.
 
-This source includes unreleased changes beyond the latest public preview;
-see [CHANGELOG.md](CHANGELOG.md). Qualification comes from each build manifest.
+Release changes are recorded in [CHANGELOG.md](CHANGELOG.md). Source tags
+identify public releases; each build manifest records its own qualification.
+
+## When the graph updates
+
+1. The managed hooks store eligible conversation turns as observations. A new
+   committed observation wakes the existing graph backlog scheduler; rejected or
+   duplicate observations do not. A wake failure leaves the observation intact.
+2. The current Codex model selects reusable decisions and verified fixes through
+   official memory, lesson, and graph curation tools with source provenance.
+   Storing a final answer alone does not mark it as a verified decision.
+3. If the optional local Qwen graph provider is configured and available, the
+   scheduler enriches the graph in bounded batches. Runtime readiness must be
+   stable for 15 seconds; an observation wake reuses an already stable runtime
+   without restarting that wait. Drains run up to four batches, with a 30-second
+   cooldown before continuing full drains. A 15-minute probe covers
+   missed wakes and restarts. Foreground Qwen work can defer extraction without
+   advancing the cursor.
+
+AgentMemory probes the provider; it does not start Qwen itself. A separately
+configured host launcher can start Qwen on demand using its own manual-hold,
+resource-budget, and process-ownership rules. This repository does not ship
+that host policy or prescribe a universal GPU/RAM threshold. Provider-free
+manual curation and deterministic structural extraction remain available.
+
+See the [operating guide](packaging/windows-codex/README.md) for readiness
+coordination, cursor recovery, and provider limits.
 
 ## Version identities
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.2` | Public version and source tag |
+| Downstream release | `0.1.0-preview.3` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
@@ -79,11 +104,12 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 - Windows with PowerShell 5.1 or newer; this preview is qualified on Windows 11
 - Node.js 20 or newer
+- Python 3 on PATH for the plaintext HTTP regression tests (CI uses Python 3.12)
 - pnpm `11.19.0` through the repository's pinned package-manager declaration
 - The official iii engine `0.11.2` Windows executable whose SHA-256 matches
   [`packaging/windows-codex/config/third-party-inputs.json`](packaging/windows-codex/config/third-party-inputs.json)
 
-No prebuilt or signed installer is attached to the first source preview.
+No prebuilt or signed installer is attached to this source preview.
 
 ## Build and evaluate from source
 
@@ -91,12 +117,13 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.3 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe
+  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
+  -ReleaseRevision r83
 ```
 
 The normal builder verifies the pinned native input, restores the frozen lock,
@@ -115,6 +142,17 @@ using `-Execute`.
 > service layout. Do not point it at an unrelated directory or treat build
 > output as user data. Canonical `data`, secrets, logs, task identity, and
 > rollback state have independent lifecycles.
+
+## Updating an existing installation
+
+Check out the release tag into a source checkout and use a fresh staging directory.
+Choose a new `-ReleaseRevision rN` that is not already installed; `r83` in the
+examples is a build label, not permission to overwrite an existing r83 runtime.
+Run the installer dry-run against the same owned installation, review the exact
+predecessor and target, and follow the approved cutover and rollback procedure.
+Canonical data, secrets, and instance metadata stay in the installation. Do not
+copy data into the source tree or invoke the historical one-off session-stub
+migrations removed from this preview. See [the agent runbook](INSTALL_FOR_AGENTS.md).
 
 ## Privacy and security boundaries
 

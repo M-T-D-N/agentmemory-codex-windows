@@ -64,6 +64,37 @@ describe("observe implicit session create (#638)", () => {
     vi.unstubAllEnvs();
   });
 
+
+  it("wakes graph work only after a new observation is stored, never for dedup or rejected capture", async () => {
+    vi.stubEnv("AGENTMEMORY_AUTO_COMPRESS", "false");
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const { DedupMap } = await import("../src/functions/dedup.js");
+    const { KV } = await import("../src/state/schema.js");
+    const sdk = mockSdk(); const kv = mockKV();
+    const storedAtWake: unknown[][] = [];
+    const wake = vi.fn(() => storedAtWake.push([...(kv.store.get(KV.observations("wake"))?.values() ?? [])]));
+    registerObserveFunction(sdk as never, kv as never, new DedupMap(), undefined, wake);
+    const input = { sessionId: "wake", project: "p", cwd: "/p", hookType: "prompt_submit",
+      timestamp: "2026-09-08T14:00:00Z", data: { prompt: "Save the verified routing decision" } };
+    const result = await sdk.trigger("mem::observe", input) as { observationId: string };
+    expect(result.observationId).toBeTruthy();
+    expect(wake).toHaveBeenCalledOnce();
+    expect(storedAtWake[0]).toEqual([expect.objectContaining({ id: result.observationId })]);
+    await sdk.trigger("mem::observe", input);
+    await sdk.trigger("mem::observe", { ...input, sessionId: "rejected", data: { codex_turn_id: "" } });
+    expect(wake).toHaveBeenCalledOnce();
+  });
+
+  it("does not turn a graph wake failure into a failed committed observation", async () => {
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const sdk = mockSdk(); const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never, undefined, undefined, () => { throw new Error("scheduler stopped"); });
+    const result = await sdk.trigger("mem::observe", { sessionId: "wake-failure", project: "p", cwd: "/p",
+      hookType: "prompt_submit", timestamp: "2026-09-08T14:00:01Z", data: { prompt: "Keep the observation" } });
+    expect(result).toHaveProperty("observationId");
+    expect(await kv.get("mem:sessions", "wake-failure")).toMatchObject({ observationCount: 1 });
+  });
+
   it("creates the session on first observe when project+cwd present and session record missing", async () => {
     const { registerObserveFunction } = await import("../src/functions/observe.js");
     const sdk = mockSdk();

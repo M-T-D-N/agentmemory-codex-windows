@@ -7,7 +7,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、ソースのみを提供する Technical Preview
-> `0.1.0-preview.2` です。
+> `0.1.0-preview.3` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -34,18 +34,51 @@ AgentMemory ダウンストリームです。
 - サポート対象プロファイルは認証済み loopback MCP endpoint を使用します。
   stdio launcher は互換性経路としてのみパッケージに含まれます。
 
-アップストリーム互換のソース surface には、56個の MCP tools、6個の
-resources、3個の prompts、port 3111 の133個の REST endpoints、12個の
+アップストリーム互換のソース surface には、57個の MCP tools、6個の
+resources、3個の prompts、port 3111 の134個の REST endpoints、12個の
 portable hooks、17個の skills があります。サポート対象の Windows
 プロファイルで意図的に有効化する管理対象 hook は、上記の4つだけです。
+
+監査用途の `memory_recall`、`memory_smart_search`、`memory_timeline` は
+`trackAccess: false` でアクセス回数による強化を抑制できます。既定値は true
+で、プロジェクト境界や削除・復元の保護は維持します。graph index は正規 graph
+と同じ iii store に置かれ、欠落・不整合時は警告付きの件数制限 snapshot を返します。
+index の更新には明示的な snapshot rebuild を使用します。
+
+監査記録付きの対象限定 provenance 修正と、検証済みの空 observation の
+削除・復元にも対応します。複数の source group を使う手動 graph 書き込みは
+各 node・edge にゼロ起点の `sourceIndexes` を指定するか、共有出典として
+`sharedSources: true` を明示します。空 observation の復元は既存の REST forget
+endpoint で正確な ID・version・graph cursor を保護して行います。
+
+## グラフが更新されるタイミング
+
+1. 管理対象 hook が通常の会話を observation として保存し、保存完了後に既存の
+   backlog scheduler を起こします。拒否・重複入力は起こさず、通知失敗でも保存済み
+   observation は保持します。
+2. 現在の Codex モデルが再利用できる決定と検証済みの解決策を選び、公式の
+   memory・lesson・graph tools で出典とともに記録します。最終回答の保存だけで
+   検証済みの決定として扱うことはありません。
+3. 任意のローカル Qwen graph provider が設定済みで利用可能なら、制限付き batch
+   で graph を補強します。runtime の準備状態が15秒間安定していることを確認し、
+   既に安定していれば observation 保存のたびに待ち直しません。drain ごとに最大
+   4 batch を処理し、全 batch を処理した場合は30秒の間隔で継続します。
+   通知漏れ・再起動には15分の復旧確認を使います。前景 Qwen 作業による延期では
+   cursor を進めません。
+
+AgentMemory 自体は Qwen を起動しません。別途設定した host launcher が手動保留・
+メモリ余裕・プロセス所有権の規則に従って起動できます。この公開版はその host
+policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 curation と
+決定的な構造抽出も利用できます。変更履歴は [CHANGELOG](../CHANGELOG.md)、
+各ビルドの検証情報は build manifest を参照してください。
 
 ## バージョンの区別
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.2` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.3` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
-| 検証リビジョン | `r32` | 内部 build provenance。公開バージョン系列ではありません |
+| 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
 
 正確なアップストリームの tag、commit、tree、元の package hash は
@@ -55,11 +88,12 @@ portable hooks、17個の skills があります。サポート対象の Windows
 
 - PowerShell 5.1 以降を備えた Windows。このプレビューは Windows 11 で検証済み
 - Node.js 20 以降
+- HTTP 回帰テスト用に PATH 上の Python 3（CI は Python 3.12）
 - リポジトリで固定された pnpm `11.19.0`
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、公式 iii engine `0.11.2` Windows 実行ファイル
 
-最初のソース公開版には、ビルド済みまたは署名済みの installer を添付しません。
+このソース公開版には、ビルド済みまたは署名済みの installer を添付しません。
 
 ## ソースからビルドする
 
@@ -67,12 +101,13 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.3 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe
+  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
+  -ReleaseRevision r83
 ```
 
 通常のビルドは、native 入力の hash、固定 lockfile、skill の整合性、typecheck、
@@ -89,6 +124,16 @@ cutover、rollback、保持、認証の契約をすべて確認してくださ�
 > 対象としています。無関係なディレクトリに適用したり、build 出力をユーザー
 > データとして扱ったりしないでください。正規の `data`、秘密情報、log、task
 > identity、rollback 資料には、それぞれ独立したライフサイクルがあります。
+
+## 既存インストールの更新
+
+公開 tag のソースと新しい staging directory を使い、既存と異なる
+`-ReleaseRevision rN` を選んでください。例の `r83` は既存 runtime の上書きを
+許可するものではありません。同じ所有対象 installation に dry-run を行い、
+predecessor と target を確認してから承認された cutover・rollback 手順に従います。
+正規データ・秘密情報・instance metadata は installation に保持します。この版で
+除外した過去の一回限りの session-stub migration は実行しないでください。
+詳細は [agent runbook](../INSTALL_FOR_AGENTS.md) にあります。
 
 ## プライバシーとセキュリティの境界
 

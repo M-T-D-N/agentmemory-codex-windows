@@ -266,7 +266,8 @@ async function main() {
   initMetrics(meterAccessor as Parameters<typeof initMetrics>[0]);
 
   registerPrivacyFunction(sdk);
-  registerObserveFunction(sdk, kv, dedupMap, config.maxObservationsPerSession);
+  registerObserveFunction(sdk, kv, dedupMap, config.maxObservationsPerSession,
+    () => semanticGraphBacklogScheduler?.wake());
   registerImageQuotaCleanup(sdk, kv);
   registerVisionSearchFunctions(sdk, kv, imageEmbeddingProvider);
   if (isSlotsEnabled()) {

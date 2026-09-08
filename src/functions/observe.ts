@@ -53,6 +53,7 @@ export function registerObserveFunction(
   kv: StateKV,
   dedupMap?: DedupMap,
   maxObservationsPerSession?: number,
+  onObservationStored?: () => void,
 ): void {
   registerObservationWriter(sdk, "mem::observe",
     async (payload: HookPayload) => {
@@ -462,6 +463,13 @@ export function registerObserveFunction(
           hook: payload.hookType,
           compress: isAutoCompressEnabled() ? "llm" : "synthetic",
         });
+        try {
+          onObservationStored?.();
+        } catch (error) {
+          logger.warn("Graph wake deferred after observation was stored", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         return { observationId: obsId };
       });
     },
