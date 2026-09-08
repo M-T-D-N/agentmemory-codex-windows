@@ -6,8 +6,8 @@ AgentMemory ダウンストリームです。
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
 > [!IMPORTANT]
-> このリポジトリは、ソースのみを提供する Technical Preview
-> `0.1.0-preview.3` です。
+> このリポジトリは、独立した Technical Preview
+> `0.1.0-preview.4` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -76,7 +76,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.3` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.4` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -93,7 +93,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、公式 iii engine `0.11.2` Windows 実行ファイル
 
-このソース公開版には、ビルド済みまたは署名済みの installer を添付しません。
+preview.4 の npm パッケージと GitHub ZIP の公開後は、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
 ## ソースからビルドする
 
@@ -101,7 +101,7 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.3 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.4 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

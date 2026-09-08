@@ -35,6 +35,10 @@ elseif ($priorNodeOptions -notmatch '(?:^|\s)--max-old-space-size(?:=|\s)') {
 }
 
 $sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+$sourceCommit = (& git -C $sourceRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[a-f0-9]{40}$') { throw 'Build requires a Git source commit.' }
+$sourceDirty = @(& git -C $sourceRoot status --porcelain --untracked-files=normal)
+if ($LASTEXITCODE -ne 0 -or $sourceDirty.Count -gt 0) { throw 'Build requires a clean source checkout.' }
 $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $outputRoot) {
     throw "OutputDirectory already exists: $outputRoot"
@@ -55,6 +59,9 @@ foreach ($required in @($node, $iii, (Join-Path $sourceRoot 'pnpm-lock.yaml'), (
 
 $thirdParty = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'config\third-party-inputs.json') | ConvertFrom-Json
 $iiiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $iii).Hash
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'licenses\iii-LICENSE_ELv2')).Hash -ne [string]$thirdParty.iii_engine.license_sha256) {
+    throw 'iii-engine license hash mismatch.'
+}
 if ($iiiHash -ne [string]$thirdParty.iii_engine.sha256) {
     throw "iii-engine hash mismatch: expected $($thirdParty.iii_engine.sha256), got $iiiHash"
 }
@@ -93,9 +100,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "test suite failed with exit code $LASTEXITCODE" }
         & $node (Join-Path $PSScriptRoot 'tests\codex-turn.test.mjs')
         if ($LASTEXITCODE -ne 0) { throw "Codex adapter tests failed with exit code $LASTEXITCODE" }
+        & $node --test (Join-Path $PSScriptRoot 'tests\npm-distribution.test.mjs')
+        if ($LASTEXITCODE -ne 0) { throw "npm distribution tests failed with exit code $LASTEXITCODE" }
     }
 
-    & $pnpm --filter '@agentmemory/agentmemory' deploy --prod --legacy $runtimePackageRoot
+    & $pnpm --config.node-linker=hoisted --filter '@agentmemory/agentmemory' deploy --prod --legacy $runtimePackageRoot
     if ($LASTEXITCODE -ne 0) { throw "pnpm deploy failed with exit code $LASTEXITCODE" }
     Get-ChildItem -Recurse -Directory -Filter '.bin' -LiteralPath (Join-Path $runtimePackageRoot 'node_modules') |
         Sort-Object { $_.FullName.Length } -Descending |
@@ -142,6 +151,15 @@ Copy-Item -LiteralPath (Join-Path $sourceRoot 'upstream-source.json') -Destinati
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'launcher\AgentMemoryHiddenLauncher.cs') -Destination $srcOut
 Copy-Item -LiteralPath $iii -Destination (Join-Path $binOut 'iii.exe')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-WindowsCodex.ps1') -Destination $releaseRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Initialize-WindowsCodex.ps1') -Destination $releaseRoot
+foreach ($name in @('LICENSE', 'NOTICE')) { Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $releaseRoot }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses\iii-LICENSE_ELv2') -Destination (Join-Path $releaseRoot 'iii-LICENSE_ELv2')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses\THIRD-PARTY-NOTICES.md') -Destination $releaseRoot
+$licensesOut = Join-Path $payloadRoot 'licenses'
+[void][IO.Directory]::CreateDirectory($licensesOut)
+foreach ($name in @('LICENSE', 'NOTICE', 'iii-LICENSE_ELv2', 'THIRD-PARTY-NOTICES.md')) {
+    Copy-Item -LiteralPath (Join-Path $releaseRoot $name) -Destination $licensesOut
+}
 
 $cscCandidates = @(
     (Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
@@ -160,7 +178,7 @@ if ($unexpectedBackups.Count -gt 0) {
 
 $upstream = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'upstream-source.json') | ConvertFrom-Json
 $files = @(
-    Get-ChildItem -Recurse -File -LiteralPath $payloadRoot |
+    Get-ChildItem -Force -Recurse -File -LiteralPath $payloadRoot |
         Sort-Object FullName |
         ForEach-Object {
             $relative = $_.FullName.Substring($payloadRoot.Length).TrimStart('\').Replace('\', '/')
@@ -185,6 +203,7 @@ $releaseFiles = @(
 )
 $manifest = [ordered]@{
     schema_version = 1
+    source_commit = $sourceCommit
     product = 'AgentMemory for Codex on Windows'
     product_id = 'agentmemory-codex-windows'
     downstream_version = $downstreamVersion

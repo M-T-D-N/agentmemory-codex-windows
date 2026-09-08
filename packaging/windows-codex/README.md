@@ -4,12 +4,12 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.3`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.4`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
-> of upstream support. Build and evaluate it from source; do not substitute an
-> upstream `npx` install for the steps in this guide.
+> of upstream support. Use this downstream
+> npm launcher or source builder; an upstream `npx` command installs a different product.
 
-This public version identifies a source release. Each generated package and
+This public version identifies the source and independently packaged downstream launcher. Each generated package and
 installed runtime has its own qualification and installation evidence.
 Use an explicit new `-ReleaseRevision` and the exact source identity for each
 qualified build. Existing versioned installation targets are not replaced.
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.3`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.4`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -162,6 +162,45 @@ Choose an unused runtime revision for every build intended for cutover. If r83
 is already installed, use a new `rN`; do not replace its immutable package. Python
 3 must be on PATH for the HTTP regression tests (public CI uses Python 3.12).
 
+## Prebuilt npm distribution and first installation
+
+The [npm guide](npm/README.md) is the user entry point after both artifacts are
+published. A small, dependency-free package contains a fixed-version GitHub URL,
+ZIP size/SHA-256, manifest SHA-256 and exact source commit. It has no install or
+postinstall lifecycle scripts. It never publishes the private root package or
+an upstream-scoped package. Temporary downloads are removed after each command.
+
+`--fresh` (PowerShell `-Fresh`) verifies an empty or absent target;
+`--fresh --execute` copies the verified runtime, DPAPI secret, ownership and
+configuration into that root. It does not register tasks or modify Codex.
+`--activate-prepared` then checks the same user, exact release/payload, task and
+port collisions, and absence of managed requirements. With `--execute`, it
+registers the existing daemon/watchdog tasks and four hooks. It does not start
+the service or edit MCP/OAuth configuration. Follow the npm guide's existing
+startup verification and OAuth connection steps. A preparation failure leaves
+the partial root for inspection; no existing user files are deleted or replaced.
+Activation rolls back only the task registrations and requirements it created.
+
+Publisher workflow: finish source checks, commit the clean release candidate,
+then build once with a fresh revision (preview.4 uses r84). From that same clean
+commit run:
+
+```powershell
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.4 -OutputDirectory D:\staging\npm-preview4
+```
+
+This produces the versioned Windows ZIP and npm tarball, without publishing.
+The producer rejects dirty/mismatched source, unmanifested files and junctions.
+Upload the exact ZIP under the descriptor's versioned GitHub asset name before
+publishing the tarball with the preview dist-tag. Publishing either artifact,
+creating tags and changing an existing installation require separate authorization.
+SHA-256 integrity is not Authenticode signing or an independent security audit.
+
+The ZIP and installed payload retain Apache LICENSE/NOTICE, the official
+iii-engine Elastic License 2.0 text, and shipped dependency licenses. See
+[third-party notices](licenses/THIRD-PARTY-NOTICES.md); Apache licensing of this
+adapter does not relicense the engine or other dependencies.
+
 ## Existing-install cutover
 
 The installer supports an owned existing installation. Without `-Execute` it
@@ -169,8 +208,8 @@ only validates release hashes, owner/manifest identity, exact paths, and the
 managed Codex requirements predecessor.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.3\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.3 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.4\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.4 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `

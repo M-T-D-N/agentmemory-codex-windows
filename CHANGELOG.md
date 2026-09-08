@@ -4,6 +4,20 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## 0.1.0-preview.4 — unreleased
+
+- Add an independent, dependency-free npm/npx installer launcher with a pinned
+  GitHub release archive, size/SHA-256 and manifest/source identity verification.
+- Add empty-root first-install preparation and separate explicit activation,
+  preserving CurrentUser DPAPI, existing task ownership, hooks and OAuth setup.
+  Existing-install updates continue through the protected cutover/rollback path.
+- Package physical hoisted runtime dependencies for ZIP delivery, require clean
+  source identity, and retain upstream notices and the iii engine's Elastic
+  License 2.0 in both distribution and installation.
+- Add launcher, tamper, extraction, and isolated first-install regression tests.
+  Preparation is exercised locally; task activation is validated with isolated
+  mocks and refusal cases, not an additional live service on the qualification PC.
+
 ## 0.1.0-preview.3 — 2026-09-09
 
 Source-only prerelease collecting the changes on main since the published

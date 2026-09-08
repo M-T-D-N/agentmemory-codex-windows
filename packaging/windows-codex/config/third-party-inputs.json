@@ -3,6 +3,9 @@
   "iii_engine": {
     "version": "0.11.2",
     "source": "https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2",
-    "sha256": "2447BC21906A6B5BE270868DA7E74A1C744A4644CF3BD4B37A228BA4E55478CA"
+    "sha256": "2447BC21906A6B5BE270868DA7E74A1C744A4644CF3BD4B37A228BA4E55478CA",
+    "license": "Elastic-2.0",
+    "license_source": "https://github.com/iii-hq/iii/blob/iii%2Fv0.11.2/LICENSE_ELv2",
+    "license_sha256": "93774B18D561E27FC44F34C767C62BD56549A6D99E3E05B9C33CD8A3B94134A8"
   }
 }

@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory = $true)][string]$ProjectRegistry,
     [Parameter(Mandatory = $true)][string]$NodePath,
     [string]$ManagedRequirementsPath = 'C:\ProgramData\OpenAI\Codex\requirements.toml',
-    [switch]$Execute
+    [switch]$Execute,
+    [switch]$Fresh,
+    [switch]$ActivatePrepared
 )
 
 Set-StrictMode -Version Latest
@@ -74,7 +76,7 @@ function Test-ExistingPackageMatchesRelease {
         $expected[$relative] = [string]$file.sha256
     }
 
-    $actualFiles = @(Get-ChildItem -Recurse -File -LiteralPath $PackageRoot)
+    $actualFiles = @(Get-ChildItem -Force -Recurse -File -LiteralPath $PackageRoot)
     if ($actualFiles.Count -ne $expected.Count) { return $false }
     foreach ($file in $actualFiles) {
         $relative = $file.FullName.Substring($PackageRoot.Length).TrimStart('\')
@@ -276,7 +278,10 @@ $payload = Join-Path $release 'payload'
 $ownerPath = Join-Path $root '.agentmemory-install-owner.json'
 $installManifestPath = Join-Path $root 'config\install-manifest.json'
 
-foreach ($required in @($releaseManifestPath, $payload, $ownerPath, $installManifestPath, $registry, $node)) {
+if ($Fresh -and $ActivatePrepared) { throw 'Choose Fresh or ActivatePrepared.' }
+$requiredInputs = @($releaseManifestPath, $payload, $registry, $node)
+if (-not $Fresh) { $requiredInputs += @($ownerPath, $installManifestPath) }
+foreach ($required in $requiredInputs) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required install input is missing: $required" }
 }
 if ($root.TrimEnd('\') -eq [System.IO.Path]::GetPathRoot($root).TrimEnd('\')) {
@@ -309,8 +314,17 @@ foreach ($file in $releaseManifest.immutable_files) {
     if ($actualHash -ne [string]$file.sha256) { throw "Release payload hash mismatch: $($file.path)" }
 }
 
+if ($Fresh -or $ActivatePrepared) {
+    . (Join-Path $release 'Initialize-WindowsCodex.ps1')
+    Invoke-FreshInstallation -Activate:$ActivatePrepared -Execute:$Execute
+    return
+}
+
 $owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
 $installed = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+if ($null -ne $installed.PSObject.Properties['installation_status'] -and [string]$installed.installation_status -eq 'prepared') {
+    throw 'Use ActivatePrepared for a prepared first installation before updating it.'
+}
 if (-not $owner.install_nonce -or [string]$owner.install_nonce -ne [string]$installed.install_nonce) {
     throw 'The install owner and manifest nonce do not match.'
 }
@@ -383,7 +397,7 @@ if (-not $Execute) {
 $backupId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $backupRoot = Join-Path $root "backups\releases\$backupId"
 [void][System.IO.Directory]::CreateDirectory($backupRoot)
-$copyRoots = @('scripts', 'bin', 'src')
+$copyRoots = @('scripts', 'bin', 'src', 'licenses')
 foreach ($relative in $copyRoots) {
     $current = Join-Path $root $relative
     if (Test-Path -LiteralPath $current) {
@@ -429,6 +443,10 @@ try {
     Copy-Item -Path (Join-Path $payload 'scripts\*') -Destination (Join-Path $root 'scripts') -Recurse -Force
     [void][System.IO.Directory]::CreateDirectory((Join-Path $root 'src'))
     Copy-Item -LiteralPath (Join-Path $payload 'src\AgentMemoryHiddenLauncher.cs') -Destination $hiddenLauncherSourcePath -Force
+    if (Test-Path -LiteralPath (Join-Path $payload 'licenses') -PathType Container) {
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $root 'licenses'))
+        Copy-Item -Path (Join-Path $payload 'licenses\*') -Destination (Join-Path $root 'licenses') -Force
+    }
     foreach ($file in @(Get-ChildItem -File -LiteralPath (Join-Path $payload 'bin'))) {
         if ($preserveHiddenLauncher -and $file.Name -eq 'agentmemory-hidden-launcher.exe') { continue }
         Copy-FileWhenChanged -Source $file.FullName -Destination (Join-Path $root "bin\$($file.Name)")
@@ -524,6 +542,10 @@ catch {
         }
     }
     $srcBackup = Join-Path $backupRoot 'src'
+    $licensesBackup = Join-Path $backupRoot 'licenses'
+    if (Test-Path -LiteralPath $licensesBackup) {
+        Copy-Item -Path (Join-Path $licensesBackup '*') -Destination (Join-Path $root 'licenses') -Force
+    }
     if (Test-Path -LiteralPath $srcBackup) {
         Copy-Item -Path (Join-Path $srcBackup '*') -Destination (Join-Path $root 'src') -Recurse -Force
     }

@@ -6,7 +6,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
 > [!IMPORTANT]
-> 이 저장소는 소스 전용 Technical Preview `0.1.0-preview.3`입니다.
+> 이 저장소는 독립 Technical Preview `0.1.0-preview.4`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -72,7 +72,7 @@ AgentMemory 자체는 Qwen을 기동하지 않습니다. 별도로 구성한 호
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.3` | 저장소 공개판과 소스 tag |
+| 공개 다운스트림 버전 | `0.1.0-preview.4` | 저장소 공개판과 소스 tag |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
@@ -80,7 +80,15 @@ AgentMemory 자체는 Qwen을 기동하지 않습니다. 별도로 구성한 호
 정확한 upstream tag, commit, tree, 원본 package hash는
 [`upstream-source.json`](../upstream-source.json)에 기록되어 있습니다.
 
-## 요구 환경
+## 빌드 없이 설치하기
+
+preview.4 npm 패키지와 대응 GitHub ZIP이 게시된 후에는
+[npm/npx 설치 안내](../packaging/windows-codex/npm/README.md)를 사용합니다.
+Windows x64, Node.js 24 이상, Codex가 필요합니다. 빈 설치 폴더의 준비와
+예약 작업·훅 활성화를 별도로 확인하며, 기본 명령은 설치하지 않고 검증만 합니다.
+기존 설치의 업데이트는 같은 설치 루트를 사용합니다.
+
+## 소스 빌드 요구 환경
 
 - PowerShell 5.1 이상이 있는 Windows; 현재 공개판은 Windows 11에서 검증
 - Node.js 20 이상
@@ -89,7 +97,8 @@ AgentMemory 자체는 Qwen을 기동하지 않습니다. 별도로 구성한 호
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)의
   SHA-256과 일치하는 공식 iii engine `0.11.2` Windows 실행 파일
 
-이 소스 공개판에는 미리 빌드되거나 서명된 installer를 첨부하지 않습니다.
+npm 실행기는 미리 빌드한 ZIP을 받습니다. 실행 파일에 Authenticode 서명은 없으며,
+고정된 ZIP SHA-256과 파일별 manifest로 무결성을 확인합니다.
 
 ## 소스에서 빌드하기
 
@@ -97,7 +106,7 @@ Windows PowerShell에서 다음과 같이 실행합니다. 출력 폴더는 미�
 됩니다.
 
 ```powershell
-git clone --branch v0.1.0-preview.3 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.4 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
