@@ -1,2 +1,3 @@
 /plugin/skills/**/REFERENCE.md text eol=lf
+/plugin/scripts/*.mjs text eol=lf
 /packaging/windows-codex/licenses/iii-LICENSE_ELv2 -text
