@@ -12,6 +12,20 @@ export interface LocalQwenLifecycle {
   release(): Promise<boolean>;
 }
 
+export function localQwenChildEnvironment(
+  executable: string,
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env = { ...source };
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path");
+  const inheritedPath = pathKey ? env[pathKey] : undefined;
+  for (const key of Object.keys(env)) {
+    if (["path", "agentmemory_secret"].includes(key.toLowerCase())) delete env[key];
+  }
+  env.PATH = [win32.dirname(executable), inheritedPath].filter(Boolean).join(";");
+  return env;
+}
+
 export function createLocalQwenLifecycle(options: {
   platform?: string;
   script?: string;
@@ -34,9 +48,7 @@ export function createLocalQwenLifecycle(options: {
     return;
   }
   const invoke = options.invoke ?? (async (executable: string, args: string[]) => {
-    const env = { ...process.env };
-    delete env.AGENTMEMORY_SECRET;
-    env.PATH = [win32.dirname(executable), env.PATH].filter(Boolean).join(";");
+    const env = localQwenChildEnvironment(executable);
     // LocalAI owns the readiness deadline and exact service identity.
     // Killing its wrapper on a second timeout could orphan a GPU transition.
     const { stdout } = await execute(executable, args, {

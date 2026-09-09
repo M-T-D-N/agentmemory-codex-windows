@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLocalQwenLifecycle } from "../src/providers/local-qwen-lifecycle.js";
+import { createLocalQwenLifecycle, localQwenChildEnvironment } from "../src/providers/local-qwen-lifecycle.js";
 
 const config = {
   platform: "win32", script: "D:\\Workspace\\projects\\local-ai\\scripts\\Invoke-LocalAI.ps1",
@@ -8,6 +8,15 @@ const config = {
 const token = "1234567890abcdef1234567890abcdef";
 
 describe("host Qwen lifecycle", () => {
+  it.each(["Path", "PATH", "path"])("preserves system tools with Windows %s casing and removes the service credential", (key) => {
+    const source = { [key]: "C:\\Windows\\System32", agentmemory_secret: "private", TEMP: "C:\\Temp" };
+    const env = localQwenChildEnvironment(config.powershell, source);
+    expect(env.PATH).toBe("C:\\Program Files\\PowerShell\\7;C:\\Windows\\System32");
+    expect(Object.keys(env).filter((k) => k.toLowerCase() === "path")).toEqual(["PATH"]);
+    expect(env.agentmemory_secret).toBeUndefined();
+    expect(env.TEMP).toBe("C:\\Temp");
+    expect(source[key]).toBe("C:\\Windows\\System32");
+  });
   it("resolves portable PowerShell from absolute PATH entries without a Program Files install", async () => {
     const previous = process.env.PATH;
     process.env.PATH = 'relative;"D:\\Portable PowerShell"';
