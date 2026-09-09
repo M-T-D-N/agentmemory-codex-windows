@@ -33,7 +33,17 @@ const GRAPH_TOKEN_STOPWORDS = new Set([
   "위해", "이것", "이후", "일단", "있는", "작동", "작업", "전체", "정도", "진행", "차후",
   "처리", "추가", "현재", "확인", "해당", "이번", "필요", "결과", "검토", "방법", "적절",
   "토큰", "코덱스", "codex",
+  "agentmemory", "agentmemorycodex", "qwen", "astra", "sol", "windows",
+  "please", "continue", "review", "implement", "update", "check", "help", "should",
+  "이점", "병행", "적대적", "전달", "잔여", "할까", "있을", "했을", "있는지",
+  "좋을지", "생각", "좀더", "함께", "부탁", "가능", "아스트라", "큐웬", "윈도우",
+  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could",
+  "do", "for", "has", "how", "if", "in", "is", "it", "its", "not", "of", "on", "or",
+  "our", "the", "their", "there", "these", "they", "to", "was", "we", "were", "what",
+  "when", "which", "who", "will", "would", "you", "your",
 ]);
+const KOREAN_PARTICLE = /(?:에서는|으로는|이라고|이라는|에서|에게|으로|하고|에는|까지|부터|처럼|보다|이나|라도|은|는|이|가|을|를|의|에|도|와|과|로)$/u;
+const GENERIC_KOREAN_ACTION = /^(?:잔여|작업|진행|검토|수정|확인|전달|정리|처리|병행|생각|필요|적절|부탁|완료|추가|사용|요청|설명|결과|내용|적대적)+(?:해|해줘|해주세요|하고|하기|해서|하면|한다면|하자|하던|해도|했을|했을때|한|한건|한것|할|할지|할때|하는|하는지|됐는지|했는지|해줄래|합니다|한지|하게|한것같은데)?$/u;
 const TERMINAL_GRAPH_STATUSES = new Set(["superseded", "rejected", "blocked"]);
 const OMITTED_RELATION_TYPES = new Set(["belongs_to"]);
 const AMBIENT_UI_CONTEXT_BLOCK = /<([a-z][a-z0-9-]*)\b(?=[^>]*\bsource=(["'])ambient-ui-state\2)[^>]*>[\s\S]*?<\/\1>\s*/gi;
@@ -495,17 +505,40 @@ function normalizeGraphText(value) {
     .normalize("NFKC")
     .toLowerCase()
     .replace(/에이전트\s*메모리/gu, " agentmemory ")
-    .replace(/agent[-_\s]?memory/g, " agentmemory ");
+    .replace(/(?<![a-z0-9_.-])agent[-_\s]?memory(?![a-z0-9_.-])/g, " agentmemory ");
 }
 
 function graphTokens(value) {
-  const matches = normalizeGraphText(value).match(/[a-z][a-z0-9_.-]{2,}|[\p{Script=Hangul}]{2,}/gu) ?? [];
-  return [...new Set(matches.filter((token) => !GRAPH_TOKEN_STOPWORDS.has(token)))].slice(0, 32);
+  return [...new Set(topicWords(value).filter((token) => !GRAPH_TOKEN_STOPWORDS.has(token)
+    && !GENERIC_KOREAN_ACTION.test(token)))].slice(0, 32);
+}
+
+function topicWords(value) {
+  const words = normalizeGraphText(value).match(/[a-z0-9]+(?:[_.-][a-z0-9]+)+|[a-z][a-z0-9]*|[\p{Script=Hangul}]{2,}/gu) ?? [];
+  return words.map((word) => {
+    if (GENERIC_KOREAN_ACTION.test(word)) return "";
+    const stem = word.replace(KOREAN_PARTICLE, "");
+    return stem.length >= 2 ? stem : word;
+  }).filter((word) => word.length >= 2);
+}
+
+function topicMatches(tokens, value) {
+  const words = new Set(topicWords(value));
+  return tokens.filter((token) => words.has(token));
+}
+
+function observationTopicText(observation) {
+  return [observation.id, observation.title, observation.narrative,
+    ...(Array.isArray(observation.concepts) ? observation.concepts : []),
+    ...(Array.isArray(observation.facts) ? observation.facts : []),
+    ...(Array.isArray(observation.files) ? observation.files : []),
+  ].filter((value) => typeof value === "string").join(" ");
 }
 
 function graphNodeText(node) {
-  const values = [node?.name];
-  for (const value of Object.values(node?.properties ?? {})) {
+  const values = [node?.id, node?.name];
+  for (const key of ["summary", "fact", "role", "prompt_summary", "outcome_summary"]) {
+    const value = node?.properties?.[key];
     if (typeof value === "string") values.push(value);
   }
   return normalizeGraphText(values.join(" "));
@@ -537,9 +570,10 @@ function formatGraphContext(prompt, project, graph) {
     ? graph.edges.filter((edge) => nodeById.has(edge?.sourceNodeId) && nodeById.has(edge?.targetNodeId))
     : [];
   const nodeTexts = new Map(nodes.map((node) => [node.id, graphNodeText(node)]));
+  const nodeMatches = new Map(nodes.map((node) => [node.id, topicMatches(tokens, nodeTexts.get(node.id))]));
   const documentFrequency = new Map(tokens.map((token) => [
     token,
-    nodes.reduce((count, node) => count + (nodeTexts.get(node.id).includes(token) ? 1 : 0), 0),
+    nodes.reduce((count, node) => count + (nodeMatches.get(node.id).includes(token) ? 1 : 0), 0),
   ]));
   const historical = asksForHistoricalContext(prompt);
   const supersedersByTarget = new Map();
@@ -558,13 +592,7 @@ function formatGraphContext(prompt, project, graph) {
 
   const directMatches = [];
   for (const node of nodes) {
-    const text = nodeTexts.get(node.id);
-    const matched = tokens.filter((token) => text.includes(token));
-    const informative = matched.filter((token) => {
-      if (token === "agentmemory") return true;
-      const frequency = documentFrequency.get(token) ?? nodes.length;
-      return frequency <= Math.max(1, Math.floor(nodes.length * 0.35));
-    });
+    const informative = nodeMatches.get(node.id);
     if (informative.length === 0) continue;
     const relevance = informative.reduce((score, token) => {
       const frequency = documentFrequency.get(token) ?? nodes.length;
@@ -597,6 +625,7 @@ function formatGraphContext(prompt, project, graph) {
   }
 
   for (const match of directMatches) {
+    if (!historical && !candidates.has(match.node.id)) continue;
     for (const edge of edges) {
       const type = String(edge.type ?? "related_to").toLowerCase();
       if (OMITTED_RELATION_TYPES.has(type)) continue;
@@ -605,6 +634,7 @@ function formatGraphContext(prompt, project, graph) {
       if (!isSource && !isTarget) continue;
       const neighbor = nodeById.get(isSource ? edge.targetNodeId : edge.sourceNodeId);
       if (!neighbor || (neighbor.type === "project" && graphNodeText(neighbor).includes("logical owner project"))) continue;
+      if (type !== "supersedes" && nodeMatches.get(neighbor.id).length === 0) continue;
       if (type === "supersedes" && !historical) {
         if (isSource) continue;
         if (TERMINAL_GRAPH_STATUSES.has(graphNodeStatus(neighbor))) continue;
@@ -620,17 +650,22 @@ function formatGraphContext(prompt, project, graph) {
     .slice(0, MAX_GRAPH_NODES);
   if (ranked.length === 0) return null;
 
+  const header = `<agentmemory-graph-context current_project="${project}" scope="federated">\nUse as derived context; verify consequential claims.`;
+  const footer = "\n</agentmemory-graph-context>";
   const nodeLines = [];
   for (const { node } of ranked) {
     const properties = node.properties ?? {};
     const status = properties.status ? ` status=${properties.status}` : "";
     const sourceProject = node.project ?? properties.project ?? properties.owner_project;
     const owner = sourceProject ? ` source_project=${sourceProject}` : "";
-    const rawDetail = properties.summary ?? properties.fact ?? properties.role ?? "";
-    const normalizedDetail = typeof rawDetail === "string" ? rawDetail.replace(/\s+/g, " ").trim() : "";
-    const detail = normalizedDetail.length > 300 ? `${normalizedDetail.slice(0, 297)}...` : normalizedDetail;
-    const suffix = detail ? `: ${detail}` : "";
-    nodeLines.push(contextScalar(`- [${node.type ?? "node"}] ${node.name}${status}${owner}${suffix}`));
+    const rawDetail = properties.summary ?? properties.fact ?? properties.outcome_summary ?? properties.prompt_summary ?? properties.role ?? "";
+    const normalizedDetail = typeof rawDetail === "string" ? contextScalar(rawDetail) : "";
+    const label = contextScalar(`- [${node.type ?? "node"}] ${node.name}${status}${owner}`);
+    const available = Math.min(300, MAX_GRAPH_CONTEXT - header.length - footer.length - label.length - 3);
+    const detail = available >= 4 && normalizedDetail
+      ? (normalizedDetail.length > available ? `${normalizedDetail.slice(0, available - 3)}...` : normalizedDetail)
+      : "";
+    nodeLines.push(label + (detail ? `: ${detail}` : ""));
   }
 
   const selectedIds = new Set(ranked.map(({ node }) => node.id));
@@ -658,14 +693,12 @@ function formatGraphContext(prompt, project, graph) {
       return contextScalar(`- [${label}] ${source.name} --${type}--> ${target.name}`);
     });
 
-  const header = `<agentmemory-graph-context current_project="${project}" scope="federated">\nUse as derived context; verify consequential claims.`;
-  const footer = "\n</agentmemory-graph-context>";
   let context = header;
   for (const line of [...relationLines, ...nodeLines]) {
-    if ((context + `\n${line}` + footer).length > MAX_GRAPH_CONTEXT) break;
+    if ((context + `\n${line}` + footer).length > MAX_GRAPH_CONTEXT) continue;
     context += `\n${line}`;
   }
-  return context + footer;
+  return context === header ? null : context + footer;
 }
 
 async function post(path, body, timeout = 2500) {
@@ -793,11 +826,13 @@ async function graphContext(prompt, project) {
   return formatGraphContext(prompt, project, mergeGraphs(graphs));
 }
 
-function formatRecallContext(project, result) {
-  if (!Array.isArray(result?.results)) return null;
+function formatRecallContext(prompt, project, result) {
+  const tokens = graphTokens(prompt);
+  if (tokens.length === 0 || !Array.isArray(result?.results)) return null;
   const ranked = result.results
     .filter((entry) => entry?.observation?.id && typeof entry.project === "string" && entry.project
-      && !isInternalCodexAmbientPrompt(entry.observation.narrative ?? ""))
+      && !isInternalCodexAmbientPrompt(entry.observation.narrative ?? "")
+      && topicMatches(tokens, observationTopicText(entry.observation)).length > 0)
     .map((entry) => ({
       ...entry,
       rank: (Number(entry.score) || 0) + (entry.project === project ? 3 : 0),
@@ -834,6 +869,7 @@ function formatRecallContext(project, result) {
 }
 
 async function federatedRecallContext(prompt, project) {
+  if (graphTokens(prompt).length === 0) return null;
   try {
     const response = await post("/agentmemory/search", {
       query: prompt,
@@ -842,7 +878,7 @@ async function federatedRecallContext(prompt, project) {
       limit: 12,
       token_budget: 1200,
     }, 1200);
-    return formatRecallContext(project, await response.json());
+    return formatRecallContext(prompt, project, await response.json());
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`[agentmemory] Federated recall unavailable: ${message}\n`);
@@ -981,6 +1017,7 @@ export {
   isInternalCodexAmbientPrompt,
   formatGraphContext,
   formatRecallContext,
+  federatedRecallContext,
   formatCurationContext,
   graphContext,
   graphTokens,

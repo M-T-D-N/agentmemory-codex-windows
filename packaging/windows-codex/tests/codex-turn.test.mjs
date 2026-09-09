@@ -14,6 +14,9 @@ import {
   formatCurationContext,
   formatGraphContext,
   formatRecallContext,
+  federatedRecallContext,
+  graphContext,
+  graphTokens,
   isApprovalReviewPrompt,
   isExcludedSession,
   isInternalCodexAmbientPrompt,
@@ -235,7 +238,7 @@ test("approval review traffic is skipped without excluding the user's session or
     });
     assert.equal(child.status, 0, child.stderr);
     assert.equal(child.stdout, "");
-    assert.equal(formatRecallContext("project", { results: [{ project: "project", score: 10,
+    assert.equal(formatRecallContext("verified policy", "project", { results: [{ project: "project", score: 10,
       observation: { id: "internal", narrative: prompt } }] }), null);
     assert.equal(isApprovalReviewPrompt("사용자의 실제 작업 지시"), false);
     assert.equal(observationCurationSource({ id: "internal", title: "prompt_submit", narrative: prompt }, "user-session"), null);
@@ -526,11 +529,157 @@ test("federated recall labels source projects, boosts current-project evidence, 
       },
     })),
   };
-  const context = formatRecallContext("current-project", result);
+  const context = formatRecallContext("evidence", "current-project", result);
   assert.match(context, /scope="federated"/);
   assert.match(context, /\[current-project\] memory-current/);
   assert.equal((context.match(/\[other\]/g) ?? []).length, 2);
   assert.doesNotMatch(context, /memory-other-third/);
+});
+
+function recallEntry(id, narrative, project = "current", extra = {}) {
+  return { project, score: 100, observation: { id, title: id, narrative, ...extra } };
+}
+
+function graphNode(id, name, status = "confirmed", project = "current") {
+  return { id, name, type: "decision", project, properties: { status } };
+}
+
+test("automatic recall abstains on vague follow-ups and broad product names", () => {
+  const prompts = ["잔여작업진행", "병행했을 때 이점/문제", "적대적 검토 후 전달",
+    "AgentMemory Codex 검토하고 수정해줘", "에이전트메모리 진행", "Qwen Astra 확인", "Can you review it and continue?", ""];
+  for (const prompt of prompts) {
+    assert.deepEqual(graphTokens(prompt), [], prompt);
+    const result = { results: [recallEntry("unrelated", `${prompt} 게임 브라우저 GPU 실험`)] };
+    assert.equal(formatRecallContext(prompt, "current", result), null, prompt);
+    assert.equal(formatGraphContext(prompt, "current", {
+      nodes: [graphNode("unrelated", `${prompt} 게임 GPU 실험`)], edges: [],
+    }), null, prompt);
+  }
+});
+
+test("automatic recall requires topical evidence before project or score weighting", () => {
+  const result = { results: [
+    recallEntry("noise", "AgentMemory Qwen GPU experiment", "current"),
+    { ...recallEntry("policy", "Cross-project recall keeps source labels.", "other",
+      { concepts: ["federated recall"] }), score: 1 },
+  ] };
+  const context = formatRecallContext("AgentMemory hook federated recall", "current", result);
+  assert.match(context, /\[other\] policy/);
+  assert.doesNotMatch(context, /noise|GPU experiment/);
+  assert.equal(formatRecallContext("삭제복구 검증", "current", result), null);
+});
+
+test("automatic recall retains Korean topic particles, filenames and digit-leading identifiers", () => {
+  for (const [prompt, narrative, extra] of [
+    ["중복수집을 확인", "중복수집은 방지된다.", {}],
+    ["codex-turn.mjs 검토", "Managed hook entry point.", { files: ["hooks/codex-turn.mjs"] }],
+    ["01a08325-b7d9-7e91-97e0-15f0bd298737 확인", "01a08325-b7d9-7e91-97e0-15f0bd298737", {}],
+    ["obs_123abc 확인", "Bounded recall policy.", { id: "obs_123abc" }],
+  ]) {
+    assert.match(formatRecallContext(prompt, "current", {
+      results: [recallEntry("evidence", narrative, "other", extra)],
+    }), /\[other\]/, prompt);
+  }
+  assert.equal(formatRecallContext("agentmemory-status.ps1", "current", {
+    results: [recallEntry("noise", "status.ps1")],
+  }), null);
+  assert.match(formatRecallContext("agentmemory-status.ps1", "current", {
+    results: [recallEntry("file", "agentmemory-status.ps1")],
+  }), /\[current\] file/);
+  assert.equal(formatRecallContext("RAM", "current", {
+    results: [recallEntry("noise", "program framework")],
+  }), null);
+});
+
+test("graph topics survive a homogeneous candidate page but not project metadata alone", () => {
+  const graph = { nodes: [graphNode("a", "중복수집 방지"), graphNode("b", "중복수집 검증")], edges: [] };
+  assert.match(formatGraphContext("중복수집을 확인", "current", graph), /중복수집/);
+  assert.equal(formatGraphContext("중복수집", "중복수집", {
+    nodes: [graphNode("x", "게임", "confirmed", "중복수집")], edges: [],
+  }), null);
+});
+
+test("graph recall rejects broad seeds and unrelated adjacent sessions", () => {
+  const graph = {
+    nodes: [graphNode("root", "AgentMemory"), graphNode("seed", "federated recall"),
+      graphNode("neighbor", "GPU experiment")],
+    edges: [{ sourceNodeId: "seed", targetNodeId: "neighbor", type: "related_to", weight: 1 },
+      { sourceNodeId: "root", targetNodeId: "neighbor", type: "related_to", properties: { role: "contains_session" } }],
+  };
+  const context = formatGraphContext("AgentMemory hook federated recall", "current", graph);
+  assert.match(context, /federated recall/);
+  assert.doesNotMatch(context, /GPU experiment|\] AgentMemory/);
+  assert.equal(formatGraphContext("AgentMemory", "current", graph), null);
+});
+
+test("graph recall preserves successor status, provenance labels and explicit history", () => {
+  const graph = {
+    nodes: [graphNode("old", "federated recall", "superseded"),
+      graphNode("new", "bounded retrieval", "confirmed", "other"),
+      graphNode("bad", "federated rejected", "rejected")],
+    edges: [{ sourceNodeId: "new", targetNodeId: "old", type: "supersedes" }],
+  };
+  const current = formatGraphContext("federated", "current", graph);
+  assert.match(current, /\[supersession\]/);
+  assert.match(current, /bounded retrieval status=confirmed source_project=other/);
+  assert.doesNotMatch(current, /status=superseded|status=rejected/);
+  const historical = formatGraphContext("과거 federated", "current", {
+    nodes: [graph.nodes[0]], edges: [],
+  });
+  assert.match(historical, /status=superseded/);
+  assert.equal(formatGraphContext("federated", "current", {
+    nodes: [graph.nodes[2]], edges: [],
+  }), null);
+});
+
+test("graph recall cannot use a blocked seed to promote an unrelated successor", () => {
+  const graph = {
+    nodes: [graphNode("old", "federated", "blocked"), graphNode("new", "unrelated", "rejected")],
+    edges: [{ sourceNodeId: "new", targetNodeId: "old", type: "supersedes" }],
+  };
+  assert.equal(formatGraphContext("federated", "current", graph), null);
+});
+
+test("automatic retrieval skips vague requests and keeps bounded read-only requests for topics", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body), signal: options.signal });
+    return new Response(JSON.stringify(url.endsWith("/search")
+      ? { results: [recallEntry("evidence", "federated recall", "other")] }
+      : { nodes: [graphNode("seed", "federated recall")], edges: [] }));
+  };
+  try {
+    assert.equal(await federatedRecallContext("잔여작업진행", "current"), null);
+    assert.equal(await graphContext("병행했을 때 이점/문제", "current"), null);
+    assert.equal(calls.length, 0);
+    const [recall, graph] = await Promise.all([
+      federatedRecallContext("federated recall", "current"), graphContext("federated recall", "current"),
+    ]);
+    assert.equal(calls.length, 3);
+    const search = calls.find((call) => call.url.endsWith("/search"));
+    assert.deepEqual(search.body, { query: "federated recall", project: "*", format: "full", limit: 12, token_budget: 1200 });
+    const graphs = calls.filter((call) => call.url.endsWith("/graph/query"));
+    assert.deepEqual(graphs.map((call) => call.body.project).sort(), ["*", "current"]);
+    assert.ok(graphs.every((call) => call.body.limit === 160 && call.body.maxDepth === 1 && call.body.queries.length <= 6));
+    assert.ok(calls.every((call) => call.signal instanceof AbortSignal && !call.signal.aborted));
+    assert.ok(recall.length <= 400 && graph.length <= 500);
+    assert.match(recall, /<\/agentmemory-recall-context>$/);
+    assert.match(graph, /<\/agentmemory-graph-context>$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("automatic recall returns no context when the bounded search fails", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("synthetic timeout"); };
+  try {
+    assert.equal(await federatedRecallContext("federated recall", "current"), null);
+    assert.equal(await graphContext("federated recall", "current"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("MCP shim preserves project, expandIds, and audit operation at the official proxy", async () => {

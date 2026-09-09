@@ -4,7 +4,21 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
-## 0.1.0-preview.4 — unreleased
+## 0.1.0-preview.5 — 2026-09-09
+
+- Require a concrete topic, filename, or identifier before automatically injecting
+  recalled memory or graph context. Generic follow-ups and product names alone
+  no longer trigger automatic retrieval; explicit MCP search remains available.
+- Apply the same relevance condition across projects and graph neighbors while
+  retaining source labels, decision replacement history and existing budgets.
+- Preserve filenames and digit-leading IDs, handle common Korean particles, and
+  avoid substring matches such as RAM/program. Lexical matching can still miss
+  synonyms or unfamiliar inflections; it is not a semantic relevance guarantee.
+- Add nine adapter regression cases covering relevance, history, source labels,
+  identifiers, request bounds and failure behavior. No memory schema or provider
+  changes are included.
+
+## 0.1.0-preview.4 — 2026-09-09
 
 - Add an independent, dependency-free npm/npx installer launcher with a pinned
   GitHub release archive, size/SHA-256 and manifest/source identity verification.

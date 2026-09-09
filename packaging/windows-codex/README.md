@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.4`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.5`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.4`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.5`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -186,7 +186,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.4 -OutputDirectory D:\staging\npm-preview4
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.5 -OutputDirectory D:\staging\npm-preview4
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -208,8 +208,8 @@ only validates release hashes, owner/manifest identity, exact paths, and the
 managed Codex requirements predecessor.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.4\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.4 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.5\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.5 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -326,8 +326,18 @@ rows; older workers do not implement their visibility or protection semantics.
 Keep a recovery-capable worker with this data when restoring an installation.
 
 The managed user-prompt hook performs
-bounded federated recall across projects, boosts the current project, labels
-every source project, and treats `*` as a read-only scope. Durable promotion is
+bounded federated recall across projects, labels every source project, and
+treats `*` as a read-only scope. Automatic recall and graph context require a
+concrete topic, filename, or identifier shared with the current user prompt;
+product names, generic follow-ups, search score and project membership alone
+do not qualify. Current-project weighting applies only after this selection.
+Ambiguous follow-ups without a topic produce no automatic retrieval context;
+the hook does not infer a topic from earlier injected or model-generated text.
+Explicit MCP recall remains available. Graph neighbors need their own topic
+match, except for explicit supersession links preserving a matched decision's
+replacement and historical status. Existing request and output budgets remain
+unchanged. This lexical selection can miss synonyms or unrecognized Korean
+inflections; it is not a semantic relevance guarantee. Durable promotion is
 performed by the current Codex turn through the official memory,
 lesson, and manual graph tools. Local Qwen may add graph entities and relations
 only after validating the exact project, session, and observation provenance.
