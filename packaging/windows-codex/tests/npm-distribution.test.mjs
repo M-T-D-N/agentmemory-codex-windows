@@ -167,12 +167,12 @@ test('ZIP extraction includes hidden entries and rejects traversal without desti
   try {
     const maker = path.join(dir, 'make.ps1');
     await writeFile(maker, `param([string]$Out, [string]$Name)\nAdd-Type -AssemblyName System.IO.Compression.FileSystem\n$zip = [IO.Compression.ZipFile]::Open($Out, 'Create')\ntry { $entry = $zip.CreateEntry($Name); $s = New-Object IO.StreamWriter($entry.Open()); try { $s.Write('test') } finally { $s.Dispose() } } finally { $zip.Dispose() }\n`);
-    for (const [index, name] of ['.hidden/file.txt', '../escaped.txt', 'CON/file.txt', 'some./file.txt'].entries()) {
+    for (const [index, name] of ['.hidden/file.txt', Array(4).fill('long-directory-'.repeat(5)).join('/') + '/file.txt', '../escaped.txt', 'CON/file.txt', 'some./file.txt'].entries()) {
       const zip = path.join(dir, `${index}.zip`), output = path.join(dir, `out${index}`);
       const made = spawnSync(ps, powershellArgs(maker, { Out: zip, Name: name }), { encoding: 'utf8', windowsHide: true });
       assert.equal(made.status, 0, made.stderr);
       const result = spawnSync(ps, powershellArgs(path.join(packaging, 'npm/Expand-Release.ps1'), { Archive: zip, Destination: output }), { encoding: 'utf8', windowsHide: true });
-      if (index === 0) { assert.equal(result.status, 0, result.stderr); assert.equal(await readFile(path.join(output, name), 'utf8'), 'test'); }
+      if (index < 2) { assert.equal(result.status, 0, result.stderr); assert.equal(await readFile(path.join(output, name), 'utf8'), 'test'); }
       else { assert.notEqual(result.status, 0); await assert.rejects(readdir(output), { code: 'ENOENT' }); }
     }
   } finally { await rm(dir, { recursive: true, force: true }); }

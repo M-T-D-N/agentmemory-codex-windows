@@ -182,7 +182,7 @@ the partial root for inspection; no existing user files are deleted or replaced.
 Activation rolls back only the task registrations and requirements it created.
 
 Publisher workflow: finish source checks, commit the clean release candidate,
-then build once with a fresh revision (preview.4 uses r84). From that same clean
+then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
