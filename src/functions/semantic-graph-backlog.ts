@@ -452,7 +452,7 @@ export function registerSemanticGraphBacklogFunction(
   kv: StateKV,
   provider?: MemoryProvider,
 ): void {
-  sdk.registerFunction("mem::graph-backlog-step", async () => {
+  sdk.registerFunction("mem::graph-backlog-step", async (request: { checkOnly?: boolean } = {}) => {
     if (!isGraphExtractionEnabled()) {
       return { success: false, skipped: "graph_extraction_disabled" };
     }
@@ -513,11 +513,12 @@ export function registerSemanticGraphBacklogFunction(
           inputTokenBudget,
         );
         if (!batch) {
-          if (await normalizeCompletedSession(kv, session.id)) {
+          if (!request.checkOnly && await normalizeCompletedSession(kv, session.id)) {
             normalizedSessions += 1;
           }
           continue;
         }
+        if (request.checkOnly === true) return { success: true, eligible: true };
         candidates.push({ session, batch, projectLastAttempt });
         break;
       }
@@ -638,6 +639,11 @@ export function startSemanticGraphBacklogScheduler(
   provider: MemoryProvider,
   initialRuntime: ProviderRuntimeInfo | null,
   options: {
+    lifecycle?: {
+      start: () => Promise<{ ready: boolean; reason?: string }>;
+      release: () => Promise<boolean>;
+    };
+    idleReleaseMs?: number;
     intervalMs?: number;
     readyGraceMs?: number;
     eventDrainBatches?: number;
@@ -648,7 +654,7 @@ export function startSemanticGraphBacklogScheduler(
       onReady: () => void,
     ) => (() => void) | undefined;
   } = {},
-): { stop: () => void; tick: () => Promise<void>; wake: () => void } {
+): { stop: () => Promise<void>; tick: () => Promise<void>; wake: () => void } {
   const intervalMs = Math.max(1_000, options.intervalMs ?? DEFAULT_INTERVAL_MS);
   const readyGraceMs = Math.max(0, options.readyGraceMs ?? DEFAULT_READY_GRACE_MS);
   const eventDrainBatches = Math.max(
@@ -661,6 +667,12 @@ export function startSemanticGraphBacklogScheduler(
   );
   let fingerprint = initialRuntime?.fingerprint ?? null;
   let readySince = initialRuntime ? Date.now() : 0;
+  const lifecycle = options.lifecycle;
+  const idleReleaseMs = Math.max(1_000, options.idleReleaseMs ?? 5 * 60_000);
+  let nextStartAttempt = 0;
+  let idleSince: number | null = null;
+  let runningDone = Promise.resolve();
+  let finishRun: (() => void) | undefined;
   let running = false;
   let stopped = false;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -682,8 +694,32 @@ export function startSemanticGraphBacklogScheduler(
     }
     if (!provider.probe) return;
     running = true;
+    runningDone = new Promise<void>((resolve) => { finishRun = resolve; });
     try {
-      const runtime = await provider.probe();
+      let runtime: ProviderRuntimeInfo;
+      try {
+        runtime = await provider.probe();
+      } catch (error) {
+        if (!lifecycle || stopped || Date.now() < nextStartAttempt) throw error;
+        const pending = await sdk.trigger({
+          function_id: "mem::graph-backlog-step",
+          timeoutMs: graphBacklogInvocationTimeoutMs(),
+          payload: { checkOnly: true },
+        }) as { eligible?: boolean };
+        if (pending?.eligible !== true || stopped) return;
+        nextStartAttempt = Date.now() + intervalMs;
+        const start = await lifecycle.start();
+        if (stopped) return;
+        if (!start.ready) {
+          logger.info("Semantic graph automatic start deferred", { reason: start.reason });
+          return;
+        }
+        fingerprint = null;
+        readySince = 0;
+        runtime = await provider.probe();
+        logger.info("Semantic graph automatic start ready");
+      }
+      if (stopped) return;
       if (runtime.fingerprint !== fingerprint) {
         fingerprint = runtime.fingerprint;
         readySince = Date.now();
@@ -699,7 +735,7 @@ export function startSemanticGraphBacklogScheduler(
 
       const limit = drain ? eventDrainBatches : 1;
       let completed = 0;
-      for (; completed < limit; completed++) {
+      for (; completed < limit && !stopped; completed++) {
         const step = await sdk.trigger({
           function_id: "mem::graph-backlog-step",
           timeoutMs: graphBacklogInvocationTimeoutMs(),
@@ -708,7 +744,18 @@ export function startSemanticGraphBacklogScheduler(
           skipped?: string;
           result?: { success?: boolean; semanticCompleted?: boolean };
         };
-        if (step?.skipped === "backlog_empty") return;
+        if (step?.skipped === "backlog_empty") {
+          if (lifecycle && !stopped) {
+            idleSince ??= Date.now();
+            const remaining = idleReleaseMs - (Date.now() - idleSince);
+            if (remaining <= 0) {
+              if (!await lifecycle.release()) scheduleDrain(eventDrainCooldownMs);
+              else idleSince = null;
+            } else scheduleDrain(remaining);
+          }
+          return;
+        }
+        idleSince = null;
         if (step?.result?.success === false) {
           if (drain) scheduleDrain(eventDrainCooldownMs);
           return;
@@ -723,6 +770,7 @@ export function startSemanticGraphBacklogScheduler(
       });
     } finally {
       running = false;
+      finishRun?.();
     }
   };
 
@@ -739,6 +787,8 @@ export function startSemanticGraphBacklogScheduler(
         readySignalPath,
         () => {
           readySince = Date.now();
+          if (drainTimer) clearTimeout(drainTimer);
+          drainTimer = undefined;
           scheduleDrain(0);
         },
       )
@@ -746,16 +796,24 @@ export function startSemanticGraphBacklogScheduler(
 
   const timer = setInterval(() => scheduleDrain(0), intervalMs);
   timer.unref();
-  if (initialRuntime) scheduleDrain(readyGraceMs);
+  if (initialRuntime || lifecycle) scheduleDrain(readyGraceMs);
   return {
-    stop: () => {
+    stop: async () => {
       stopped = true;
       clearInterval(timer);
       if (drainTimer) clearTimeout(drainTimer);
       drainTimer = undefined;
       unsubscribe?.();
+      await runningDone;
+      await lifecycle?.release();
     },
     tick,
-    wake: () => scheduleDrain(0),
+    wake: () => {
+      if (idleSince !== null && drainTimer) {
+        clearTimeout(drainTimer);
+        drainTimer = undefined;
+      }
+      scheduleDrain(0);
+    },
   };
 }

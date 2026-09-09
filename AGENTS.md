@@ -39,7 +39,7 @@ other hosts. The supported Windows/Codex build in
   manual graph tools; provider-backed summary, consolidation, reflection,
   crystallization, and compression remain disabled while local Qwen may enrich
   the exact-project graph, a fair cursor-preserving deferred backlog drains bounded batches after
-  Qwen readiness events and retains a 15-minute recovery probe, and deterministic structural extraction stays available; and
+  Qwen readiness events, optionally requests conditional startup through the managed Windows LocalAI adapter, and retains a 15-minute recovery probe, and deterministic structural extraction stays available; and
 - canonical data is installation state, not a generated build artifact. See
   `packaging/windows-codex/README.md` for build, cutover, and retention rules.
 

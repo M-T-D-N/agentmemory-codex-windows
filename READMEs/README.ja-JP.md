@@ -7,7 +7,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> `0.1.0-preview.5` です。
+> `0.1.0-preview.6` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -66,8 +66,11 @@ endpoint で正確な ID・version・graph cursor を保護して行います。
    通知漏れ・再起動には15分の復旧確認を使います。前景 Qwen 作業による延期では
    cursor を進めません。
 
-AgentMemory 自体は Qwen を起動しません。別途設定した host launcher が手動保留・
-メモリ余裕・プロセス所有権の規則に従って起動できます。この公開版はその host
+Windows adapter は処理可能な未処理 observation があり Qwen が利用できない場合、
+既存の LocalAI launcher に条件付き起動を自動要求します。手動保留・メモリ余裕・
+共有 GPU の判定は launcher に委ね、保留後は15分の復旧周期で再確認します。
+この worker が起動したインスタンスだけを backlog が空になって5分後に解放します。
+LocalAI がない環境では実行中 provider の利用を続けます。この公開版はその host
 policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 curation と
 決定的な構造抽出も利用できます。変更履歴は [CHANGELOG](../CHANGELOG.md)、
 各ビルドの検証情報は build manifest を参照してください。
@@ -76,7 +79,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.5` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.6` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -101,7 +104,7 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.5 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.6 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

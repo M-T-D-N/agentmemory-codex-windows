@@ -7,7 +7,7 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.4-orange" alt="0.1.0-preview.5" />
+  <img src="https://img.shields.io/badge/release-0.1.0--preview.6-orange" alt="0.1.0-preview.6" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
@@ -79,10 +79,14 @@ identify public releases; each build manifest records its own qualification.
    missed wakes and restarts. Foreground Qwen work can defer extraction without
    advancing the cursor.
 
-AgentMemory probes the provider; it does not start Qwen itself. A separately
-configured host launcher can start Qwen on demand using its own manual-hold,
-resource-budget, and process-ownership rules. This repository does not ship
-that host policy or prescribe a universal GPU/RAM threshold. Provider-free
+The Windows adapter now requests conditional Qwen startup automatically when
+the configured provider is unavailable and the existing backlog selector finds
+processable observations. It uses the workspace's existing LocalAI launcher;
+manual holds, GPU/RAM admission and shared-consumer protection stay with that
+launcher. Failed admission is retried on the 15-minute recovery cycle. Only an
+instance started by this worker is released after five minutes of empty backlog.
+No LocalAI installation or universal memory threshold is bundled. Hosts without
+that integration continue using an already running provider. Provider-free
 manual curation and deterministic structural extraction remain available.
 
 See the [operating guide](packaging/windows-codex/README.md) for readiness
@@ -92,7 +96,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.5` | Public version and source tag |
+| Downstream release | `0.1.0-preview.6` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
@@ -126,7 +130,7 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.5 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.6 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

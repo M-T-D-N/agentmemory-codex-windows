@@ -60,6 +60,7 @@ import { registerEnrichFunction } from "./functions/enrich.js";
 import { registerClaudeBridgeFunction } from "./functions/claude-bridge.js";
 import { registerGraphFunction } from "./functions/graph.js";
 import { registerGraphImportFunction } from "./functions/graph-import.js";
+import { createLocalQwenLifecycle } from "./providers/local-qwen-lifecycle.js";
 import {
   registerSemanticGraphBacklogFunction,
   startSemanticGraphBacklogScheduler,
@@ -303,7 +304,9 @@ async function main() {
   registerGraphFunction(sdk, kv, graphProvider);
   registerSemanticGraphBacklogFunction(sdk, kv, graphProvider);
   const semanticGraphBacklogScheduler = localQwenGraphOnly
-    ? startSemanticGraphBacklogScheduler(sdk, graphProvider, graphProviderRuntime)
+    ? startSemanticGraphBacklogScheduler(sdk, graphProvider, graphProviderRuntime, {
+        lifecycle: createLocalQwenLifecycle(),
+      })
     : null;
   registerGraphImportFunction(sdk, kv);
   bootLog(
@@ -675,7 +678,7 @@ async function main() {
 
   const shutdown = async () => {
     console.log(`\n[agentmemory] Shutting down...`);
-    semanticGraphBacklogScheduler?.stop();
+    await semanticGraphBacklogScheduler?.stop();
     healthMonitor.stop();
     dedupMap.stop();
     indexPersistence.stop();

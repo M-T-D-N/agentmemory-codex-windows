@@ -55,7 +55,7 @@ if (
 ) {
     throw 'The AgentMemory environment contract is incomplete or unsupported.'
 }
-foreach ($dynamicName in @('AGENTMEMORY_SECRET', 'AGENTMEMORY_WORKSPACE_ROOT', 'AGENTMEMORY_PROJECT_REGISTRY', 'AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR')) {
+foreach ($dynamicName in @('AGENTMEMORY_SECRET', 'AGENTMEMORY_WORKSPACE_ROOT', 'AGENTMEMORY_PROJECT_REGISTRY', 'AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR', 'AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT')) {
     if ($null -ne $contract.fixed_environment.PSObject.Properties[$dynamicName]) {
         throw 'The AgentMemory environment contract contains a dynamic or secret value.'
     }
@@ -207,6 +207,9 @@ foreach ($property in @($contract.fixed_environment.PSObject.Properties)) {
     [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
 }
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR', (Join-Path $resolvedRoot 'data\qwen-coordination'), 'Process')
+$localAILauncher = Join-Path $workspaceRoot 'projects\local-ai\scripts\Invoke-LocalAI.ps1'
+if (-not (Test-Path -LiteralPath $localAILauncher -PathType Leaf)) { $localAILauncher = $null }
+[System.Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT', $localAILauncher, 'Process')
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_WORKSPACE_ROOT', $workspaceRoot, 'Process')
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_PROJECT_REGISTRY', $projectRegistry, 'Process')
 

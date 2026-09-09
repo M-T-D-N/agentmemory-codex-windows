@@ -6,7 +6,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
 > [!IMPORTANT]
-> 이 저장소는 독립 Technical Preview `0.1.0-preview.5`입니다.
+> 이 저장소는 독립 Technical Preview `0.1.0-preview.6`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -63,16 +63,19 @@ port 3111의 134 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
    신호 누락·재시작은 15분 복구 확인으로 처리하며 전경 Qwen 작업이 있으면 cursor를
    넘기지 않고 미룹니다.
 
-AgentMemory 자체는 Qwen을 기동하지 않습니다. 별도로 구성한 호스트 launcher가
-수동 보류·메모리 여유·프로세스 소유권 정책에 따라 필요할 때 기동할 수 있습니다.
-이 공개판에는 해당 호스트 정책이나 모든 PC에 적용할 GPU/RAM 기준을 포함하지
+Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 observation이 있으면
+작업공간의 LocalAI launcher에 조건부 기동을 자동 요청합니다. 수동 보류·메모리 여유·
+공유 GPU 보호는 기존 launcher가 판정하며, 보류 후에는 15분 복구 주기로 재확인합니다.
+이 worker가 직접 켠 인스턴스만 backlog가 빈 상태로 5분이 지나면 소유 토큰으로 종료합니다.
+해당 LocalAI 설치가 없는 환경에서는 실행 중인 provider를 이용하는 기존 방식이 유지됩니다.
+이 공개판에는 호스트 프로그램이나 모든 PC에 적용할 GPU/RAM 기준을 포함하지
 않습니다. provider 없는 수동 curation과 구조적 graph 추출도 사용할 수 있습니다.
 
 ## 버전 구분
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.5` | 저장소 공개판과 소스 tag |
+| 공개 다운스트림 버전 | `0.1.0-preview.6` | 저장소 공개판과 소스 tag |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
@@ -106,7 +109,7 @@ Windows PowerShell에서 다음과 같이 실행합니다. 출력 폴더는 미�
 됩니다.
 
 ```powershell
-git clone --branch v0.1.0-preview.5 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.6 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

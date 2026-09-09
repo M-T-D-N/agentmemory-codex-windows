@@ -4,6 +4,19 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## 0.1.0-preview.6 — 2026-09-09
+
+- Connect eligible graph backlog to the existing Windows LocalAI conditional
+  launcher, automatically after observation writes and service recovery probes.
+  Reuse the canonical batch selector in read-only mode before cold startup.
+- Preserve host manual holds, memory admission, shared GPU ownership and active
+  consumer guards. Coalesce startup, back off denied admission for 15 minutes,
+  and release only this worker's exact instance after five idle minutes.
+- Keep hooks nonblocking and preserve existing graph cursors, fairness, source
+  provenance, output-budget blocks and manual curation. No schema migration.
+- Add startup, empty backlog, hold, ownership, busy-release and shutdown-race
+  coverage. LocalAI remains an optional external host dependency.
+
 ## 0.1.0-preview.5 — 2026-09-09
 
 - Require a concrete topic, filename, or identifier before automatically injecting

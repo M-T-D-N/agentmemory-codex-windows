@@ -55,6 +55,115 @@ function session(id: string, project: string, extra: Partial<Session> = {}): Ses
 afterEach(() => vi.useRealTimers());
 
 describe("semantic graph backlog", () => {
+  it("checks real eligible input without writing cursors or normalizing empty sessions", async () => {
+    let handler: (payload: { checkOnly: boolean }) => Promise<unknown> = async () => null;
+    let input = observations("a", 1);
+    const sdk = { registerFunction: (_id: string, fn: typeof handler) => { handler = fn; }, trigger: vi.fn() };
+    const kv = {
+      list: async (scope: string) => scope === "mem:sessions" ? [session("a", "A")] : input,
+      get: vi.fn(), update: vi.fn(),
+    };
+    registerSemanticGraphBacklogFunction(sdk as never, kv as never);
+    expect(await handler({ checkOnly: true })).toMatchObject({ eligible: true });
+    input = [];
+    expect(await handler({ checkOnly: true })).toMatchObject({ skipped: "backlog_empty" });
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.update).not.toHaveBeenCalled();
+    expect(sdk.trigger).not.toHaveBeenCalled();
+  });
+
+  it("automatically cold-starts eligible backlog, drains it, and releases after idle", async () => {
+    vi.useFakeTimers();
+    let ready = false;
+    let pending = true;
+    const runtime = { fingerprint: "qwen128k" };
+    const lifecycle = {
+      start: vi.fn(async () => { ready = true; return { ready: true }; }),
+      release: vi.fn(async () => true),
+    };
+    const trigger = vi.fn(async ({ payload }: { payload: { checkOnly?: boolean } }) => {
+      if (payload.checkOnly) return { eligible: pending };
+      if (!pending) return { skipped: "backlog_empty" };
+      pending = false;
+      return { result: { success: true } };
+    });
+    const scheduler = startSemanticGraphBacklogScheduler({ trigger } as never, {
+      probe: async () => { if (!ready) throw Error("offline"); return runtime; },
+    } as never, null, { lifecycle, readyGraceMs: 10, idleReleaseMs: 1000, intervalMs: 10000 });
+    await vi.advanceTimersByTimeAsync(30);
+    expect(lifecycle.start).toHaveBeenCalledOnce();
+    expect(pending).toBe(false);
+    expect(lifecycle.release).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(lifecycle.release).toHaveBeenCalledOnce();
+    await scheduler.stop();
+  });
+
+  it("does not cold-start empty backlog and backs off a held host across new observations", async () => {
+    vi.useFakeTimers();
+    let eligible = false;
+    const lifecycle = {
+      start: vi.fn(async () => ({ ready: false, reason: "background_held" })),
+      release: vi.fn(async () => true),
+    };
+    const scheduler = startSemanticGraphBacklogScheduler({
+      trigger: async () => ({ eligible }),
+    } as never, { probe: async () => { throw Error("offline"); } } as never, null,
+    { lifecycle, readyGraceMs: 0, intervalMs: 10000 });
+    await scheduler.tick();
+    expect(lifecycle.start).not.toHaveBeenCalled();
+    eligible = true;
+    await scheduler.tick();
+    await scheduler.tick();
+    scheduler.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(lifecycle.start).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(lifecycle.start).toHaveBeenCalledTimes(2);
+    await scheduler.stop();
+  });
+
+  it("waits for an in-flight start on shutdown, then releases without extraction", async () => {
+    let finishStart!: (value: { ready: boolean }) => void;
+    const lifecycle = {
+      start: vi.fn(() => new Promise<{ ready: boolean }>((resolve) => { finishStart = resolve; })),
+      release: vi.fn(async () => true),
+    };
+    const trigger = vi.fn(async () => ({ eligible: true }));
+    const scheduler = startSemanticGraphBacklogScheduler({ trigger } as never,
+      { probe: async () => { throw Error("offline"); } } as never, null,
+      { lifecycle, readyGraceMs: 10000 });
+    const tick = scheduler.tick();
+    await vi.waitFor(() => expect(lifecycle.start).toHaveBeenCalledOnce());
+    const stop = scheduler.stop();
+    expect(lifecycle.release).not.toHaveBeenCalled();
+    finishStart({ ready: true });
+    await Promise.all([tick, stop]);
+    expect(trigger).toHaveBeenCalledOnce();
+    expect(lifecycle.release).toHaveBeenCalledOnce();
+  });
+
+  it("a committed observation interrupts idle release without another cold start", async () => {
+    vi.useFakeTimers();
+    let pending = false;
+    const lifecycle = { start: vi.fn(), release: vi.fn(async () => true) };
+    const runtime = { fingerprint: "qwen128k" };
+    const trigger = vi.fn(async () => pending
+      ? (pending = false, { result: { success: true } })
+      : { skipped: "backlog_empty" });
+    const scheduler = startSemanticGraphBacklogScheduler({ trigger } as never,
+      { probe: async () => runtime } as never, runtime as never,
+      { lifecycle, readyGraceMs: 0, idleReleaseMs: 10000 });
+    await vi.advanceTimersByTimeAsync(1);
+    pending = true;
+    scheduler.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pending).toBe(false);
+    expect(lifecycle.start).not.toHaveBeenCalled();
+    expect(lifecycle.release).not.toHaveBeenCalled();
+    await scheduler.stop();
+  });
+
   it("recognizes Windows atomic-replace filenames for the ready signal", () => {
     expect(isReadySignalWatchFilename("qwen-ready.json", "qwen-ready.json")).toBe(true);
     expect(

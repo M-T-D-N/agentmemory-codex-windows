@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.5`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.6`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.5`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.6`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -186,7 +186,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.5 -OutputDirectory D:\staging\npm-preview4
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.6 -OutputDirectory D:\staging\npm-preview4
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -208,8 +208,8 @@ only validates release hashes, owner/manifest identity, exact paths, and the
 managed Codex requirements predecessor.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.5\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.5 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.6\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.6 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -369,13 +369,33 @@ advancing either cursor; malformed graph XML gets one bounded repair attempt.
 
 A newly stored observation also wakes the same scheduler after its canonical
 write succeeds. Wake failures preserve the stored observation and the periodic
-recovery path. The scheduler probes the configured provider; it does not launch
-Qwen or treat a stored response as a verified durable decision. The current Codex
-model selects reusable decisions and verified fixes through the official curation
-tools. A separately configured host launcher may connect extraction demand to
-its local-AI conditional start policy, including manual holds, resource admission,
-and exact-owned release. That host launcher and machine-specific admission
-thresholds are not included in this repository.
+recovery path. In the managed Windows profile, the environment adapter discovers
+only `<workspace_root>/projects/local-ai/scripts/Invoke-LocalAI.ps1` and supplies
+its absolute path through `AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT`. Inherited
+values are scrubbed; the service environment file cannot override that path.
+If PowerShell 7 or the existing LocalAI script is absent, cold start is disabled.
+The portable provider does not enable this integration by default.
+
+When a provider probe fails, the same internal backlog function is queried in
+read-only mode. Only a batch that passes the existing source, cursor and output
+budget rules permits `start-qwen -Background`. Empty or blocked-only backlog
+does not launch Qwen. Startup is single-flight, admission failures have a
+15-minute retry interval, and hooks never wait for model loading. The existing
+host owns manual holds, resource admission and the GPU transition lease; this
+repository does not bundle that host or prescribe universal memory thresholds.
+Successful readiness resumes the ordinary 15-second grace and fair batch drain.
+
+The returned exact instance identity is retained in memory. Only a worker-started
+instance is released after five minutes of empty backlog or graceful worker
+shutdown, using `stop-qwen -ExpectedOwnerToken`. Busy consumer guards defer idle
+release; borrowed or replaced instances are never stopped. New observations
+interrupt the idle wait. Abrupt worker termination cannot run this cleanup; the
+existing host ownership and desktop-exit lifecycle remain the recovery boundary.
+No parallel queue, new database or transcript copy is introduced.
+
+A stored response is still not a verified durable decision. The current Codex
+model selects reusable decisions and verified fixes through official curation
+tools; automatic provider extraction only enriches the source-backed graph.
 An explicit invalid citation in a single-observation
 local-Qwen response uses that same one-attempt budget to regenerate from the
 original observation, then passes through unchanged exact-ID validation. No
