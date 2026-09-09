@@ -8,9 +8,13 @@ updates:
       time: "06:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 10
-    labels:
-      - dependencies
-      - npm
+    # Follow upstream AgentMemory's iii-sdk 0.11.2 dependency pin.
+    # Review later API lines with upstream and bundled-engine compatibility.
+    ignore:
+      - dependency-name: iii-sdk
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
     commit-message:
       prefix: deps
       include: scope
@@ -28,10 +32,6 @@ updates:
       time: "06:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - npm
-      - integrations
     commit-message:
       prefix: deps(openclaw)
       include: scope
@@ -44,10 +44,6 @@ updates:
       time: "06:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - npm
-      - integrations
     commit-message:
       prefix: deps(pi)
       include: scope
@@ -60,10 +56,6 @@ updates:
       time: "06:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - npm
-      - integrations
     commit-message:
       prefix: deps(fs-watcher)
       include: scope
@@ -76,9 +68,6 @@ updates:
       time: "06:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - github-actions
     commit-message:
       prefix: ci(deps)
       include: scope

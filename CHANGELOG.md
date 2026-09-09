@@ -4,6 +4,17 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+- Follow [upstream AgentMemory's dependency version](https://github.com/rohitg00/agentmemory/blob/main/package.json):
+  retain iii-sdk 0.11.2. PR #9's proposed 0.23.0 fails type checking because it
+  removes the ISdk API used by this source. Review future minor/major SDK
+  updates against upstream and bundled-engine compatibility before adoption;
+  patch updates and other dependencies remain eligible for Dependabot review.
+- Use Dependabot's automatically created default labels instead of custom
+  labels that were absent in this repository. No runtime dependency, installed
+  release or memory data changes are included.
+
 ## 0.1.0-preview.7 — 2026-09-09
 
 - Clear the startup retry restriction after both conditional Qwen startup and
