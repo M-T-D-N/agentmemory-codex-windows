@@ -332,6 +332,21 @@ if ([System.IO.Path]::GetFullPath([string]$installed.install_root) -ne $root) {
     throw 'The existing install manifest does not own InstallRoot.'
 }
 
+$existingWorkspacePath = Join-Path $root 'config\codex-workspace.json'
+if (Test-Path -LiteralPath $existingWorkspacePath -PathType Leaf) {
+    $existingWorkspace = Get-Content -Raw -LiteralPath $existingWorkspacePath | ConvertFrom-Json
+    $previousWorkspaceRoot = [string]$existingWorkspace.workspace_root
+    if (-not [string]::IsNullOrWhiteSpace($previousWorkspaceRoot)) {
+        $localAIRelative = 'projects\local-ai\scripts\Invoke-LocalAI.ps1'
+        $previousLocalAI = Join-Path $previousWorkspaceRoot $localAIRelative
+        $targetLocalAI = Join-Path $workspace $localAIRelative
+        if ((Test-Path -LiteralPath $previousLocalAI -PathType Leaf) -and
+            -not (Test-Path -LiteralPath $targetLocalAI -PathType Leaf)) {
+            throw "WorkspaceRoot would disconnect the existing LocalAI automatic startup integration. Preserve workspace root '$previousWorkspaceRoot' or restore the launcher at '$targetLocalAI' before updating."
+        }
+    }
+}
+
 $existingManagedCopy = Join-Path $root 'config\managed-requirements.toml'
 if (Test-Path -LiteralPath $managedRequirements -PathType Leaf) {
     if (-not (Test-Path -LiteralPath $existingManagedCopy -PathType Leaf)) {

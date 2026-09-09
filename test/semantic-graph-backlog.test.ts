@@ -24,6 +24,7 @@ import {
   estimateGraphExtractionInputTokens,
   toGraphExtractionObservation,
 } from "../src/prompts/graph-extraction.js";
+import { logger } from "../src/logger.js";
 import type { CompressedObservation, Session } from "../src/types.js";
 
 function observations(sessionId: string, count: number): CompressedObservation[] {
@@ -55,6 +56,20 @@ function session(id: string, project: string, extra: Partial<Session> = {}): Ses
 afterEach(() => vi.useRealTimers());
 
 describe("semantic graph backlog", () => {
+  it("identifies missing automatic startup separately from an offline Qwen endpoint", async () => {
+    const trigger = vi.fn();
+    const scheduler = startSemanticGraphBacklogScheduler({ trigger } as never, {
+      probe: async () => { throw new Error("local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000"); },
+    } as never, null);
+    try {
+      await scheduler.tick();
+      expect(logger.info).toHaveBeenCalledWith("Semantic graph backlog deferred", {
+        error: "local_qwen_autostart_unconfigured:local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000",
+      });
+      expect(trigger).not.toHaveBeenCalled();
+    } finally { await scheduler.stop(); }
+  });
+
   it("checks real eligible input without writing cursors or normalizing empty sessions", async () => {
     let handler: (payload: { checkOnly: boolean }) => Promise<unknown> = async () => null;
     let input = observations("a", 1);
@@ -79,7 +94,7 @@ describe("semantic graph backlog", () => {
     const runtime = { fingerprint: "qwen128k" };
     const lifecycle = {
       start: vi.fn(async () => { ready = true; return { ready: true }; }),
-      release: vi.fn(async () => true),
+      release: vi.fn(async () => { ready = false; return true; }),
     };
     const trigger = vi.fn(async ({ payload }: { payload: { checkOnly?: boolean } }) => {
       if (payload.checkOnly) return { eligible: pending };
@@ -96,7 +111,36 @@ describe("semantic graph backlog", () => {
     expect(lifecycle.release).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1000);
     expect(lifecycle.release).toHaveBeenCalledOnce();
+    pending = true;
+    scheduler.wake();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(lifecycle.start).toHaveBeenCalledTimes(2);
+    expect(pending).toBe(false);
     await scheduler.stop();
+  });
+
+  it.each(["launch_failure", "readiness_failure"])("retains retry backoff after %s", async (failure) => {
+    vi.useFakeTimers();
+    const lifecycle = {
+      start: vi.fn(async () => {
+        if (failure === "launch_failure") throw new Error("launcher_failed");
+        return { ready: true };
+      }),
+      release: vi.fn(async () => true),
+    };
+    const scheduler = startSemanticGraphBacklogScheduler({
+      trigger: async () => ({ eligible: true }),
+    } as never, { probe: async () => { throw Error("offline"); } } as never, null,
+    { lifecycle, readyGraceMs: 0, intervalMs: 10000 });
+    try {
+      await scheduler.tick();
+      scheduler.wake();
+      await vi.advanceTimersByTimeAsync(100);
+      await scheduler.tick();
+      expect(lifecycle.start).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(lifecycle.start).toHaveBeenCalledTimes(2);
+    } finally { await scheduler.stop(); }
   });
 
   it("does not cold-start empty backlog and backs off a held host across new observations", async () => {

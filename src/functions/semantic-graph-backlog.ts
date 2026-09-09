@@ -700,7 +700,10 @@ export function startSemanticGraphBacklogScheduler(
       try {
         runtime = await provider.probe();
       } catch (error) {
-        if (!lifecycle || stopped || Date.now() < nextStartAttempt) throw error;
+        if (!lifecycle) {
+          throw new Error(`local_qwen_autostart_unconfigured:${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        }
+        if (stopped || Date.now() < nextStartAttempt) throw error;
         const pending = await sdk.trigger({
           function_id: "mem::graph-backlog-step",
           timeoutMs: graphBacklogInvocationTimeoutMs(),
@@ -717,6 +720,7 @@ export function startSemanticGraphBacklogScheduler(
         fingerprint = null;
         readySince = 0;
         runtime = await provider.probe();
+        nextStartAttempt = 0;
         logger.info("Semantic graph automatic start ready");
       }
       if (stopped) return;

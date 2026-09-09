@@ -161,11 +161,26 @@ function v1Endpoint(base: URL, route: string): string {
   return url.toString();
 }
 
+async function fetchLocalQwen(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    const detail = objectValue(error);
+    const cause = objectValue(detail?.cause);
+    const rawCode = cause?.code ?? detail?.code;
+    const code = typeof rawCode === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(rawCode)
+      ? rawCode
+      : error instanceof Error && error.name === "TimeoutError" ? "TIMEOUT" : "UNKNOWN";
+    throw new Error(`local_qwen_transport_failed:${code}:${new URL(url).host}`, { cause: error });
+  }
+}
+
 async function fetchJson(
   url: string,
   timeoutMs: number,
 ): Promise<unknown> {
-  const response = await fetch(url, {
+  const response = await fetchLocalQwen(url, {
     method: "GET",
     redirect: "error",
     signal: AbortSignal.timeout(timeoutMs),
@@ -394,7 +409,7 @@ export class LocalQwenProvider implements MemoryProvider {
     }, FOREGROUND_POLL_MS);
     poll.unref();
     try {
-      const response = await fetch(v1Endpoint(this.baseUrl, "/chat/completions"), {
+      const response = await fetchLocalQwen(v1Endpoint(this.baseUrl, "/chat/completions"), {
         method: "POST",
         redirect: "error",
         headers: {

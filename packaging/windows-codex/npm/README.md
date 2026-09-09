@@ -14,7 +14,7 @@ After this version is published, run the following in PowerShell (replace the
 example paths with your own). All commands default to dry-run:
 
 ```powershell
-npx --yes agentmemory-codex-windows@0.1.0-preview.6 --fresh --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
+npx --yes agentmemory-codex-windows@0.1.0-preview.7 --fresh --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
 ```
 
 `projects.json` is your existing project registry within the workspace. A minimal
@@ -58,7 +58,7 @@ For an already activated owned installation, omit `--fresh` and
 performs its protected cutover with predecessor backup/rollback. Keep canonical
 data in the same installation root. Do not create another root to update it.
 
-`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.6-win32-x64.zip"`
+`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.7-win32-x64.zip"`
 uses a previously downloaded ZIP, with exactly the same pinned hash check.
 `--help` describes the options without downloading anything.
 

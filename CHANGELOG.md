@@ -4,6 +4,22 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## 0.1.0-preview.7 — 2026-09-09
+
+- Clear the startup retry restriction after both conditional Qwen startup and
+  its provider probe succeed. Newly eligible work after normal idle shutdown can
+  start again; failed startup, failed readiness and host refusals keep the
+  15-minute backoff. Keep the five-minute idle policy and ownership guards.
+- Reject existing-install workspace changes that would disconnect a working
+  LocalAI launcher before cutover. Report transport cause codes and loopback
+  endpoints, and identify missing automatic-start integration separately.
+- Follow canonical decision successors in bounded graph recall, retaining
+  source-project boundaries and history; abstain on failed, incomplete or cyclic
+  successor expansion instead of presenting an obsolete decision as current.
+- Add restart-after-idle and failure-backoff regressions, transport diagnostics,
+  installer refusal coverage and successor-recall tests. Preserve compatibility
+  version 0.9.29, canonical data, cursors and provenance without migration.
+
 ## 0.1.0-preview.6 — 2026-09-09
 
 - Connect eligible graph backlog to the existing Windows LocalAI conditional

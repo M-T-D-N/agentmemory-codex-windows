@@ -26,6 +26,7 @@ const MAX_CURATION_SESSION_PAGE = 24;
 const MAX_CURATION_OBSERVATION_PAGE = 60;
 const MAX_CURATION_DERIVED_ROWS = 2000;
 const GRAPH_TOKEN_STOPWORDS = new Set([
+  "history", "historical", "previous", "past", "과거", "이전", "이력", "변경이력",
   "about", "after", "again", "before", "current", "from", "have", "into", "more", "project",
   "that", "then", "this", "using", "with", "work",
   "관련", "그리고", "기능", "기반", "기존", "까지", "내용", "다시", "다음", "대한", "대해",
@@ -557,7 +558,7 @@ function graphStatusWeight(node) {
 }
 
 function asksForHistoricalContext(prompt) {
-  return /(?:history|historical|previous|past|failure|failed|obsolete|deprecated|supersed|reject|block|과거|이전|실패|폐기|기각|거절|차단|교체|작동하지)/i.test(prompt);
+  return /(?:history|historical|previous|past|failure|failed|obsolete|deprecated|supersed|reject|block|과거|이전|실패|폐기|기각|거절|차단|교체|이력|변천|작동하지)/i.test(prompt);
 }
 
 function formatGraphContext(prompt, project, graph) {
@@ -568,6 +569,10 @@ function formatGraphContext(prompt, project, graph) {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const edges = Array.isArray(graph?.edges)
     ? graph.edges.filter((edge) => nodeById.has(edge?.sourceNodeId) && nodeById.has(edge?.targetNodeId))
+      .map((edge) => String(edge.type).toLowerCase() === "succeeded_by"
+        ? { ...edge, type: "supersedes", sourceNodeId: edge.targetNodeId,
+            targetNodeId: edge.sourceNodeId, originalRelation: edge }
+        : edge)
     : [];
   const nodeTexts = new Map(nodes.map((node) => [node.id, graphNodeText(node)]));
   const nodeMatches = new Map(nodes.map((node) => [node.id, topicMatches(tokens, nodeTexts.get(node.id))]));
@@ -580,15 +585,41 @@ function formatGraphContext(prompt, project, graph) {
   for (const edge of edges) {
     if (String(edge.type).toLowerCase() !== "supersedes") continue;
     const successor = nodeById.get(edge.sourceNodeId);
-    const predecessor = nodeById.get(edge.targetNodeId);
-    if (!successor || !predecessor || TERMINAL_GRAPH_STATUSES.has(graphNodeStatus(successor))) continue;
-    if (graphStatusWeight(successor) < graphStatusWeight(predecessor)) continue;
+    if (["rejected", "blocked"].includes(graphNodeStatus(successor))) continue;
     const values = supersedersByTarget.get(edge.targetNodeId) ?? [];
-    values.push({ edge, node: successor });
-    values.sort((a, b) => graphStatusWeight(b.node) - graphStatusWeight(a.node)
-      || String(b.edge.createdAt ?? "").localeCompare(String(a.edge.createdAt ?? "")));
+    values.push(successor);
     supersedersByTarget.set(edge.targetNodeId, values);
   }
+
+  const resolveCurrent = (start) => {
+    const leaves = new Map();
+    const visiting = new Set();
+    const visited = new Set();
+    let cyclic = false;
+    let incomplete = false;
+    let weakerLeaf = false;
+    const visit = (node) => {
+      if (graph.incompleteSuccessorNodeIds?.includes(node.id)) incomplete = true;
+      if (visiting.has(node.id)) { cyclic = true; return; }
+      if (visited.has(node.id)) return;
+      visiting.add(node.id);
+      const successors = supersedersByTarget.get(node.id) ?? [];
+      if (successors.length === 0) {
+        if (!TERMINAL_GRAPH_STATUSES.has(graphNodeStatus(node))) {
+          if (graphStatusWeight(node) >= graphStatusWeight(start)) leaves.set(node.id, node);
+          else weakerLeaf = true;
+        }
+      } else {
+        for (const successor of successors) visit(successor);
+      }
+      visiting.delete(node.id);
+      visited.add(node.id);
+    };
+    visit(start);
+    if (cyclic || incomplete) return [];
+    if (leaves.size === 0 && weakerLeaf && !TERMINAL_GRAPH_STATUSES.has(graphNodeStatus(start))) return [start];
+    return [...leaves.values()];
+  };
 
   const directMatches = [];
   for (const node of nodes) {
@@ -608,19 +639,29 @@ function formatGraphContext(prompt, project, graph) {
 
   const candidates = new Map();
   const addCandidate = (node, score) => {
-    if (!node || (!historical && TERMINAL_GRAPH_STATUSES.has(graphNodeStatus(node)))) return;
-    const current = candidates.get(node.id);
-    if (!current || score > current.score) candidates.set(node.id, { node, score });
+    if (!node) return;
+    for (const resolved of historical ? [node] : resolveCurrent(node)) {
+      const resolvedScore = score + (resolved.id === node.id ? 0 : 3 + graphStatusWeight(resolved));
+      const current = candidates.get(resolved.id);
+      if (!current || resolvedScore > current.score) candidates.set(resolved.id, { node: resolved, score: resolvedScore });
+    }
   };
-
   for (const match of directMatches) {
-    const superseders = supersedersByTarget.get(match.node.id) ?? [];
-    if (superseders.length > 0 && !historical) {
-      for (const successor of superseders) {
-        addCandidate(successor.node, match.score + 3 + graphStatusWeight(successor.node));
+    addCandidate(match.node, match.score);
+    if (!historical) continue;
+    const visited = new Set([match.node.id]);
+    const queue = [{ node: match.node, score: match.score }];
+    for (const current of queue) {
+      for (const edge of edges) {
+        if (String(edge.type).toLowerCase() !== "supersedes") continue;
+        const neighborId = edge.sourceNodeId === current.node.id ? edge.targetNodeId
+          : edge.targetNodeId === current.node.id ? edge.sourceNodeId : null;
+        if (!neighborId || visited.has(neighborId)) continue;
+        visited.add(neighborId);
+        const neighbor = nodeById.get(neighborId);
+        addCandidate(neighbor, current.score - 1);
+        queue.push({ node: neighbor, score: current.score - 1 });
       }
-    } else {
-      addCandidate(match.node, match.score);
     }
   }
 
@@ -669,15 +710,12 @@ function formatGraphContext(prompt, project, graph) {
   }
 
   const selectedIds = new Set(ranked.map(({ node }) => node.id));
-  const directIds = new Set(directMatches.map(({ node }) => node.id));
   const relationLines = edges
     .filter((edge) => {
       const type = String(edge.type ?? "related_to").toLowerCase();
       if (OMITTED_RELATION_TYPES.has(type)) return false;
       if (selectedIds.has(edge.sourceNodeId) && selectedIds.has(edge.targetNodeId)) return true;
-      return type === "supersedes"
-        && selectedIds.has(edge.sourceNodeId)
-        && directIds.has(edge.targetNodeId);
+      return type === "supersedes" && selectedIds.has(edge.sourceNodeId);
     })
     .sort((a, b) => {
       const aSupersedes = String(a.type).toLowerCase() === "supersedes" ? 1 : 0;
@@ -690,11 +728,13 @@ function formatGraphContext(prompt, project, graph) {
       const target = nodeById.get(edge.targetNodeId);
       const type = String(edge.type ?? "related_to");
       const label = type.toLowerCase() === "supersedes" ? "supersession" : "relation";
-      return contextScalar(`- [${label}] ${source.name} --${type}--> ${target.name}`);
+      return edge.originalRelation
+        ? contextScalar(`- [${label}] ${target.name} --succeeded_by--> ${source.name}`)
+        : contextScalar(`- [${label}] ${source.name} --${type}--> ${target.name}`);
     });
 
   let context = header;
-  for (const line of [...relationLines, ...nodeLines]) {
+  for (const line of [nodeLines[0], ...relationLines, ...nodeLines.slice(1)]) {
     if ((context + `\n${line}` + footer).length > MAX_GRAPH_CONTEXT) continue;
     context += `\n${line}`;
   }
@@ -804,6 +844,72 @@ async function queryGraph(project, queries) {
   return response.json();
 }
 
+async function expandGraphSuccessions(prompt, project, graph) {
+  const tokens = graphTokens(prompt);
+  const historical = asksForHistoricalContext(prompt);
+  const topical = graph.nodes.filter((node) => topicMatches(tokens, graphNodeText(node)).length > 0);
+  const sourceProject = (node) => node.project ?? node.properties?.project;
+  const pending = topical.filter((node) => typeof sourceProject(node) === "string" && sourceProject(node) !== "*")
+    .sort((a, b) => (sourceProject(b) === project ? 1 : 0) - (sourceProject(a) === project ? 1 : 0)
+      || topicMatches(tokens, graphNodeText(b)).length - topicMatches(tokens, graphNodeText(a)).length
+      || String(a.id).localeCompare(String(b.id)))
+    .slice(0, 3);
+  const incomplete = new Set(topical.map((node) => node.id));
+  const visited = new Set();
+  const graphs = [graph];
+  const deadline = Date.now() + 1800;
+  let requests = 0;
+  while (pending.length > 0 && requests < 6 && Date.now() < deadline) {
+    const batch = pending.splice(0, Math.min(3, 6 - requests))
+      .filter((node) => !visited.has(node.id));
+    if (batch.length === 0) continue;
+    for (const node of batch) visited.add(node.id);
+    requests += batch.length;
+    const results = await Promise.allSettled(batch.map(async (node) => {
+      const response = await post("/agentmemory/graph/query", {
+        project: sourceProject(node), startNodeId: node.id, maxDepth: 1, limit: 64,
+      }, Math.max(1, Math.min(1200, deadline - Date.now())));
+      return response.json();
+    }));
+    results.forEach((result, index) => {
+      const seed = batch[index];
+      if (result.status !== "fulfilled") return;
+      const page = result.value;
+      if (page?.truncated !== false || page.warning || !Array.isArray(page.nodes)
+        || !Array.isArray(page.edges)) return;
+      const nodes = new Map(page.nodes.filter((node) => node?.id && node?.name
+        && sourceProject(node) === sourceProject(seed)).map((node) => [node.id, node]));
+      if (!nodes.has(seed.id)) return;
+      incomplete.delete(seed.id);
+      const retainedNodes = new Map([[seed.id, nodes.get(seed.id)]]);
+      const retainedEdges = [];
+      for (const edge of page.edges) {
+        const type = String(edge.type).toLowerCase();
+        if (type !== "succeeded_by" && type !== "supersedes") continue;
+        if (!nodes.has(edge.sourceNodeId) || !nodes.has(edge.targetNodeId)) continue;
+        if (edge.project && edge.project !== sourceProject(seed)) continue;
+        if (edge.sourceNodeId !== seed.id && edge.targetNodeId !== seed.id) continue;
+        retainedEdges.push(edge);
+        retainedNodes.set(edge.sourceNodeId, nodes.get(edge.sourceNodeId));
+        retainedNodes.set(edge.targetNodeId, nodes.get(edge.targetNodeId));
+        const successorId = type === "succeeded_by" ? edge.targetNodeId : edge.sourceNodeId;
+        const predecessorId = type === "succeeded_by" ? edge.sourceNodeId : edge.targetNodeId;
+        const nextId = historical
+          ? (edge.sourceNodeId === seed.id ? edge.targetNodeId : edge.sourceNodeId)
+          : predecessorId === seed.id ? successorId : null;
+        const next = nodes.get(nextId);
+        if (!next || (!historical && ["rejected", "blocked"].includes(graphNodeStatus(next)))) continue;
+        if (!visited.has(next.id)) {
+          incomplete.add(next.id);
+          if (!pending.some((node) => node.id === next.id)) pending.push(next);
+        }
+      }
+      graphs.push({ nodes: [...retainedNodes.values()], edges: retainedEdges });
+    });
+  }
+  return { ...mergeGraphs(graphs), incompleteSuccessorNodeIds: [...incomplete] };
+}
+
 async function graphContext(prompt, project) {
   const federatedTokens = graphTokens(prompt).slice(0, MAX_FEDERATED_GRAPH_QUERIES);
   if (federatedTokens.length === 0) return null;
@@ -823,7 +929,7 @@ async function graphContext(prompt, project) {
     graphs.push(result.value);
   });
   if (graphs.length === 0) return null;
-  return formatGraphContext(prompt, project, mergeGraphs(graphs));
+  return formatGraphContext(prompt, project, await expandGraphSuccessions(prompt, project, mergeGraphs(graphs)));
 }
 
 function formatRecallContext(prompt, project, result) {

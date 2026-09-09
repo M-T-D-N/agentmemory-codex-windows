@@ -133,6 +133,32 @@ describe("LocalQwenProvider", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    [new TypeError("fetch failed", { cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }) }), "ECONNREFUSED"],
+    [new DOMException("expired", "TimeoutError"), "TIMEOUT"],
+    [new TypeError("fetch failed"), "UNKNOWN"],
+  ])("reports transport cause and loopback address for probe failures (%s)", async (failure, code) => {
+    globalThis.fetch = vi.fn().mockRejectedValue(failure);
+    const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
+    await expect(provider.probe()).rejects.toMatchObject({
+      message: `local_qwen_transport_failed:${code}:127.0.0.1:8000`, cause: failure,
+    });
+  });
+
+  it("reports generation connection loss and releases the background lease", async () => {
+    const mock = installFetchMock();
+    const implementation = mock.getMockImplementation()!;
+    mock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/chat/completions")) {
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) });
+      }
+      return implementation(input, init);
+    });
+    const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
+    await expect(provider.compress("system", "user")).rejects.toThrow("local_qwen_transport_failed:ECONNRESET:127.0.0.1:8000");
+    expect(existsSync(join(coordinationDir, "qwen-use.lock"))).toBe(false);
+  });
+
   it("discovers a changed model and 262K context without an identity pin", async () => {
     installFetchMock();
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");

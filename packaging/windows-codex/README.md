@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.6`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.7`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.6`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.7`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -186,7 +186,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.6 -OutputDirectory D:\staging\npm-preview4
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.7 -OutputDirectory D:\staging\npm-preview4
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -205,11 +205,15 @@ adapter does not relicense the engine or other dependencies.
 
 The installer supports an owned existing installation. Without `-Execute` it
 only validates release hashes, owner/manifest identity, exact paths, and the
-managed Codex requirements predecessor.
+managed Codex requirements predecessor. It also rejects a workspace-root change
+that would lose an existing LocalAI launcher, before creating backups or stopping
+the service. Use the workspace root from installed `config/codex-workspace.json`;
+the directory holding the project registry is not necessarily that root. Existing
+hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.6\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.6 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.7\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.7 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -375,6 +379,12 @@ its absolute path through `AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT`. Inherited
 values are scrubbed; the service environment file cannot override that path.
 If PowerShell 7 or the existing LocalAI script is absent, cold start is disabled.
 The portable provider does not enable this integration by default.
+A failed probe with no lifecycle integration is logged as
+`local_qwen_autostart_unconfigured`. Transport failures include their underlying
+code and loopback host/port, for example
+`local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000`; connection refusal alone
+does not imply a GPU admission failure. Timeouts and unknown transport causes are
+reported as `TIMEOUT` and `UNKNOWN`, with the original error retained as the cause.
 
 When a provider probe fails, the same internal backlog function is queried in
 read-only mode. Only a batch that passes the existing source, cursor and output
@@ -383,7 +393,11 @@ does not launch Qwen. Startup is single-flight, admission failures have a
 15-minute retry interval, and hooks never wait for model loading. The existing
 host owns manual holds, resource admission and the GPU transition lease; this
 repository does not bundle that host or prescribe universal memory thresholds.
-Successful readiness resumes the ordinary 15-second grace and fair batch drain.
+Successful startup and a subsequent provider probe clear the startup retry
+restriction before the ordinary 15-second grace and fair batch drain. After a
+normal five-minute idle shutdown, newly eligible work can request startup again
+without waiting out the earlier 15-minute interval. Failed launches, failed
+post-start probes and host admission refusals retain that retry backoff.
 
 The returned exact instance identity is retained in memory. Only a worker-started
 instance is released after five minutes of empty backlog or graceful worker

@@ -647,7 +647,7 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
     calls.push({ url, body: JSON.parse(options.body), signal: options.signal });
     return new Response(JSON.stringify(url.endsWith("/search")
       ? { results: [recallEntry("evidence", "federated recall", "other")] }
-      : { nodes: [graphNode("seed", "federated recall")], edges: [] }));
+      : { nodes: [graphNode("seed", "federated recall")], edges: [], truncated: false }));
   };
   try {
     assert.equal(await federatedRecallContext("잔여작업진행", "current"), null);
@@ -656,10 +656,11 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
     const [recall, graph] = await Promise.all([
       federatedRecallContext("federated recall", "current"), graphContext("federated recall", "current"),
     ]);
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
     const search = calls.find((call) => call.url.endsWith("/search"));
     assert.deepEqual(search.body, { query: "federated recall", project: "*", format: "full", limit: 12, token_budget: 1200 });
-    const graphs = calls.filter((call) => call.url.endsWith("/graph/query"));
+    const graphs = calls.filter((call) => call.url.endsWith("/graph/query") && call.body.queries);
+    assert.deepEqual(calls.find((call) => call.body.startNodeId).body, { project: "current", startNodeId: "seed", maxDepth: 1, limit: 64 });
     assert.deepEqual(graphs.map((call) => call.body.project).sort(), ["*", "current"]);
     assert.ok(graphs.every((call) => call.body.limit === 160 && call.body.maxDepth === 1 && call.body.queries.length <= 6));
     assert.ok(calls.every((call) => call.signal instanceof AbortSignal && !call.signal.aborted));
@@ -1358,4 +1359,158 @@ test("relocation registry v3 resolves exact batch roots and preserves fail-close
       m => { m.batch_ledger[1].status = "COMPLETE"; },
     ]) { const m = structuredClone(manifest); change(m); assert.throws(() => read(registry, m)); }
   } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("canonical graph succession preserves direction, history and the input graph", () => {
+  for (const type of ["succeeded_by", "supersedes"]) {
+    const graph = {
+      nodes: [graphNode("old", "alpha", "deferred"), graphNode("new", "beta", "created", "other")],
+      edges: [{ sourceNodeId: type === "succeeded_by" ? "old" : "new",
+        targetNodeId: type === "succeeded_by" ? "new" : "old", type }],
+    };
+    const before = JSON.stringify(graph);
+    const current = formatGraphContext("alpha", "current", graph);
+    assert.match(current, /beta status=created source_project=other/);
+    assert.doesNotMatch(current, /status=deferred/);
+    assert.match(current, type === "succeeded_by" ? /alpha --succeeded_by/ : /beta --supersedes/);
+    const history = formatGraphContext("alpha 과거", "current", graph);
+    assert.match(history, /alpha status=deferred/);
+    assert.match(history, /beta status=created/);
+    assert.equal(JSON.stringify(graph), before);
+  }
+});
+
+test("succession follows a mixed chain, rejects cycles and preserves rejected-successor behavior", () => {
+  const graph = { nodes: [
+    graphNode("a", "alpha", "superseded"), graphNode("b", "beta", "superseded"), graphNode("c", "gamma")],
+    edges: [{ sourceNodeId: "a", targetNodeId: "b", type: "succeeded_by" },
+      { sourceNodeId: "c", targetNodeId: "b", type: "supersedes" }] };
+  assert.match(formatGraphContext("alpha", "current", graph), /gamma status=confirmed/);
+  assert.doesNotMatch(formatGraphContext("alpha", "current", graph), /status=superseded/);
+  graph.edges.push({ sourceNodeId: "c", targetNodeId: "a", type: "succeeded_by" });
+  assert.equal(formatGraphContext("alpha", "current", graph), null);
+  assert.equal(formatGraphContext("alpha", "current", {
+    nodes: [graphNode("a", "alpha")], edges: [{ sourceNodeId: "a", targetNodeId: "a", type: "succeeded_by" }],
+  }), null);
+  for (const status of ["rejected", "blocked"]) {
+    const rejected = { nodes: [graphNode("a", "alpha"), graphNode("b", "beta", status)],
+      edges: [{ sourceNodeId: "a", targetNodeId: "b", type: "succeeded_by" }] };
+    const context = formatGraphContext("alpha", "current", rejected);
+    assert.match(context, /alpha status=confirmed/);
+    assert.doesNotMatch(context, /beta/);
+  }
+});
+
+test("the successor node survives the context budget even when its relation cannot fit", () => {
+  const graph = { nodes: [graphNode("old", "alpha " + "x".repeat(450), "superseded"),
+    graphNode("new", "beta")], edges: [{ sourceNodeId: "old", targetNodeId: "new", type: "succeeded_by" }] };
+  const context = formatGraphContext("alpha", "current", graph);
+  assert.match(context, /beta status=confirmed/);
+  assert.ok(context.length <= 500);
+});
+
+async function withSuccessionServer(graph, run, changePage = (page) => page) {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    assert.ok(url.endsWith("/agentmemory/graph/query"));
+    assert.equal(options.method, "POST");
+    let page;
+    if (body.queries) {
+      const nodes = graph.nodes.filter((node) => (body.project === "*" || node.project === body.project)
+        && body.queries.some((query) => node.name.toLowerCase().includes(query)));
+      const ids = new Set(nodes.map((node) => node.id));
+      page = { nodes, edges: graph.edges.filter((edge) => ids.has(edge.sourceNodeId) && ids.has(edge.targetNodeId)),
+        truncated: false };
+    } else {
+      const edges = graph.edges.filter((edge) => edge.sourceNodeId === body.startNodeId || edge.targetNodeId === body.startNodeId);
+      const ids = new Set([body.startNodeId, ...edges.flatMap((edge) => [edge.sourceNodeId, edge.targetNodeId])]);
+      page = { nodes: graph.nodes.filter((node) => ids.has(node.id)), edges, truncated: false };
+    }
+    return new Response(JSON.stringify(await changePage(page, body)));
+  };
+  try { return await run(calls); } finally { globalThis.fetch = originalFetch; }
+}
+
+test("automatic graph lookup expands renamed successors through exact source projects", async () => {
+  const graph = { nodes: [graphNode("a", "alpha", "superseded", "other"),
+    graphNode("b", "beta", "superseded", "other"), graphNode("c", "gamma", "confirmed", "other"),
+    graphNode("noise", "unrelated GPU experiment", "confirmed", "other")],
+    edges: [{ sourceNodeId: "a", targetNodeId: "b", type: "succeeded_by" },
+      { sourceNodeId: "c", targetNodeId: "b", type: "supersedes" },
+      { sourceNodeId: "a", targetNodeId: "noise", type: "related_to" }] };
+  await withSuccessionServer(graph, async (calls) => {
+    const context = await graphContext("alpha", "current");
+    assert.match(context, /gamma status=confirmed source_project=other/);
+    assert.doesNotMatch(context, /status=superseded|GPU/);
+    const expansions = calls.filter((call) => call.startNodeId);
+    assert.deepEqual(expansions.map((call) => call.startNodeId), ["a", "b", "c"]);
+    assert.ok(expansions.every((call) => call.project === "other" && call.maxDepth === 1 && call.limit === 64));
+  });
+  await withSuccessionServer(graph, async () => {
+    const context = await graphContext("alpha 과거", "current");
+    assert.match(context, /alpha status=superseded/);
+    assert.match(context, /succeeded_by/);
+  });
+});
+
+test("automatic graph lookup abstains on failed, incomplete or cyclic successor expansion", async () => {
+  const graph = { nodes: [graphNode("a", "alpha"), graphNode("b", "beta")],
+    edges: [{ sourceNodeId: "a", targetNodeId: "b", type: "succeeded_by" }] };
+  for (const failure of ["timeout", "truncated", "warning", "missing"]) {
+    await withSuccessionServer(graph, async () => {
+      assert.equal(await graphContext("alpha", "current"), null, failure);
+    }, (page, body) => {
+      if (body.startNodeId !== "b") return page;
+      if (failure === "timeout") throw new Error("synthetic successor timeout");
+      if (failure === "missing") return { nodes: [], edges: [], truncated: false };
+      return { ...page, ...(failure === "truncated" ? { truncated: true } : { warning: "incomplete snapshot" }) };
+    });
+  }
+  graph.edges.push({ sourceNodeId: "b", targetNodeId: "a", type: "succeeded_by" });
+  await withSuccessionServer(graph, async () => {
+    assert.equal(await graphContext("alpha", "current"), null);
+  });
+});
+
+test("automatic successor expansion never crosses the seed project and remains bounded", async () => {
+  const crossProject = { nodes: [graphNode("a", "alpha"), graphNode("b", "private-beta", "confirmed", "private")],
+    edges: [{ sourceNodeId: "a", targetNodeId: "b", type: "succeeded_by" }] };
+  await withSuccessionServer(crossProject, async (calls) => {
+    const context = await graphContext("alpha", "current");
+    assert.doesNotMatch(context, /private/);
+    assert.ok(calls.filter((call) => call.startNodeId).every((call) => call.project === "current"));
+  });
+  const chain = { nodes: Array.from({ length: 10 }, (_, i) => graphNode(String(i), i === 0 ? "alpha" : "step-" + i)),
+    edges: Array.from({ length: 9 }, (_, i) => ({ sourceNodeId: String(i), targetNodeId: String(i + 1), type: "succeeded_by" })) };
+  await withSuccessionServer(chain, async (calls) => {
+    assert.equal(await graphContext("alpha", "current"), null);
+    assert.equal(calls.filter((call) => call.startNodeId).length, 6);
+  });
+});
+
+test("a superseded dead end cannot revive its predecessor and history follows the entire loaded chain", () => {
+  const graph = { nodes: [graphNode("a", "alpha", "deferred"), graphNode("b", "beta", "superseded")],
+    edges: [{ sourceNodeId: "a", targetNodeId: "b", type: "succeeded_by" }] };
+  assert.equal(formatGraphContext("alpha", "current", graph), null);
+  graph.nodes.push(graphNode("c", "gamma"));
+  graph.edges.push({ sourceNodeId: "b", targetNodeId: "c", type: "succeeded_by" });
+  const history = formatGraphContext("gamma 과거", "current", graph);
+  assert.match(history, /alpha status=deferred/);
+  assert.match(history, /gamma status=confirmed/);
+});
+
+test("historical intent is separated from graph topics and Korean history selects predecessors", async () => {
+  assert.deepEqual(graphTokens("alpha 과거 변경이력 history"), ["alpha"]);
+  const graph = { nodes: [graphNode("a", "alpha", "superseded"), graphNode("b", "beta"),
+    graphNode("noise", "과거 unrelated")],
+    edges: [{ sourceNodeId: "a", targetNodeId: "b", type: "succeeded_by" }] };
+  await withSuccessionServer(graph, async () => {
+    const context = await graphContext("beta 이력", "current");
+    assert.match(context, /alpha status=superseded/);
+    assert.match(context, /beta status=confirmed/);
+    assert.doesNotMatch(context, /unrelated/);
+  });
 });

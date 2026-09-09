@@ -98,6 +98,35 @@ test('fresh dry-run writes nothing; execute prepares a protected owned root and 
   } finally { await rm(f.dir, { recursive: true, force: true }); }
 });
 
+test('update rejects a workspace that loses existing LocalAI before any cutover writes', { skip: !windows }, async () => {
+  const f = await fixture();
+  try {
+    const launcher = path.join(f.workspace, 'projects/local-ai/scripts/Invoke-LocalAI.ps1');
+    await mkdir(path.dirname(launcher), { recursive: true });
+    await writeFile(launcher, '# existing host fixture');
+    const prepared = runInstaller(f.release, f.root, f.workspace, ['-Fresh', '-Execute']);
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const manifestPath = path.join(f.root, 'config/install-manifest.json');
+    const installed = JSON.parse(await readFile(manifestPath, 'utf8'));
+    installed.installation_status = 'activated';
+    await writeFile(manifestPath, JSON.stringify(installed));
+    const configPath = path.join(f.root, 'config/codex-workspace.json');
+    const configBefore = await readFile(configPath, 'utf8');
+    const manifestBefore = await readFile(manifestPath, 'utf8');
+    const wrongRoot = path.join(f.workspace, 'control');
+    await mkdir(wrongRoot);
+    await copyFile(path.join(f.workspace, 'projects.json'), path.join(wrongRoot, 'projects.json'));
+    for (const args of [[], ['-Execute']]) {
+      const result = runInstaller(f.release, f.root, wrongRoot, args);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /WorkspaceRoot would disconnect/);
+      assert.equal(await readFile(configPath, 'utf8'), configBefore);
+      assert.equal(await readFile(manifestPath, 'utf8'), manifestBefore);
+      await assert.rejects(readdir(path.join(f.root, 'backups/releases')), { code: 'ENOENT' });
+    }
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
 test('installer refuses a tampered release before creating fresh state', { skip: !windows }, async () => {
   const f = await fixture();
   try {
