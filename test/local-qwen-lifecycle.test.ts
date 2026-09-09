@@ -8,6 +8,23 @@ const config = {
 const token = "1234567890abcdef1234567890abcdef";
 
 describe("host Qwen lifecycle", () => {
+  it("resolves portable PowerShell from absolute PATH entries without a Program Files install", async () => {
+    const previous = process.env.PATH;
+    process.env.PATH = 'relative;"D:\\Portable PowerShell"';
+    try {
+      const invoke = vi.fn(async () => JSON.stringify({ status: "deferred", reason: "test" }));
+      const host = createLocalQwenLifecycle({
+        platform: "win32", script: config.script,
+        exists: (p) => [config.script, "D:\\Portable PowerShell\\pwsh.exe"].includes(p), invoke,
+      })!;
+      expect(host).toBeDefined();
+      await host.start();
+      expect(invoke.mock.calls[0]?.[0]).toBe("D:\\Portable PowerShell\\pwsh.exe");
+    } finally {
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
+    }
+  });
   it("only enables a present, explicit Windows host script", () => {
     expect(createLocalQwenLifecycle({ ...config, platform: "linux" })).toBeUndefined();
     expect(createLocalQwenLifecycle({ ...config, script: "relative.ps1" })).toBeUndefined();

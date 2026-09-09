@@ -20,19 +20,23 @@ export function createLocalQwenLifecycle(options: {
   invoke?: (executable: string, args: string[]) => Promise<string>;
 } = {}): LocalQwenLifecycle | undefined {
   const script = options.script ?? getEnvVar("AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT");
-  const powershell = options.powershell ?? win32.join(
-    process.env.ProgramFiles ?? "C:\\Program Files", "PowerShell", "7", "pwsh.exe",
-  );
   const exists = options.exists ?? existsSync;
   if ((options.platform ?? process.platform) !== "win32" || !script) return;
+  const powershell = options.powershell ?? [
+    ...(process.env.PATH ?? "").split(";").map((entry) => entry.trim().replace(/^"|"$/g, ""))
+      .filter((entry) => win32.isAbsolute(entry)).map((entry) => win32.join(entry, "pwsh.exe")),
+    win32.resolve(win32.dirname(process.execPath), "..", "..", "native", "powershell", "pwsh.exe"),
+    win32.join(process.env.ProgramFiles ?? "C:\\Program Files", "PowerShell", "7", "pwsh.exe"),
+  ].find(exists);
   if (!win32.isAbsolute(script) || win32.basename(script).toLowerCase() !== "invoke-localai.ps1"
-    || !win32.isAbsolute(powershell) || !exists(script) || !exists(powershell)) {
+    || !powershell || !win32.isAbsolute(powershell) || !exists(script) || !exists(powershell)) {
     logger.warn("Local Qwen lifecycle unavailable: invalid host launcher");
     return;
   }
   const invoke = options.invoke ?? (async (executable: string, args: string[]) => {
     const env = { ...process.env };
     delete env.AGENTMEMORY_SECRET;
+    env.PATH = [win32.dirname(executable), env.PATH].filter(Boolean).join(";");
     // LocalAI owns the readiness deadline and exact service identity.
     // Killing its wrapper on a second timeout could orphan a GPU transition.
     const { stdout } = await execute(executable, args, {
