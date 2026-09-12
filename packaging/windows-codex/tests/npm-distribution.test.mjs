@@ -206,3 +206,119 @@ test('ZIP extraction includes hidden entries and rejects traversal without desti
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('runtime recovery tolerates transient failures and retains owned-stop guards', { skip: !windows }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'am-health-test-'));
+  try {
+    const harness = path.join(dir, 'health.ps1');
+    await writeFile(harness, `param([string]$Source, [string]$Temp)
+$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Daemon parse failed' }
+foreach ($name in @('Test-RuntimeRecoveryDue','Stop-OwnedProcess')) {
+  $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
+  if (!$function) { throw "Missing runtime function: $name" }
+  Invoke-Expression $function.Extent.Text
+}
+$base=[DateTime]::UtcNow
+$state=@{LastProbeUtc=$base;ConsecutiveFailures=0}
+$script:probes=0
+$fail={ $script:probes++; return $false }
+if (Test-RuntimeRecoveryDue $state ($base.AddSeconds(29)) $fail) {throw 'Early recovery'}
+if ($script:probes -ne 0) {throw 'Probe ran before its interval'}
+foreach ($second in @(30,60)) {
+  if (Test-RuntimeRecoveryDue $state ($base.AddSeconds($second)) $fail) {throw 'Transient failure caused recovery'}
+}
+if (!(Test-RuntimeRecoveryDue $state ($base.AddSeconds(90)) $fail)) {throw 'Persistent stall did not request recovery'}
+if ($script:probes -ne 3) {throw 'Unexpected probe count'}
+if (Test-RuntimeRecoveryDue $state ($base.AddSeconds(120)) {return $true}) {throw 'Successful recovery check was ignored'}
+if ($state.ConsecutiveFailures -ne 0) {throw 'Success did not reset history'}
+if (Test-RuntimeRecoveryDue $state ($base.AddSeconds(150)) {throw 'transport timeout'}) {throw 'Single timeout caused recovery'}
+if (Test-RuntimeRecoveryDue $state ($base.AddSeconds(180)) {return $true}) {throw 'Recovered transport was rejected'}
+if (Test-RuntimeRecoveryDue $state ($base.AddSeconds(210)) $fail) {throw 'Old failures survived a success'}
+
+# Exercise the actual cleanup function without terminating a real process.
+$fake=[Diagnostics.Process]::new()
+$script:kills=0; $script:waits=@(); $script:checks=0
+$fake | Add-Member -MemberType ScriptMethod -Name WaitForExit -Force -Value {param($ms) $script:waits+= $ms; return $false}
+$fake | Add-Member -MemberType ScriptMethod -Name Kill -Force -Value {$script:kills++}
+function Test-OwnedProcess {param($Process,$Identity) $script:checks++; return $script:checks -eq 1}
+$stop=Join-Path $Temp 'owned-stop.json'
+Stop-OwnedProcess -Process $fake -Identity @{pid=42} -GracefulStopPath $stop -GracefulStopToken 'fixture-token'
+if ($script:kills -ne 0) {throw 'Changed ownership was terminated'}
+if ($script:waits.Count -ne 1 -or $script:waits[0] -ne 10000) {throw 'Graceful window changed'}
+$request=Get-Content $stop -Raw | ConvertFrom-Json
+if ($request.worker_pid -ne 42 -or $request.token -cne 'fixture-token') {throw 'Wrong stop request'}
+function Test-OwnedProcess {param($Process,$Identity) return $true}
+Stop-OwnedProcess -Process $fake -Identity @{pid=42} -GracefulStopPath $stop -GracefulStopToken 'fixture-token'
+if ($script:kills -ne 1) {throw 'Hung owned process did not use bounded cleanup'}
+$fake.Dispose()
+'RUNTIME_RECOVERY_OK'
+`);
+    const result = spawnSync(ps, powershellArgs(harness, { Source: path.join(packaging, 'powershell/agentmemory-daemon.ps1'), Temp: dir }),
+      { encoding: 'utf8', timeout: 30_000, windowsHide: true, env: powershellEnvironment() });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /RUNTIME_RECOVERY_OK/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('stall evidence is identity-scoped, excludes payloads and survives invalid snapshots', { skip: !windows }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'am-stall-test-'));
+  try {
+    const harness = path.join(dir, 'stall.ps1');
+    await writeFile(harness, `param([string]$Source,[string]$Temp)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if ($errors.Count) {throw 'Daemon parse failed'}
+foreach($name in @('Save-RuntimeStallEvidence','Get-StallProcessSample')) {
+  $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+  if(!$fn){throw 'Missing diagnostic function'}
+  Invoke-Expression $fn.Extent.Text
+}
+function Test-OwnedProcess {param($Process,$Identity) return $Process.Id -eq $Identity.pid}
+$process=[Diagnostics.Process]::GetCurrentProcess()
+$identity=@{pid=$PID}
+$run='20260912T010000000Z'
+$inputPath=Join-Path $Temp "worker-diagnostics-$run.json"
+$raw=@{schema=1;runId=$run;pid=$PID;observedAt=1;heartbeatAt=1;heartbeatAgeMs=2;droppedEvents=0;droppedActive=0;
+  memory=@{rss=10;heapUsed=2;heapTotal=3;external=1;secret='PRIVATE_SECRET'};
+  active=@(@{id=1;parent=$null;kind='state';name='state::get';startedAt=1;ageMs=2;payload='PRIVATE_PAYLOAD'});
+  recent=@(@{id=2;parent=$null;kind='function';name='mcp::tools::call';startedAt=1;durationMs=2;outcome='ok';payload='PRIVATE_MCP_PAYLOAD'});environment='PRIVATE_ENV'}
+$raw | ConvertTo-Json -Depth 6 | Set-Content $inputPath
+Save-RuntimeStallEvidence $Temp $run $process $identity $process $identity
+$output=Join-Path $Temp "stall-$run.json"
+$text=Get-Content $output -Raw
+if($text -cmatch 'PRIVATE_'){throw 'Sensitive extra fields leaked'}
+$saved=$text | ConvertFrom-Json
+if($saved.snapshot_status -ne 'available' -or !$saved.worker.available -or $saved.snapshot.active[0].name -ne 'state::get' -or $saved.snapshot.recent[0].name -ne 'mcp::tools::call'){throw 'Missing diagnostic evidence'}
+$hash=(Get-FileHash $output).Hash
+Save-RuntimeStallEvidence $Temp $run $process $identity $process $identity
+if((Get-FileHash $output).Hash -ne $hash){throw 'Existing incident overwritten'}
+$next='20260912T010001000Z'
+'invalid JSON' | Set-Content (Join-Path $Temp "worker-diagnostics-$next.json")
+Save-RuntimeStallEvidence $Temp $next $process $identity $process $identity
+$saved=Get-Content (Join-Path $Temp "stall-$next.json") -Raw | ConvertFrom-Json
+if($saved.snapshot_status -ne 'invalid' -or !$saved.worker.available){throw 'Invalid snapshot prevented OS evidence'}
+$wrong=Get-StallProcessSample $process @{pid=0}
+if($wrong.available -or $wrong.reason -ne 'identity_mismatch'){throw 'Wrong process sampled'}
+$last='20260912T010002000Z'
+$raw.runId=$last; $raw.pid=0
+$raw | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $Temp "worker-diagnostics-$last.json")
+Save-RuntimeStallEvidence $Temp $last $process $identity $process $identity
+$saved=Get-Content (Join-Path $Temp "stall-$last.json") -Raw | ConvertFrom-Json
+if($saved.snapshot_status -ne 'identity_mismatch' -or $null -ne $saved.snapshot){throw 'Wrong run snapshot accepted'}
+$process.Dispose()
+'STALL_EVIDENCE_OK'
+`);
+    const result = spawnSync(ps, powershellArgs(harness, {Source:path.join(packaging,'powershell/agentmemory-daemon.ps1'),Temp:dir}),
+      {encoding:'utf8',timeout:30_000,windowsHide:true,env:powershellEnvironment()});
+    assert.equal(result.status,0,result.stdout+result.stderr);
+    assert.match(result.stdout,/STALL_EVIDENCE_OK/);
+    const source = await readFile(path.join(packaging,'powershell/agentmemory-daemon.ps1'),'utf8');
+    assert.ok(source.indexOf('Save-RuntimeStallEvidence -LogsPath') < source.indexOf("$terminalReason = 'runtime_unresponsive'"));
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});

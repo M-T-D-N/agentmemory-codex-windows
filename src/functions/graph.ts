@@ -3241,13 +3241,28 @@ export function registerGraphFunction(
               const cursorMode = data.cursorMode === "bootstrap_backfill"
                 ? "bootstrap_backfill"
                 : "forward";
+              const currentObservations = await kv.list<CompressedObservation>(KV.observations(sessionId));
+              const cursorField = cursorMode === "bootstrap_backfill"
+                ? "semanticGraphBackfillThroughObservationId"
+                : "semanticGraphThroughObservationId";
+              const processedIds = new Set(processedObservationIds);
+              const latestProcessed = currentObservations
+                .filter((observation) => observation.sessionId === sessionId && processedIds.has(observation.id))
+                .sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id))
+                .at(-1);
+              if (!latestProcessed) throw new Error("processed observations disappeared before cursor update");
+              const currentCursor = currentSession[cursorField];
+              const currentThrough = currentObservations.find((observation) =>
+                observation.sessionId === sessionId && observation.id === currentCursor);
+              const canAdvance = !currentCursor || (currentThrough && (
+                latestProcessed.timestamp.localeCompare(currentThrough.timestamp)
+                || latestProcessed.id.localeCompare(currentThrough.id)
+              ) > 0);
               const updates: Array<{ type: "set"; path: string; value: unknown }> = [
                 {
                   type: "set",
-                  path: cursorMode === "bootstrap_backfill"
-                    ? "semanticGraphBackfillThroughObservationId"
-                    : "semanticGraphThroughObservationId",
-                  value: processedObservationIds[processedObservationIds.length - 1],
+                  path: cursorField,
+                  value: canAdvance ? latestProcessed.id : currentCursor,
                 },
                 {
                   type: "set",
@@ -3269,7 +3284,6 @@ export function registerGraphFunction(
                   value: Math.max(0, Math.floor(data.bootstrapSkipped)),
                 });
               }
-              const currentObservations = await kv.list<CompressedObservation>(KV.observations(sessionId));
               const projectedSession = {
                 ...currentSession,
                 ...Object.fromEntries(updates.map((update) => [update.path, update.value])),

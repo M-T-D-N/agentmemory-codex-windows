@@ -1,4 +1,4 @@
-import { registerObservationWriter } from "../state/observation-write.js";
+import { withObservationRecovery } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import type {
   Session,
@@ -34,6 +34,8 @@ import { recordAudit } from "./audit.js";
 import { indexRecords } from "./search.js";
 import { resetLessonIndex } from "./lessons.js";
 import { logger } from "../logger.js";
+import { isGraphExtractionEnabled } from "../config.js";
+import { semanticGraphCursorsAtEnd } from "./semantic-graph-backlog.js";
 
 // Bounded-concurrency chunk size for the import delete/write loops. A
 // "replace" or "merge" of a large export (up to MAX_TOTAL_OBSERVATIONS,
@@ -54,11 +56,15 @@ async function runChunked<T>(
 ): Promise<void> {
   for (let i = 0; i < items.length; i += IMPORT_CHUNK_SIZE) {
     const chunk = items.slice(i, i + IMPORT_CHUNK_SIZE);
-    await Promise.all(chunk.map(fn));
+    const results = await Promise.allSettled(chunk.map(fn));
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
   }
 }
 
-export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
+export function registerExportImportFunction(
+  sdk: ISdk, kv: StateKV, onObservationsImported?: () => void,
+): void {
   sdk.registerFunction("mem::export", 
     async (data?: { maxSessions?: number; offset?: number }) => {
       const rawMax = Number(data?.maxSessions);
@@ -201,11 +207,13 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  registerObservationWriter(sdk, "mem::import",
+  sdk.registerFunction("mem::import",
     async (data: {
       exportData: ExportData;
       strategy?: "merge" | "replace" | "skip";
     }) => {
+      let wakeGraph = false;
+      const result = await withObservationRecovery(async () => {
       if (
         !data?.exportData ||
         typeof data.exportData !== "object" ||
@@ -303,6 +311,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         memories: 0,
         summaries: 0,
         skipped: 0,
+        reconciledSessions: 0,
       };
 
       if (strategy === "replace") {
@@ -407,12 +416,12 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       // ones the "skip" strategy declined to write.
       const indexObs: CompressedObservation[] = [];
       const indexMems: Memory[] = [];
+      const changedObservationSessions = new Set<string>();
 
       await runChunked(importData.sessions, async (session) => {
         if (strategy === "skip") {
           const existing = await kv
-            .get<Session>(KV.sessions, session.id)
-            .catch(() => null);
+            .get<Session>(KV.sessions, session.id);
           if (existing) {
             stats.skipped++;
             return;
@@ -426,8 +435,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         await runChunked(obs, async (o) => {
           if (strategy === "skip") {
             const existing = await kv
-              .get<CompressedObservation>(KV.observations(sessionId), o.id)
-              .catch(() => null);
+              .get<CompressedObservation>(KV.observations(sessionId), o.id);
             if (existing) {
               stats.skipped++;
               return;
@@ -435,10 +443,32 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           }
           o.origin = importOrigin(o.origin, o.timestamp);
           await kv.set(KV.observations(sessionId), o.id, o);
+          changedObservationSessions.add(sessionId);
           stats.observations++;
           indexObs.push(o);
         });
       }
+
+      const countSessionIds = new Set([
+        ...importData.sessions.map((session) => session.id),
+        ...Object.keys(importData.observations),
+      ]);
+      await runChunked([...countSessionIds], async (sessionId) => {
+        const session = await kv.get<Session>(KV.sessions, sessionId);
+        if (!session) return;
+        const observations = await kv.list<CompressedObservation>(KV.observations(sessionId));
+        const updates: Array<{ type: "set"; path: string; value: unknown }> = [];
+        if (session.observationCount !== observations.length) {
+          updates.push({ type: "set", path: "observationCount", value: observations.length });
+          stats.reconciledSessions++;
+        }
+        if (changedObservationSessions.has(sessionId) && isGraphExtractionEnabled()
+          && !semanticGraphCursorsAtEnd(session, observations)) {
+          updates.push({ type: "set", path: "semanticGraphStatus", value: "pending" });
+          wakeGraph = true;
+        }
+        if (updates.length) await kv.update(KV.sessions, sessionId, updates);
+      });
 
       await runChunked(importData.memories, async (memory) => {
         if (strategy === "skip") {
@@ -688,6 +718,12 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         stats,
       });
       return { success: true, strategy, ...stats };
+      });
+      if (wakeGraph) {
+        try { onObservationsImported?.(); }
+        catch { logger.warn("Graph wake deferred after import was stored"); }
+      }
+      return result;
     },
   );
 }

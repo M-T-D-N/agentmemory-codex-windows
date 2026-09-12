@@ -257,6 +257,75 @@ describe("Graph Functions", () => {
         : { semanticGraphThroughObservationId: "obs_1" }) });
   });
 
+  it.each([
+    ["forward", false], ["forward", true],
+    ["bootstrap_backfill", false], ["bootstrap_backfill", true],
+  ])("extracts historical provenance without rewinding %s (equal timestamp: %s)", async (mode, sameTime) => {
+    const second = { ...testObs, id: "obs_2", timestamp: sameTime ? testObs.timestamp : "2026-02-01T10:01:00Z" };
+    const cursorField = mode === "bootstrap_backfill" ? "semanticGraphBackfillThroughObservationId" : "semanticGraphThroughObservationId";
+    await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", observationCount: 2,
+      semanticGraphStatus: "complete", semanticGraphThroughObservationId: "obs_2", [cursorField]: "obs_2" });
+    await kv.set("mem:obs:ses_1", "obs_2", second);
+    await kv.set("mem:obs:ses_1", "obs_1", testObs);
+    mockProvider.compress.mockResolvedValueOnce('<entities><entity type="decision" name="Historical choice" source_observation_ids="obs_1"/></entities><relationships></relationships>');
+    expect(await sdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1",
+      observations: [testObs], cursorMode: mode })).toMatchObject({ success: true, semanticCompleted: true });
+    expect(await kv.get("mem:sessions", "ses_1")).toMatchObject({
+      semanticGraphStatus: "complete", semanticGraphThroughObservationId: "obs_2", [cursorField]: "obs_2" });
+    expect((await kv.list<GraphNode>("mem:graph:nodes")).find(node => node.name === "Historical choice"))
+      .toMatchObject({ sourceObservationIds: ["obs_1"], sourceSessionIds: ["ses_1"] });
+  });
+
+  it.each(["forward", "bootstrap_backfill"])("uses canonical order for an unsorted %s extraction", async mode => {
+    const second = { ...testObs, id: "obs_2", timestamp: "2026-02-01T10:01:00Z" };
+    const third = { ...testObs, id: "obs_3", timestamp: second.timestamp };
+    const cursorField = mode === "bootstrap_backfill" ? "semanticGraphBackfillThroughObservationId" : "semanticGraphThroughObservationId";
+    await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", [cursorField]: "obs_1",
+      ...(mode === "bootstrap_backfill" ? { semanticGraphThroughObservationId: "obs_3" } : {}) });
+    for (const obs of [third, testObs, second]) await kv.set("mem:obs:ses_1", obs.id, obs);
+    mockProvider.compress.mockResolvedValueOnce('<entities></entities><relationships></relationships>');
+    expect(await sdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1",
+      observations: [third, second], cursorMode: mode })).toMatchObject({ success: true, semanticCompleted: true });
+    expect(await kv.get("mem:sessions", "ses_1")).toMatchObject({ [cursorField]: "obs_3", semanticGraphStatus: "complete" });
+  });
+
+  it.each(["forward", "bootstrap_backfill"])("compares the current %s cursor after provider inference", async mode => {
+    const second = { ...testObs, id: "obs_2", timestamp: "2026-02-01T10:01:00Z" };
+    const third = { ...testObs, id: "obs_3", timestamp: "2026-02-01T10:02:00Z" };
+    const cursorField = mode === "bootstrap_backfill" ? "semanticGraphBackfillThroughObservationId" : "semanticGraphThroughObservationId";
+    await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", [cursorField]: "obs_1",
+      ...(mode === "bootstrap_backfill" ? { semanticGraphThroughObservationId: "obs_3" } : {}) });
+    for (const obs of [testObs, second, third]) await kv.set("mem:obs:ses_1", obs.id, obs);
+    mockProvider.compress.mockImplementationOnce(async () => {
+      await kv.update("mem:sessions", "ses_1", [{ type: "set", path: cursorField, value: "obs_3" }]);
+      return '<entities></entities><relationships></relationships>';
+    });
+    expect(await sdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1",
+      observations: [second], cursorMode: mode })).toMatchObject({ success: true });
+    expect(await kv.get("mem:sessions", "ses_1")).toMatchObject({ [cursorField]: "obs_3", semanticGraphStatus: "complete" });
+  });
+
+  it("keeps an unprocessed tail pending after historical extraction", async () => {
+    await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a",
+      semanticGraphThroughObservationId: "obs_2", semanticGraphStatus: "pending" });
+    for (const [id, timestamp] of [["obs_1", "10:00"], ["obs_2", "10:01"], ["obs_3", "10:02"]]) {
+      await kv.set("mem:obs:ses_1", id, { ...testObs, id, timestamp: `2026-02-01T${timestamp}:00Z` });
+    }
+    mockProvider.compress.mockResolvedValueOnce('<entities></entities><relationships></relationships>');
+    expect(await sdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [testObs] }))
+      .toMatchObject({ success: true });
+    expect(await kv.get("mem:sessions", "ses_1")).toMatchObject({ semanticGraphThroughObservationId: "obs_2", semanticGraphStatus: "pending" });
+  });
+
+  it("does not replace an unknown cursor with an arbitrary historical position", async () => {
+    await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", semanticGraphThroughObservationId: "missing_cursor" });
+    await kv.set("mem:obs:ses_1", "obs_1", testObs);
+    mockProvider.compress.mockResolvedValueOnce('<entities></entities><relationships></relationships>');
+    expect(await sdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [testObs] }))
+      .toMatchObject({ success: true, semanticCompleted: true });
+    expect(await kv.get("mem:sessions", "ses_1")).toMatchObject({ semanticGraphThroughObservationId: "missing_cursor", semanticGraphStatus: "pending" });
+  });
+
   it.each(["missing", "changed_project"])("does not update postflight session metadata when it is %s", async (mode) => {
     await kv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a" });
     await kv.set("mem:obs:ses_1", "obs_1", testObs);

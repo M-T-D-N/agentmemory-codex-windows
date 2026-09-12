@@ -1,3 +1,4 @@
+import { attachRuntimeDiagnostics } from "./telemetry/runtime-diagnostics.js";
 import { registerWorker, TriggerAction } from "iii-sdk";
 import {
   hydrateProcessEnvFromFile,
@@ -247,6 +248,10 @@ async function main() {
     },
   });
 
+  const runtimeDiagnostics = attachRuntimeDiagnostics(sdk, {
+    file: process.env.AGENTMEMORY_DIAGNOSTICS_FILE,
+    runId: process.env.AGENTMEMORY_DIAGNOSTICS_RUN_ID,
+  });
   writeWorkerPidfile();
 
   const kv = new StateKV(sdk);
@@ -290,7 +295,8 @@ async function main() {
   registerTimelineFunction(sdk, kv);
   registerProfileFunction(sdk, kv);
   registerAutoForgetFunction(sdk, kv);
-  registerExportImportFunction(sdk, kv);
+  registerExportImportFunction(sdk, kv,
+    () => semanticGraphBacklogScheduler?.wake());
   registerEnrichFunction(sdk, kv);
 
   const claudeBridgeConfig = loadClaudeBridgeConfig();
@@ -687,6 +693,7 @@ async function main() {
       console.warn(`[agentmemory] Failed to save index on shutdown:`, err);
     });
     await sdk.shutdown();
+    await runtimeDiagnostics?.stop();
     clearWorkerPidfile();
     process.exit(0);
   };

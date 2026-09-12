@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.7`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.8`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.7`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.8`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -186,7 +186,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.7 -OutputDirectory D:\staging\npm-preview4
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.8 -OutputDirectory D:\staging\npm-preview4
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -212,8 +212,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.7\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.7 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.8\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.8 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -291,6 +291,42 @@ observation and enriched-chunk bucket, including legacy sessions without IDs and
 orphan buckets. A failed scope/read operation fails the preview; it never silently
 claims complete coverage. The ID-less session count remains diagnostic metadata.
 It does not remove records or create a recovery copy.
+
+Local revision r94 reconciles `Session.observationCount` from the actual visible
+observation rows for sessions or observation buckets included in an import.
+For an exact existing session, `POST /agentmemory/import` with `strategy: "skip"`,
+an empty `sessions` array and `observations: { "<exact-session-id>": [] }` repairs
+only its count; provide the normal compatibility version, export timestamp and
+empty `memories`/`summaries` arrays. Verify the session's registered project first.
+It neither imports observations nor changes capture state or graph cursors.
+The response reports `reconciledSessions`; an identical second repair reports 0.
+Existing recovery-protected sessions remain subject to the import prohibition.
+
+Local revision r97 marks an affected session pending when an import actually
+writes observations and the existing graph cursors leave an unprocessed tail.
+It notifies the same backlog scheduler after exclusive import access ends.
+Capture metadata and forward/backfill cursors stay intact. A complete backup
+restore, duplicate-only import or count-only repair does not reopen graph work;
+disabled extraction remains disabled. Historical inserts before an already
+processed cursor still require explicit scoped extraction/backfill and provenance
+verification; r97 does not rewind completed history. Notification failure leaves
+committed data pending for the existing recovery probe instead of failing import.
+
+Local revision r98 keeps forward and bootstrap-backfill cursors monotonic when
+explicitly extracting historical observations. The existing session lock covers
+comparison with current official timestamp/ID order and completion calculation.
+Unsorted selected inputs do not rewind progress; historical graph provenance is
+still extracted, and an unprocessed tail stays pending. An unknown existing
+cursor is preserved for explicit repair rather than replaced with a guessed
+position. This does not automatically extract historical imports before a cursor.
+
+Imports use the existing single-worker exclusive observation lifecycle. An
+already active writer causes a no-change busy failure; incoming writers wait
+until the import settles. This is not a database transaction: a failed import
+may have committed rows, and every started chunk write settles before the
+exclusive interval ends. Inspect canonical results after ambiguous failures.
+Normal small repairs should be bounded to the exact affected sessions; large
+imports can delay ordinary capture and should run in a quiet maintenance window.
 
 Local revision r80 adds recoverable empty-observation actions to this same REST
 endpoint (no new MCP tool or REST endpoint). Pass `action: "delete-empty"`, one
@@ -553,3 +589,57 @@ exact path, rejecting reparse targets, and confirming that the active manifest,
 task commands, and owned processes do not reference them. Cleanup is an
 explicit maintenance action, not a new runtime gate or a reason to rewrite
 canonical data.
+
+### Runtime responsiveness recovery
+
+The Windows daemon checks the database-free liveness and MCP metadata routes
+every 30 seconds, with a three-second timeout per route and loopback proxy
+bypass. Three consecutive failures end that owned run with
+`runtime_unresponsive`; a successful check clears the failure count. Cleanup
+uses the existing exact process identity checks and graceful-stop timeout.
+The existing watchdog can restart only after the reserved ports are clear and
+the Codex consumer is present. No second watchdog or memory store is added.
+Authenticated stop requests use the same bounded cleanup even when the worker
+cannot process its stop file. This limits the impact of a stalled worker; it
+does not establish or repair the underlying cause of the stall.
+
+
+### Stall diagnostics (local r96)
+
+The Windows daemon enables a diagnostic worker thread inside the existing Node
+process. It records only registered function names, the six allowed state RPC
+names, numeric local parent IDs, start/end times, coarse outcomes and memory
+counters. Payloads, results, state keys/scopes, request URLs, credentials,
+environment variables, raw error text and heap contents are never recorded.
+Portable hosts remain unchanged unless they explicitly supply the diagnostic
+file and valid run identity.
+
+The thread updates `logs/worker-diagnostics-<run-id>.json` once a second using a
+temporary file and rename. It continues when the main JavaScript loop stalls.
+Active entries are capped at 128, recent completions at 64 and queued messages at
+512 including reserved completions. Trace admission reserves both start and end
+capacity, so overload skips new traces instead of leaving completed work active.
+Dropped counts explicitly make incomplete tracing visible. Fixed MCP tools,
+resources and prompts handler names are retained alongside mem/api names. The main-loop
+heartbeat age and the snapshot's own age are separate: a stale snapshot does not
+prove that its last heartbeat still describes the process. A whole-process
+suspension or native failure can prevent the diagnostic thread from running too.
+
+After the existing third failed responsiveness probe and before owned shutdown,
+the daemon writes one create-new `logs/stall-<run-id>.json`. It validates snapshot
+run/PID identity and whitelists its fields, then samples the exact owned engine
+and worker's cumulative CPU time, working/private memory, and up to 32 OS thread
+states/wait reasons. A missing, invalid or mismatched snapshot is classified and
+does not prevent the OS sample or recovery. This is a wait-state sample, not a
+native call-stack dump or a proven deadlock diagnosis. Unavailable OS samples
+remain explicitly unavailable. Existing incident files are never overwritten.
+
+There is one rolling snapshot and at most one stall incident per daemon run,
+alongside the existing run logs; no separate service, storage queue, graph write,
+provider call or Qwen startup is introduced. These files are installation logs,
+not release payload. Preserve the relevant incident while investigating its
+cause and apply the host's log-retention policy with the other run logs. Normal
+SDK results/errors are unchanged, the diagnostic thread does not keep an exiting
+worker alive, and diagnostic IO failures do not block the existing recovery path.
+A diagnostic thread or IO failure emits one fixed warning per run without error
+details, paths or payloads; IO retries continue on the existing one-second cadence.

@@ -524,6 +524,106 @@ function Test-ServiceReady {
     }
 }
 
+function Test-RuntimeResponsive {
+    try {
+        foreach ($path in @('http://127.0.0.1:3111/agentmemory/livez', 'http://127.0.0.1:3114/.well-known/oauth-protected-resource')) {
+            $request = [System.Net.HttpWebRequest]::Create($path)
+            $request.Proxy = $null
+            $request.Timeout = 3000
+            $request.ReadWriteTimeout = 3000
+            $response = $null
+            $reader = $null
+            try {
+                $response = $request.GetResponse()
+                $reader = [System.IO.StreamReader]::new($response.GetResponseStream())
+                $body = $reader.ReadToEnd() | ConvertFrom-Json
+                if ($path.EndsWith('/livez')) {
+                    if ($body.status -cne 'ok' -or $body.service -cne 'agentmemory') { return $false }
+                }
+                elseif ($body.resource -cne 'http://127.0.0.1:3114/mcp') { return $false }
+            }
+            finally {
+                if ($reader) { $reader.Dispose() }
+                if ($response) { $response.Dispose() }
+            }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Get-StallProcessSample {
+    param([Diagnostics.Process]$Process, $Identity)
+    if (-not (Test-OwnedProcess -Process $Process -Identity $Identity)) { return @{ available=$false; reason='identity_mismatch' } }
+    try {
+        $Process.Refresh()
+        $threads = @($Process.Threads | Sort-Object Id | Select-Object -First 32 | ForEach-Object {
+            $reason = 'not_waiting'
+            try { if ($_.ThreadState -eq [Diagnostics.ThreadState]::Wait) { $reason = [string]$_.WaitReason } } catch { $reason='unavailable' }
+            @{ tid=$_.Id; state=[string]$_.ThreadState; wait_reason=$reason }
+        })
+        return @{ available=$true; pid=$Process.Id; created_at_utc=$Process.StartTime.ToUniversalTime().ToString('o');
+            cpu_ms=$Process.TotalProcessorTime.TotalMilliseconds; working_set_bytes=$Process.WorkingSet64;
+            private_bytes=$Process.PrivateMemorySize64; thread_count=$Process.Threads.Count; threads=$threads }
+    } catch { return @{ available=$false; reason='sample_failed' } }
+}
+
+function Save-RuntimeStallEvidence {
+    param([string]$LogsPath, [string]$RunId, [Diagnostics.Process]$Worker, $WorkerIdentity,
+        [Diagnostics.Process]$Engine, $EngineIdentity)
+    try {
+        if ($RunId -notmatch '^\d{8}T\d{9}Z$') { return }
+        $snapshot = $null; $snapshotStatus = 'unavailable'
+        $path = Join-Path $LogsPath "worker-diagnostics-$RunId.json"
+        try {
+        if ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-Item -LiteralPath $path).Length -le 131072) {
+            $raw = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            if ($raw.schema -eq 1 -and $raw.runId -ceq $RunId -and $raw.pid -eq $WorkerIdentity.pid) {
+                $cleanEntries = {
+                    param($entries, [switch]$Recent)
+                    @($entries | Select-Object -First $(if($Recent){64}else{128}) | ForEach-Object {
+                        if ($_.name -match '^(?:other|(?:mem|api)::[a-zA-Z0-9:_-]{1,90}|mcp::(?:tools::(?:list|call)|resources::(?:list|read)|prompts::(?:list|get))|state::(?:get|set|update|delete|list|list_groups))$' -and $_.kind -in @('function','state')) {
+                            $entry=@{id=[long]$_.id;parent=$(if($null -ne $_.parent){[long]$_.parent}else{$null});kind=[string]$_.kind;name=[string]$_.name;started_at_ms=[long]$_.startedAt}
+                            if ($Recent) { $entry.duration_ms=[long]$_.durationMs; $entry.outcome=if($_.outcome -eq 'ok'){'ok'}else{'error'} }
+                            else { $entry.age_ms=[long]$_.ageMs }
+                            $entry
+                        }
+                    })
+                }
+                $snapshot=@{snapshot_age_ms=([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()-[long]$raw.observedAt);observed_at_ms=[long]$raw.observedAt;heartbeat_at_ms=$(if($null -ne $raw.heartbeatAt){[long]$raw.heartbeatAt}else{$null});heartbeat_age_ms=$(if($null -ne $raw.heartbeatAgeMs){[long]$raw.heartbeatAgeMs}else{$null});
+                    dropped_events=[long]$raw.droppedEvents;dropped_active=[long]$raw.droppedActive;
+                    active=@(& $cleanEntries $raw.active);recent=@(& $cleanEntries $raw.recent -Recent)}
+                if ($raw.memory) { $snapshot.memory=@{rss=[long]$raw.memory.rss;heap_used=[long]$raw.memory.heapUsed;heap_total=[long]$raw.memory.heapTotal;external=[long]$raw.memory.external} }
+                $snapshotStatus='available'
+            } else { $snapshotStatus='identity_mismatch' }
+        }
+        } catch { $snapshot=$null; $snapshotStatus='invalid' }
+        $evidence=@{schema_version=1;run_id=$RunId;reason='runtime_unresponsive';captured_at_utc=[DateTime]::UtcNow.ToString('o');
+            snapshot_status=$snapshotStatus;snapshot=$snapshot;
+            worker=(Get-StallProcessSample $Worker $WorkerIdentity);engine=(Get-StallProcessSample $Engine $EngineIdentity)}
+        $destination=Join-Path $LogsPath "stall-$RunId.json"
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($evidence | ConvertTo-Json -Depth 8))
+        $stream=[IO.File]::Open($destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        try { $stream.Write($bytes,0,$bytes.Length) } finally { $stream.Dispose() }
+    } catch { Write-Warning 'Runtime stall evidence was unavailable; owned recovery will continue.' }
+}
+
+
+function Test-RuntimeRecoveryDue {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$State,
+        [Parameter(Mandatory = $true)][DateTime]$Now,
+        [scriptblock]$Probe = { Test-RuntimeResponsive }
+    )
+    if (($Now - $State.LastProbeUtc).TotalSeconds -lt 30) { return $false }
+    $State.LastProbeUtc = $Now
+    $responsive = $false
+    try { $responsive = [bool](& $Probe) } catch { $responsive = $false }
+    if ($responsive) { $State.ConsecutiveFailures = 0 }
+    else { $State.ConsecutiveFailures++ }
+    return $State.ConsecutiveFailures -ge 3
+}
+
 function Write-RuntimeState {
     param(
         [Parameter(Mandatory = $true)][string]$Status,
@@ -628,14 +728,20 @@ try {
     $engineIdentity = $engineStart.Identity
     Wait-Condition -Condition { -not $engine.HasExited -and (Test-EngineReady -EnginePid $engine.Id) } -TimeoutSeconds 20 -FailureMessage 'The iii engine did not become loopback-ready.'
 
+    $previousDiagnosticsFile = [Environment]::GetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_FILE', 'Process')
+    $previousDiagnosticsRun = [Environment]::GetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_RUN_ID', 'Process')
     $previousStopFile = [Environment]::GetEnvironmentVariable('AGENTMEMORY_STOP_FILE', 'Process')
     $previousStopToken = [Environment]::GetEnvironmentVariable('AGENTMEMORY_STOP_TOKEN', 'Process')
     try {
+        [Environment]::SetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_FILE', (Join-Path $logsPath "worker-diagnostics-$runId.json"), 'Process')
+        [Environment]::SetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_RUN_ID', $runId, 'Process')
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_STOP_FILE', $stopPath, 'Process')
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_STOP_TOKEN', $stopToken, 'Process')
         $workerStart = Start-OwnedProcess -FilePath $NodePath -Arguments @($workerWrapper, '--no-engine', '--tools', 'all', '--port', '3111') -StandardOutputPath $workerOut -StandardErrorPath $workerErr
     }
     finally {
+        [Environment]::SetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_FILE', $previousDiagnosticsFile, 'Process')
+        [Environment]::SetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_RUN_ID', $previousDiagnosticsRun, 'Process')
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_STOP_FILE', $previousStopFile, 'Process')
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_STOP_TOKEN', $previousStopToken, 'Process')
     }
@@ -649,10 +755,19 @@ try {
     $lastConsumerProbe = [DateTime]::MinValue
     $lastLeaseDiagnostic = [DateTime]::MinValue
     $cachedLeaseState = $null
+    $runtimeHealth = @{ LastProbeUtc = [DateTime]::UtcNow; ConsecutiveFailures = 0 }
     while (-not $worker.WaitForExit(250)) {
         if (Test-StopRequest -WorkerPid $worker.Id -ExpectedToken $stopToken) {
             $explicitStopRequested = $true
             $terminalReason = 'authenticated_external_stop'
+            Stop-OwnedProcess -Process $worker -Identity $workerIdentity -GracefulStopPath $stopPath -GracefulStopToken $stopToken
+            if (-not $worker.HasExited) { throw 'The owned worker did not stop after an authenticated request.' }
+            break
+        }
+        if (Test-RuntimeRecoveryDue -State $runtimeHealth -Now ([DateTime]::UtcNow)) {
+            Save-RuntimeStallEvidence -LogsPath $logsPath -RunId $runId -Worker $worker -WorkerIdentity $workerIdentity -Engine $engine -EngineIdentity $engineIdentity
+            $terminalReason = 'runtime_unresponsive'
+            throw 'AgentMemory failed three consecutive runtime responsiveness checks at 30-second intervals.'
         }
         $consumerProbeNow = [DateTime]::UtcNow
         if (($consumerProbeNow - $lastConsumerProbe).TotalSeconds -ge $ConsumerProbeSeconds) {

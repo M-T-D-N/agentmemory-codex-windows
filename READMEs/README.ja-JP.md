@@ -7,7 +7,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> `0.1.0-preview.7` です。
+> `0.1.0-preview.8` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -79,7 +79,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.7` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.8` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -104,7 +104,7 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.7 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.8 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

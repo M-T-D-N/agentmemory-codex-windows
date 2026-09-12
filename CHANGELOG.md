@@ -4,7 +4,42 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
-## Unreleased
+## 0.1.0-preview.8 — 2026-09-12
+
+- Preserve forward and bootstrap-backfill progress when explicitly extracting
+  older observations. Compare official timestamp/ID order against the current
+  cursor under the existing session lock; unsorted inputs cannot rewind it.
+  Historical provenance is still extracted, and genuinely unprocessed tails
+  remain pending. Unknown cursor positions are preserved for explicit repair.
+
+- Reopen graph processing when an import writes observations beyond an existing
+  session's processing cursors. Notify the existing scheduler after exclusive
+  import access ends. Preserve capture metadata, graph cursors, complete backup
+  restores, duplicate-only imports and count-only repairs. Disabled extraction
+  remains disabled; a failed wake notification does not fail a committed import.
+
+- Preserve bounded stall evidence before the existing Windows runtime recovery.
+  A diagnostic worker thread records function/state-operation names and timings,
+  main-loop heartbeat age, and memory counters without inputs, values, keys,
+  credentials or error text. The daemon retains an incident with owned process
+  CPU/memory and thread wait states, even when the main loop cannot respond.
+  Missing diagnostics never prevent recovery; no additional watchdog is added.
+  Reserve completion capacity when admitting diagnostic traces so an overloaded
+  queue cannot permanently fill the active list with completed work. Preserve
+  fixed MCP handler names and warn once, without sensitive error details, when
+  the diagnostic thread or its file output fails.
+
+- Recalculate session observation counts from stored rows after import, including
+  skipped existing sessions and empty observation buckets used for count repair.
+  Preserve existing metadata with field-only count updates. Run imports under
+  the existing exclusive observation lifecycle; refuse active writers before
+  mutation and settle every started chunk write before releasing the boundary.
+  Failed skip lookups for sessions or observations no longer allow overwrites.
+
+- Recover a live but unresponsive Windows worker after three consecutive
+  lightweight checks. Honor authenticated stop requests through bounded,
+  identity-checked cleanup. Preserve the existing watchdog, runtime data and
+  upstream dependency versions.
 
 - Follow [upstream AgentMemory's dependency version](https://github.com/rohitg00/agentmemory/blob/main/package.json):
   retain iii-sdk 0.11.2. PR #9's proposed 0.23.0 fails type checking because it
