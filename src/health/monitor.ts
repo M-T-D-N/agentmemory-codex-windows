@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import type { ISdk } from "iii-sdk";
 import type { HealthSnapshot } from "../types.js";
 import type { StateKV } from "../state/kv.js";
@@ -66,6 +67,7 @@ export function registerHealthMonitor(
       kvConnectivity = { status: "error", error: "kv_probe_failed", latencyMs: Math.round((performance.now() - kvStart) * 100) / 100 };
     }
 
+    const cpuCapacity = kv.usesManagedState ? availableParallelism() : 1;
     const snapshot: HealthSnapshot = {
       connectionState,
       workers,
@@ -78,7 +80,11 @@ export function registerHealthMonitor(
       cpu: {
         userMicros: currentCpu.user,
         systemMicros: currentCpu.system,
-        percent: Math.round(cpuPercent * 100) / 100,
+        percent: Math.round(cpuPercent / cpuCapacity * 100) / 100,
+        ...(kv.usesManagedState ? {
+          corePercent: Math.round(cpuPercent * 100) / 100,
+          availableParallelism: cpuCapacity,
+        } : {}),
       },
       eventLoopLagMs,
       uptimeSeconds: uptime,

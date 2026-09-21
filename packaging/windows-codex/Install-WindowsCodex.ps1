@@ -14,6 +14,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+function Get-ManagedDataContractVersion {
+    param([Parameter(Mandatory = $true)]$Manifest)
+    $property = $Manifest.PSObject.Properties['data_contract_version']
+    if ($null -eq $property) { return 1 }
+    $value = $property.Value
+    if (($value -isnot [int] -and $value -isnot [long]) -or $value -lt 1 -or $value -gt 9007199254740991) {
+        throw 'Invalid managed data contract version.'
+    }
+    return [long]$value
+}
+
 function Write-Utf8NoBom {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Content)
     $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -48,7 +59,7 @@ function Get-NormalizedStringSha256 {
 
 function Set-ObjectProperty {
     param([Parameter(Mandatory = $true)]$Object, [Parameter(Mandatory = $true)][string]$Name, $Value)
-    if ($Object.PSObject.Properties.Name -contains $Name) {
+    if ($null -ne $Object.PSObject.Properties[$Name]) {
         $Object.$Name = $Value
     }
     else {
@@ -289,6 +300,7 @@ if ($root.TrimEnd('\') -eq [System.IO.Path]::GetPathRoot($root).TrimEnd('\')) {
 }
 
 $releaseManifest = Get-Content -Raw -LiteralPath $releaseManifestPath | ConvertFrom-Json
+$targetDataContract = Get-ManagedDataContractVersion -Manifest $releaseManifest
 if ([string]$releaseManifest.product_id -ne 'agentmemory-codex-windows') {
     throw 'Release manifest product_id is not agentmemory-codex-windows.'
 }
@@ -322,6 +334,10 @@ if ($Fresh -or $ActivatePrepared) {
 
 $owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
 $installed = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+$currentDataContract = Get-ManagedDataContractVersion -Manifest $installed
+if ($targetDataContract -lt $currentDataContract) {
+    throw "Runtime downgrade cannot read this installation's data contract ($currentDataContract). Restore a matching pre-upgrade data backup in a separately reviewed recovery operation."
+}
 if ($null -ne $installed.PSObject.Properties['installation_status'] -and [string]$installed.installation_status -eq 'prepared') {
     throw 'Use ActivatePrepared for a prepared first installation before updating it.'
 }
@@ -333,8 +349,15 @@ if ([System.IO.Path]::GetFullPath([string]$installed.install_root) -ne $root) {
 }
 
 $existingWorkspacePath = Join-Path $root 'config\codex-workspace.json'
+$preservedCodexSourceRoot = $null
 if (Test-Path -LiteralPath $existingWorkspacePath -PathType Leaf) {
     $existingWorkspace = Get-Content -Raw -LiteralPath $existingWorkspacePath | ConvertFrom-Json
+    if ($existingWorkspace.PSObject.Properties['codex_source_root']) {
+        if ($existingWorkspace.codex_source_root -isnot [string] -or $existingWorkspace.codex_source_root -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {
+            throw 'The configured Codex source root must be an absolute path.'
+        }
+        $preservedCodexSourceRoot = [System.IO.Path]::GetFullPath($existingWorkspace.codex_source_root)
+    }
     $previousWorkspaceRoot = [string]$existingWorkspace.workspace_root
     if (-not [string]::IsNullOrWhiteSpace($previousWorkspaceRoot)) {
         $localAIRelative = 'projects\local-ai\scripts\Invoke-LocalAI.ps1'
@@ -403,6 +426,8 @@ $summary = [ordered]@{
     preserve_existing_hidden_launcher = $preserveHiddenLauncher
     canonical_data = (Join-Path $root 'data')
     data_action = 'preserve'
+    current_data_contract_version = $currentDataContract
+    target_data_contract_version = $targetDataContract
 }
 if (-not $Execute) {
     $summary | ConvertTo-Json
@@ -431,7 +456,11 @@ if (Test-Path -LiteralPath $managedRequirements -PathType Leaf) {
     Copy-Item -LiteralPath $managedRequirements -Destination (Join-Path $backupRoot 'requirements.toml')
 }
 
+$cutoverLock = $null
+$cutoverTouched = $false
+$candidateStartAttempted = $false
 try {
+    $cutoverLock = [IO.File]::Open((Join-Path $root 'data\startup.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     Stop-OwnedRuntimeForCutover -Root $root -Registrations $taskRegistrations
     $runtimeStatePath = Join-Path $root 'data\runtime-state.json'
     $previousRunId = $null
@@ -441,6 +470,10 @@ try {
     }
     catch {}
 
+    $cutoverTouched = $true
+    Set-ObjectProperty -Object $installed -Name 'data_contract_version' -Value $targetDataContract
+    Set-ObjectProperty -Object $installed -Name 'installation_status' -Value 'cutover'
+    Write-Utf8NoBom -Path $installManifestPath -Content ($installed | ConvertTo-Json -Depth 12)
     $packageSource = [System.IO.Path]::GetFullPath((Join-Path $payload ([string]$releaseManifest.package_relative_path)))
     if (-not $reuseExistingPackage) {
         [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $newPackageRoot))
@@ -457,7 +490,12 @@ try {
     }
     Copy-Item -Path (Join-Path $payload 'scripts\*') -Destination (Join-Path $root 'scripts') -Recurse -Force
     [void][System.IO.Directory]::CreateDirectory((Join-Path $root 'src'))
-    Copy-Item -LiteralPath (Join-Path $payload 'src\AgentMemoryHiddenLauncher.cs') -Destination $hiddenLauncherSourcePath -Force
+    foreach ($file in $releaseManifest.immutable_files) {
+        if (-not ([string]$file.path).StartsWith('src/', [StringComparison]::Ordinal)) { continue }
+        $destination = Join-Path $root (ConvertTo-WindowsManifestPath -Path ([string]$file.path))
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+        Copy-Item -LiteralPath (Join-Path $payload ([string]$file.path)) -Destination $destination -Force
+    }
     if (Test-Path -LiteralPath (Join-Path $payload 'licenses') -PathType Container) {
         [void][System.IO.Directory]::CreateDirectory((Join-Path $root 'licenses'))
         Copy-Item -Path (Join-Path $payload 'licenses\*') -Destination (Join-Path $root 'licenses') -Force
@@ -471,6 +509,7 @@ try {
     }
 
     $workspaceConfig = [ordered]@{ schema_version = 1; workspace_root = $workspace; project_registry = $registry }
+    if ($null -ne $preservedCodexSourceRoot) { $workspaceConfig.codex_source_root = $preservedCodexSourceRoot }
     Write-Utf8NoBom -Path (Join-Path $root 'config\codex-workspace.json') -Content ($workspaceConfig | ConvertTo-Json)
     $hookSpec = Get-Content -Raw -LiteralPath (Join-Path $root 'config\hook-spec.json') | ConvertFrom-Json
     $hookArtifacts = New-HookArtifacts -Root $root -Spec $hookSpec
@@ -505,12 +544,14 @@ try {
         $sourceHashes[$hiddenLauncherRelative] = (Get-FileHash -Algorithm SHA256 -LiteralPath $hiddenLauncherPath).Hash
     }
     Set-ObjectProperty -Object $installed -Name 'source_hashes' -Value $sourceHashes
+    Set-ObjectProperty -Object $installed -Name 'installation_status' -Value 'activated'
     Write-Utf8NoBom -Path $installManifestPath -Content ($installed | ConvertTo-Json -Depth 12)
     $legacyInstallStatePath = Join-Path $root 'config\install-state.json'
     if (Test-Path -LiteralPath $legacyInstallStatePath -PathType Leaf) {
         Remove-Item -LiteralPath $legacyInstallStatePath -Force
     }
 
+    $candidateStartAttempted = $true
     Start-OwnedTasks -Registrations $taskRegistrations
 
     # The scheduled daemon runs in the interactive user's DPAPI context and
@@ -544,7 +585,15 @@ try {
 }
 catch {
     $failure = $_
-    try { Stop-OwnedRuntimeForCutover -Root $root -Registrations $taskRegistrations } catch {}
+    if (-not $cutoverLock -or -not $cutoverTouched) { throw $failure }
+    try { Stop-OwnedRuntimeForCutover -Root $root -Registrations $taskRegistrations } catch {
+        throw "Cutover failed and runtime stop is unconfirmed; no predecessor files were restored. Preserve data and inspect $backupRoot. $($failure.Exception.Message) Stop: $($_.Exception.Message)"
+    }
+    if ($candidateStartAttempted -or $targetDataContract -gt $currentDataContract) {
+        Set-ObjectProperty -Object $installed -Name 'installation_status' -Value 'cutover_failed'
+        Write-Utf8NoBom -Path $installManifestPath -Content ($installed | ConvertTo-Json -Depth 12)
+        throw "Cutover failed after a data-contract transition or candidate start. Automatic rollback was withheld; canonical data and candidate files were preserved and the owned runtime stopped. Complete or repair a compatible release, or review recovery using $backupRoot. $($failure.Exception.Message)"
+    }
     $scriptsBackup = Join-Path $backupRoot 'scripts'
     if (Test-Path -LiteralPath $scriptsBackup) {
         Copy-Item -Path (Join-Path $scriptsBackup '*') -Destination (Join-Path $root 'scripts') -Recurse -Force
@@ -582,4 +631,7 @@ catch {
     }
     try { Start-OwnedTasks -Registrations $taskRegistrations } catch {}
     throw "AgentMemory cutover failed; owned predecessor files were restored from $backupRoot. $($failure.Exception.Message)"
+}
+finally {
+    if ($cutoverLock) { $cutoverLock.Dispose() }
 }

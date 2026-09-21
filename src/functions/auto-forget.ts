@@ -7,6 +7,7 @@ import { recordAudit } from "./audit.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { getSearchIndex, vectorIndexRemove, flushIndexSave } from "./search.js";
 import { logger } from "../logger.js";
+import { readArchiveCleanupProtection } from "./archive.js";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CONTRADICTION_THRESHOLD = 0.9;
@@ -36,7 +37,8 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
         dryRun,
       };
 
-      const memories = await kv.list<Memory>(KV.memories);
+      const protectedArchive = await readArchiveCleanupProtection(kv);
+      const memories = (await kv.list<Memory>(KV.memories)).filter(mem => !protectedArchive({ kind: "memory", id: mem.id }));
       const deletedIds = new Set<string>();
       for (const mem of memories) {
         if (mem.forgetAfter) {
@@ -148,7 +150,7 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
-      const sessions = (await kv.list<Session>(KV.sessions)).filter(session => !kv.hasObservationRecovery(session.id));
+      const sessions = (await kv.list<Session>(KV.sessions)).filter(session => !kv.hasObservationRecovery(session.id) && !protectedArchive({ kind: "session", id: session.id }));
       const obsPerSession: CompressedObservation[][] = [];
       for (let batch = 0; batch < sessions.length; batch += 10) {
         const chunk = sessions.slice(batch, batch + 10);

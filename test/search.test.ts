@@ -108,6 +108,30 @@ describe("mem::search", () => {
     await rebuildIndex(kv as never);
   });
 
+  it("uses a durable memory's owning project instead of its first source session's project", async () => {
+    const memory: Memory = { id: "cross-source-memory", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact", title: "unique ownership", content: "unique ownership", concepts: [], files: [], sessionIds: ["ses_1"],
+      strength: 1, version: 1, isLatest: true, project: "owning-project" };
+    await kv.set(KV.memories, memory.id, memory);
+    getSearchIndex().add(memoryToObservation(memory));
+    const own = await sdk.trigger("mem::search", { query: "unique ownership", project: "owning-project", trackAccess: false });
+    expect(own.results.map((r: any) => [r.observation.id, r.project])).toEqual([[memory.id, "owning-project"]]);
+    const source = await sdk.trigger("mem::search", { query: "unique ownership", project: "demo", trackAccess: false });
+    expect(source.results).toEqual([]);
+    const wildcard = await sdk.trigger("mem::search", { query: "unique ownership", project: "*", trackAccess: false });
+    expect(wildcard.results[0].project).toBe("owning-project");
+  });
+
+  it("does not match an explicit cwd when a memory has no proven source directory", async () => {
+    const memory: Memory = { id: "unplaced-memory", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact", title: "unplaced fact", content: "unplaced fact", concepts: [], files: [], sessionIds: [],
+      strength: 1, version: 1, isLatest: true, project: "demo" };
+    await kv.set(KV.memories, memory.id, memory);
+    getSearchIndex().add(memoryToObservation(memory));
+    const result = await sdk.trigger("mem::search", { query: "unplaced", cwd: "/tmp/demo", trackAccess: false });
+    expect(result.results).toEqual([]);
+  });
+
   it("returns full format by default", async () => {
     const result = (await sdk.trigger("mem::search", {
       query: "auth middleware",

@@ -9,6 +9,7 @@ import type {
 import { KV, fingerprintId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
+import { readArchiveVisibility } from "./archive.js";
 import { logger } from "../logger.js";
 import {
   isExcludedCodexAmbientSession,
@@ -253,8 +254,10 @@ export function registerSkillExtractFunctions(
   sdk.registerFunction("mem::skill-list", 
     async (data: { limit?: number }) => {
       const limit = data?.limit ?? 50;
+      const archived = await readArchiveVisibility(kv);
       const skills = await kv.list<ProceduralMemory>(KV.procedural);
-      const sorted = skills.sort((a, b) => b.strength - a.strength);
+      const sorted = skills.filter(skill => !archived({ kind: "procedural", id: skill.id }))
+        .sort((a, b) => b.strength - a.strength);
       return {
         success: true,
         skills: sorted.slice(0, limit),
@@ -275,7 +278,9 @@ export function registerSkillExtractFunctions(
 
       const skills = await kv.list<ProceduralMemory>(KV.procedural);
 
+      const archived = await readArchiveVisibility(kv);
       const scored = skills
+        .filter(skill => !archived({ kind: "procedural", id: skill.id }))
         .map((skill) => {
           const text =
             `${skill.name} ${skill.triggerCondition} ${(skill.tags || []).join(" ")} ${skill.steps.join(" ")}`.toLowerCase();

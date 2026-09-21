@@ -8,6 +8,7 @@ import type { EmbeddingProvider } from '../types.js'
 import { memoryToObservation } from '../state/memory-utils.js'
 import { recordAccessBatch } from './access-tracker.js'
 import { logger } from "../logger.js";
+import { createSearchCandidateSelection, type SearchCandidateSelection } from "./search-candidates.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
 import {
   isExcludedCodexAmbientSession,
@@ -27,6 +28,7 @@ let currentEmbeddingProvider: EmbeddingProvider | null = null
 type HybridRanker = (
   query: string,
   limit: number,
+  selection?: SearchCandidateSelection,
 ) => Promise<Array<{ observation: CompressedObservation; sessionId: string; combinedScore: number }>>
 let hybridRanker: HybridRanker | null = null
 
@@ -81,11 +83,11 @@ export function vectorIndexRemove(id: string): void {
 // isolation don't need to wire persistence.
 let indexPersistence: {
   scheduleSave: () => void;
-  save: () => Promise<void>;
+  save: (options?: { requireSuccess?: boolean }) => Promise<void>;
 } | null = null;
 
 export function setIndexPersistence(
-  p: { scheduleSave: () => void; save: () => Promise<void> } | null,
+  p: { scheduleSave: () => void; save: (options?: { requireSuccess?: boolean }) => Promise<void> } | null,
 ): void {
   indexPersistence = p;
 }
@@ -103,8 +105,9 @@ export function scheduleIndexSave(): void {
 // even when persistence fails — callers must not treat a failed
 // flush as a fatal error on the delete itself (the KV delete already
 // committed before this is invoked).
-export async function flushIndexSave(): Promise<void> {
-  await indexPersistence?.save();
+export async function flushIndexSave(options: { requireSuccess?: boolean } = {}): Promise<void> {
+  if (options.requireSuccess && !indexPersistence) throw new Error("Index persistence is not configured");
+  await indexPersistence?.save(options);
 }
 
 // Hard cap on embedding input length. Most providers cap input around
@@ -470,15 +473,8 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         await rebuildPromise
       }
 
-      // When filtering by project/cwd, over-fetch from the index so the
-      // post-filter still has a chance of returning `effectiveLimit` results.
-      // Over-fetch whenever ANY post-index filter is active. agentId
-      // is dropped after the observation/memory is loaded (BM25 index
-      // doesn't carry it), so without the over-fetch isolated-mode
-      // queries return underfilled pages when same-agent matches
-      // rank lower than cross-agent ones in the hybrid score.
-      const filtering = !!(projectFilter || cwdFilter || filterAgentId)
-      const fetchLimit = filtering ? Math.max(effectiveLimit * 10, 100) : effectiveLimit
+      const selection = createSearchCandidateSelection(kv, { project: projectFilter, cwd: cwdFilter, agentId: filterAgentId })
+      const fetchLimit = effectiveLimit
       // Hybrid results carry the observation the ranker already loaded,
       // so the load pass below doesn't refetch every record it just
       // enriched.
@@ -488,9 +484,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         score: number
         observation?: CompressedObservation
       }>
-      if (hybridRanker && vectorIndex && vectorIndex.size > 0) {
+      if (hybridRanker) {
         try {
-          const hybrid = await hybridRanker(query, fetchLimit)
+          const hybrid = await hybridRanker(query, fetchLimit, selection)
           results = hybrid.map((r) => ({
             obsId: r.observation.id,
             sessionId: r.sessionId,
@@ -501,10 +497,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           logger.warn("hybrid ranking failed, falling back to keyword search", {
             error: err instanceof Error ? err.message : String(err),
           })
-          results = idx.search(query, fetchLimit)
+          results = await selection.select(idx.search(query, idx.size), fetchLimit)
         }
       } else {
-        results = idx.search(query, fetchLimit)
+        results = await selection.select(idx.search(query, idx.size), fetchLimit)
       }
 
       // Resolve session -> project/cwd once per sessionId we touch.
@@ -516,46 +512,15 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return s ?? null
       }
 
-      // Cache for memory project lookups. Memories indexed via mem::remember
-      // use a synthetic sessionId ('memory' or the first real sessionId) that
-      // either has no KV.sessions entry or belongs to a different project.
-      // When loadSession returns null we fall through to a KV.memories probe
-      // so project-filtered search can include or exclude them correctly.
-      const memoryProjectCache = new Map<string, string | null>()
-      const loadMemoryProject = async (obsId: string): Promise<string | null> => {
-        if (memoryProjectCache.has(obsId)) return memoryProjectCache.get(obsId)!
-        const mem = await kv.get<Memory>(KV.memories, obsId).catch(() => null)
-        const proj = mem?.project ?? null
-        memoryProjectCache.set(obsId, proj)
-        return proj
-      }
-
-      // First pass: filter by session (sequential — benefits from session cache).
-      // Memory entries with a synthetic sessionId take a secondary KV.memories
-      // path so project filtering works correctly for them too.
-      //
-      // When agentId filtering is active we can't cap at effectiveLimit
-      // here — the second pass (post-load) is what drops cross-agent
-      // rows, and capping early would underfill the result page. Use
-      // fetchLimit as the upper bound in that case; the final
-      // truncation lives at the end of the second pass.
+      // A memory's source session can belong to a different project. Resolve
+      // the canonical record before project filtering and final truncation.
       const earlyCap = fetchLimit
       const candidates: typeof results = []
       for (const r of results) {
         if (candidates.length >= earlyCap) break
         const session = await loadSession(r.sessionId)
         if (isExcludedCodexAmbientSession(session)) continue
-        if (filtering) {
-          if (session) {
-            if (projectFilter && session.project !== projectFilter) continue
-            if (cwdFilter && session.cwd !== cwdFilter) continue
-          } else {
-            if (projectFilter) {
-              const memProject = await loadMemoryProject(r.obsId)
-              if (memProject !== projectFilter) continue
-            }
-          }
-        }
+        if (cwdFilter && session?.cwd !== cwdFilter) continue
         candidates.push(r)
       }
 
@@ -563,31 +528,34 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // KV.memories when the observation lookup misses — entries indexed
       // via mem::remember live in the memories scope under a synthetic
       // sessionId, so the observation key never exists (#265).
-      const obsResults = await Promise.all(
-        candidates.map(async (r) => {
+      const obsResults: Array<{ observation: CompressedObservation; project?: string } | null> = []
+      for (let offset = 0; offset < candidates.length; offset += 8) {
+        obsResults.push(...await Promise.all(candidates.slice(offset, offset + 8).map(async (r) => {
           const obs = await kv
             .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
             .catch(() => null)
-          if (obs) return obs
+          const sessionProject = sessionCache.get(r.sessionId)?.project
+          if (obs) return { observation: obs, project: sessionProject }
           const mem = await kv
             .get<Memory>(KV.memories, r.obsId)
             .catch(() => null)
-          return mem && mem.isLatest !== false ? memoryToObservation(mem) : null
-        })
-      )
+          return mem && mem.isLatest !== false
+            ? { observation: memoryToObservation(mem), project: mem.project ?? sessionProject }
+            : null
+        })))
+      }
       const enriched: SearchResult[] = []
       for (let i = 0; i < candidates.length; i++) {
-        const obs = sanitizeCodexAmbientObservation(obsResults[i])
+        const obs = sanitizeCodexAmbientObservation(obsResults[i]?.observation)
         if (!obs) continue
+        const project = obsResults[i]?.project
+        if (projectFilter && project !== projectFilter) continue
         // #817: enforce agent-scope after the observation/memory is
         // loaded. The BM25 index doesn't carry agentId so the filter
         // happens post-lookup. Wildcard ("*") and no-isolation paths
         // resolved filterAgentId=undefined upstream and pass through.
         if (filterAgentId !== undefined && obs.agentId !== filterAgentId) continue
         if (enriched.length >= effectiveLimit) break
-        const project = sessionCache.get(candidates[i].sessionId)?.project
-          ?? await loadMemoryProject(obs.id)
-          ?? undefined
         enriched.push({
           observation: obs,
           score: candidates[i].score,

@@ -12,7 +12,7 @@ package from this repository.
 agentmemory is a persistent memory system for AI coding agents, built on iii-engine's three primitives (Worker/Function/Trigger). Everything goes through `registerFunction`/`registerTrigger`/`sdk.trigger()` — never bypass iii-engine with standalone SQLite or in-process alternatives.
 
 - **Engine**: iii-sdk (WebSocket to iii-engine on port 49134)
-- **State**: File-based SQLite via iii-engine's StateModule (`./data/state_store.db`)
+- **State**: iii-engine StateModule file-backed KV (`./data/state_store.db` is a directory of per-scope `.bin` snapshots, not a SQLite database). Unmodified engine 0.11.2 acknowledges memory before disk persistence. The managed downstream pins the documented `state::flush` engine patch and requires `AGENTMEMORY_STATE_DURABILITY=file-flush-v1`; see the packaging contract for process-crash qualification and its limits.
 - **Build**: TypeScript → ESM via tsdown, output to `dist/`
 - **Test**: vitest (`npm test` excludes integration tests)
 
@@ -34,7 +34,7 @@ other hosts. The supported Windows/Codex build in
   exact-project `delete-empty`/`restore-empty` actions recover one proven empty,
   processed non-cursor observation in its canonical row; see the packaging contract;
   deliberate reads may use `*`, and the managed user-prompt hook performs a
-  bounded cross-project recall with current-project weighting and source labels;
+  current-project-first recall with bounded cross-project fallback and source labels;
 - Codex performs selective promotion through the official memory, lesson, and
   manual graph tools; provider-backed summary, consolidation, reflection,
   crystallization, and compression remain disabled while local Qwen may enrich
@@ -163,8 +163,8 @@ uses its own four-hook adapter and fail-closed local capture path documented in
 
 ## Current Stats (v0.9.29)
 
-- 57 MCP tools in this downstream source (upstream 54 plus provenance-preserving `memory_graph_upsert`, target-scoped `memory_graph_provenance_reconcile`, and audited `memory_graph_purge`); all visible by default, with 8 in `AGENTMEMORY_TOOLS=core`
-- 134 REST endpoints
+- 58 MCP tools in this downstream source (upstream 54 plus provenance-preserving `memory_graph_upsert`, target-scoped `memory_graph_provenance_reconcile`, audited `memory_graph_purge`, and reversible `memory_archive`); all visible by default, with 8 in `AGENTMEMORY_TOOLS=core`
+- 135 REST endpoints
 - 6 MCP resources, 3 MCP prompts
 - 12 hooks, 17 skills
 - 260+ iii functions

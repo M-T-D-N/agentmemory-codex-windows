@@ -29,6 +29,16 @@ export class SearchIndex {
       termCount++;
     }
 
+    const previous = this.entries.get(obs.id);
+    const previousTerms = this.docTermCounts.get(obs.id);
+    if (
+      previous?.sessionId === obs.sessionId &&
+      previous.termCount === termCount &&
+      previousTerms?.size === termFreq.size &&
+      [...termFreq].every(([term, count]) => previousTerms.get(term) === count)
+    ) return;
+
+    this.remove(obs.id);
     this.entries.set(obs.id, {
       obsId: obs.id,
       sessionId: obs.sessionId,

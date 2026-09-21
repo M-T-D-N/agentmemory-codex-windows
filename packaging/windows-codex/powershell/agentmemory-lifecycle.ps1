@@ -436,9 +436,11 @@ function Get-AgentMemoryConsumerState {
     $desktop = Get-CodexDesktopState
     $leases = if ($null -ne $LeaseState) { $LeaseState } else { Get-AgentMemoryMcpLeaseState -Root $Root }
     return [pscustomobject]@{
-        # The Windows Codex desktop package is the lifecycle authority. MCP leases are
-        # diagnostic/race evidence only and never keep AgentMemory alive after app exit.
-        State = [string]$desktop.State
+        # Hidden windows do not prove app exit: official processes can still run turns.
+        # MCP leases remain diagnostic and cannot keep the service alive after app exit.
+        State = if ($desktop.ProcessState -eq 'Present') { 'Present' }
+            elseif ($desktop.ProcessState -eq 'Unknown' -and $desktop.State -eq 'Absent') { 'Unknown' }
+            else { [string]$desktop.State }
         DesktopState = [string]$desktop.State
         DesktopProcessState = [string]$desktop.ProcessState
         DesktopProcessProbeState = [string]$desktop.ProcessProbeState

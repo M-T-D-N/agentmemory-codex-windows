@@ -46,6 +46,35 @@ describe("REST exact-project and provenance boundaries", () => {
     registerApiTriggers(sdk as never, kv as never, readContext);
   });
 
+  it("preserves the official non-reinforcing search option and rejects non-boolean values", async () => {
+    const response = await sdk.trigger("api::search", { body: { query: "source", project: "project-a", trackAccess: false } });
+    expect(response).toMatchObject({ status_code: 200 });
+    expect(sdk.downstream.at(-1)).toMatchObject({ functionId: "mem::search", payload: { project: "project-a", trackAccess: false } });
+    const count = sdk.downstream.length;
+    expect(await sdk.trigger("api::search", { body: { query: "source", project: "project-a", trackAccess: "false" } })).toMatchObject({ status_code: 400 });
+    expect(sdk.downstream).toHaveLength(count);
+  });
+
+  it("emits native warnings on aggregate state changes without consuming ordinary health reads", async () => {
+    const protectedSdk = apiSdk();
+    let source = { status: "attention", captureIssues: 1, consecutiveFailures: 1, lastAttemptAt: "first" };
+    const protectedKv = { ...mockKV(), requiresWriteRecovery: () => false };
+    registerApiTriggers(protectedSdk as never, protectedKv as never, readContext, "test-secret", undefined, undefined, undefined, () => source);
+    const read = () => protectedSdk.trigger("api::liveness", { query_params: { notify: "true" }, headers: { authorization: "Bearer test-secret" } });
+    expect(await protectedSdk.trigger("api::liveness", { query_params: { notify: "true" }, headers: {} })).toMatchObject({ status_code: 401 });
+    expect(await protectedSdk.trigger("api::liveness", {})).toMatchObject({ body: { nativeCapture: source } });
+    expect(await read()).toMatchObject({ body: { notificationChanged: true } });
+    source = { ...source, lastAttemptAt: "later", consecutiveFailures: 2 };
+    expect(await read()).toMatchObject({ body: { notificationChanged: false } });
+    source = { ...source, captureIssues: 2 };
+    expect(await read()).toMatchObject({ body: { notificationChanged: true } });
+    source = { ...source, status: "checking", captureIssues: 0, consecutiveFailures: 0 };
+    expect(await read()).toMatchObject({ body: { notificationChanged: true } });
+    source = { ...source, status: "attention", captureIssues: 1 };
+    expect(await read()).toMatchObject({ body: { notificationChanged: true } });
+    expect(protectedSdk.downstream).toEqual([]);
+  });
+
   it("calls context directly for REST context and session start", async () => {
     const context = (await sdk.trigger("api::context", {
       body: { sessionId: "session-context", project: "project-a" },

@@ -19,6 +19,17 @@ const packageRoot = process.env.AGENTMEMORY_PACKAGE_DIR
       "agentmemory",
     );
 const cliPath = resolve(packageRoot, "dist", "cli.mjs");
+const packageMetadata = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8"));
+const requiredDataContract = Object.hasOwn(manifest, "data_contract_version") ? manifest.data_contract_version : 1;
+const downstream = packageMetadata.agentmemoryDownstream ?? {};
+const supportedDataContract = Object.hasOwn(downstream, "dataContractVersion") ? downstream.dataContractVersion : 1;
+if (![requiredDataContract, supportedDataContract].every(value => Number.isSafeInteger(value) && value > 0) ||
+    supportedDataContract < requiredDataContract) {
+  throw new Error("AgentMemory package cannot read the installed data contract; use a compatible runtime or reviewed data recovery");
+}
+if (["cutover", "cutover_failed"].includes(manifest.installation_status)) {
+  throw new Error("AgentMemory installation cutover requires completion before the worker can start");
+}
 const standalonePath = resolve(packageRoot, "dist", "standalone.mjs");
 const stopPath = process.env.AGENTMEMORY_STOP_FILE || "";
 const stopToken = process.env.AGENTMEMORY_STOP_TOKEN || "";

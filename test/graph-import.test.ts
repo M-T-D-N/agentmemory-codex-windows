@@ -10,6 +10,7 @@ vi.mock("../src/logger.js", () => ({
 
 import { parseGraphifyGraph, registerGraphImportFunction } from "../src/functions/graph-import.js";
 import { KV } from "../src/state/schema.js";
+import * as mutex from "../src/state/keyed-mutex.js";
 import type { GraphNode, GraphEdge } from "../src/types.js";
 
 // graphify's clustered graph.json is NetworkX node_link: nodes carry
@@ -158,6 +159,21 @@ describe("mem::graph::import-graphify", () => {
     const edges = await kv.list<GraphEdge>(KV.graphEdges);
     expect(nodes).toHaveLength(4);
     expect(edges).toHaveLength(2);
+  });
+
+  it("waits for the graph writer before reading and merging graph rows", async () => {
+    const locks = vi.spyOn(mutex, "withKeyedLock");
+    const reads = vi.spyOn(kv, "get");
+    let release!: () => void;
+    const held = mutex.withKeyedLock("mem:graph-write", () => new Promise<void>(resolve => { release = resolve; }));
+    await Promise.resolve();
+    const pending = (sdk as any).trigger({ function_id: "mem::graph::import-graphify", payload: { cwd: tmp } });
+    try {
+      await vi.waitFor(() => expect(locks.mock.calls.filter(call => call[0] === "mem:graph-write")).toHaveLength(2));
+      expect(reads).not.toHaveBeenCalled();
+      expect(await kv.list(KV.graphNodes)).toEqual([]);
+    } finally { release(); await held; locks.mockRestore(); }
+    expect(await pending).toMatchObject({ success: true, newNodes: 4 });
   });
 
   it("re-import is idempotent: second run merges instead of duplicating", async () => {

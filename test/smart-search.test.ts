@@ -114,6 +114,31 @@ describe("Smart Search Function", () => {
     registerSmartSearchFunction(sdk as never, kv as never, searchFn);
   });
 
+  it("uses a memory's project consistently in compact and expanded retrieval", async () => {
+    const memory = { id: "owned-memory", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact", title: "owned memory", content: "owned memory", concepts: [], files: [], sessionIds: ["ses_1"],
+      strength: 1, version: 1, isLatest: true, project: "owning-project" };
+    await kv.set("mem:memories", memory.id, memory);
+    const observation = makeObs({ id: memory.id, project: memory.project });
+    searchResults = [{ observation, bm25Score: 1, vectorScore: 0, combinedScore: 1, sessionId: "ses_1" }];
+    for (const input of [{ query: "owned" }, { expandIds: [memory.id] }]) {
+      const own = await sdk.trigger("mem::smart-search", { ...input, project: "owning-project", trackAccess: false, includeLessons: false });
+      expect(own.results.map((row: { obsId: string }) => row.obsId)).toEqual([memory.id]);
+      expect(own.results[0].project).toBe("owning-project");
+      const source = await sdk.trigger("mem::smart-search", { ...input, project: "my-project", trackAccess: false, includeLessons: false });
+      expect(source.results).toEqual([]);
+    }
+  });
+
+  it("applies agent scope before filling the compact result limit", async () => {
+    searchResults[0].observation.agentId = "other-agent";
+    searchResults[1].observation.agentId = "selected-agent";
+    const result = await sdk.trigger("mem::smart-search", {
+      query: "auth", project: "my-project", agentId: "selected-agent", limit: 1, trackAccess: false, includeLessons: false,
+    });
+    expect(result.results.map((r: CompactSearchResult) => r.obsId)).toEqual([searchResults[1].observation.id]);
+  });
+
   it("compact mode returns CompactSearchResult array", async () => {
     const result = (await sdk.trigger("mem::smart-search", {
       query: "auth",

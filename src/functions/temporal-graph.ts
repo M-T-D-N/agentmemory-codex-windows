@@ -1,4 +1,6 @@
 import type { ISdk } from "iii-sdk";
+import { registerObservationWriter } from "../state/observation-write.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
 import type {
   GraphNode,
   GraphEdge,
@@ -154,7 +156,7 @@ export function registerTemporalGraphFunctions(
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
-  sdk.registerFunction("mem::temporal-graph-extract", 
+  registerObservationWriter(sdk, "mem::temporal-graph-extract",
     async (data: {
       observations: Array<{
         id: string;
@@ -186,6 +188,7 @@ export function registerTemporalGraphFunctions(
         const obsIds = data.observations.map((o) => o.id);
         const { nodes, edges } = parseTemporalGraphXml(response, obsIds);
 
+        await withKeyedLock("mem:graph-write", async () => {
         const existingNodes = await kv.list<GraphNode>(KV.graphNodes);
         const existingEdges = await kv.list<GraphEdge>(KV.graphEdges);
 
@@ -260,6 +263,7 @@ export function registerTemporalGraphFunctions(
         if (nodes.length > 0 || edges.length > 0) {
           await kv.delete(KV.graphQueryManifest, "current");
         }
+        });
 
         logger.info("Temporal graph extraction complete", {
           nodes: nodes.length,

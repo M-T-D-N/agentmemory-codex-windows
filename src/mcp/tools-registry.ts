@@ -10,6 +10,30 @@ export type McpToolDef = {
 
 export const CORE_TOOLS: McpToolDef[] = [
   {
+    name: "memory_archive",
+    description: "Inspect/list reversible archive state, review current retention/TTL candidates, or preview/apply archive and restore in an exact project. Originals, IDs and provenance remain in canonical storage. Default action is inspect; archive/restore default to dry-run. Apply requires the preview revision, digest and a reason. Candidate listing is read-only and requires individual review. This does not enable automatic retention or perform forget.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Exact registered project; wildcard is rejected" },
+        action: { type: "string", enum: ["inspect", "list", "candidates", "archive", "restore"], description: "Operation (default inspect)" },
+        target: { type: "object", description: "Required except for list/candidates; observation also requires sessionId", additionalProperties: false,
+          properties: { kind: { type: "string", enum: ["memory", "semantic", "procedural", "lesson", "observation", "session", "graph_node", "graph_edge"] },
+            id: { type: "string" }, sessionId: { type: "string" } }, required: ["kind", "id"] },
+        state: { type: "string", enum: ["archived", "restored", "all"], description: "List filter (default archived)" },
+        policy: { type: "string", enum: ["all", "retention", "ttl"], description: "Candidate policy (default all); current data only" },
+        threshold: { type: "number", minimum: 0, maximum: 1, description: "Candidate retention threshold (default 0.15); fresh default-decay scores" },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "List page size (default 20)" },
+        offset: { type: "integer", minimum: 0, description: "List offset (default 0)" },
+        dryRun: { type: "boolean", description: "Archive/restore preview defaults to true" },
+        expectedRevision: { type: "integer", minimum: 0, description: "Required for apply; from preview" },
+        expectedDigest: { type: "string", description: "Required for apply; from preview" },
+        reason: { type: "string", description: "Required for apply; why this lifecycle change is appropriate" },
+      },
+      required: ["project"],
+    },
+  },
+  {
     name: "memory_recall",
     description:
       "Search past observations and memories inside an explicit project. Pass '*' only for a deliberate cross-project read.",
@@ -19,6 +43,10 @@ export const CORE_TOOLS: McpToolDef[] = [
         query: {
           type: "string",
           description: "Search query (keywords, file names, concepts)",
+        },
+        agentId: {
+          type: "string", minLength: 1, maxLength: 512,
+          description: "Optional agent ID; omit to preserve the configured scope, or pass '*' for a deliberate cross-agent read",
         },
         project: {
           type: "string",
@@ -159,6 +187,10 @@ export const CORE_TOOLS: McpToolDef[] = [
       type: "object",
       properties: {
         query: { type: "string", description: "Search query" },
+        agentId: {
+          type: "string", minLength: 1, maxLength: 512,
+          description: "Optional agent ID for search and expansion; omit to preserve the configured scope, or pass '*' for a deliberate cross-agent read",
+        },
         project: {
           type: "string",
           description:
@@ -628,7 +660,7 @@ export const V040_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_governance_delete",
-    description: "Delete specific memories with audit trail.",
+    description: "Delete specific memories with audit trail. Supply the exact project for archive targets; deleted originals' archive metadata is removed after deletion.",
     inputSchema: {
       type: "object",
       properties: {
@@ -637,6 +669,7 @@ export const V040_TOOLS: McpToolDef[] = [
           description: "Comma-separated memory IDs to delete",
         },
         reason: { type: "string", description: "Reason for deletion" },
+        project: { type: "string", description: "Exact project; required for archive targets and enforced for every selected memory when supplied" },
       },
       required: ["memoryIds"],
     },
@@ -1130,6 +1163,7 @@ export const V070_TOOLS: McpToolDef[] = [
       type: "object",
       properties: {
         lessonId: { type: "string", description: "The lesson id (lsn_...)" },
+        project: { type: "string", description: "Exact project; required for archive targets. Soft-delete also removes their archive metadata" },
       },
       required: ["lessonId"],
     },

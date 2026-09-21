@@ -164,15 +164,16 @@ describe("Codex capture recovery and response attribution", () => {
           AGENTMEMORY_PROJECT_REGISTRY: registry },
         stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
       });
-      let stderr = "";
+      let stderr = "", stdout = "";
       child.stderr.on("data", chunk => { stderr += chunk; });
-      child.stdout.resume();
+      child.stdout.on("data", chunk => { stdout += chunk; });
       child.stdin.end(JSON.stringify({ session_id: identity.sessionId, cwd, ...event }));
       const timeout = setTimeout(() => child.kill(), 5000);
       try {
         const [code] = await once(child, "close");
         expect(code, stderr).toBe(expectedCode);
       } finally { clearTimeout(timeout); }
+      return stdout;
     }
     try {
       await run({ hook_event_name: "UserPromptSubmit", turn_id: "hook-normal-1", prompt: "Normal user request" });
@@ -183,7 +184,8 @@ describe("Codex capture recovery and response attribution", () => {
       await run({ hook_event_name: "UserPromptSubmit", turn_id: "hook-normal-2", prompt: "Next normal request" });
       await run({ hook_event_name: "Stop", turn_id: "hook-internal", last_assistant_message: "Late internal answer" });
       await run({ hook_event_name: "Stop", turn_id: "hook-normal-2", last_assistant_message: "Next normal answer" });
-      await run({ hook_event_name: "Stop", last_assistant_message: "Unattributed answer" }, 1);
+      const failedCapture = JSON.parse(await run({ hook_event_name: "Stop", last_assistant_message: "Unattributed answer" }));
+      expect(failedCapture.systemMessage).toContain("자동 수집을 확인하지 못했습니다");
       const observations = await kv.list<any>("mem:obs:" + identity.sessionId);
       expect(observations.map(o => o.narrative)).toEqual([
         "Normal user request", "Normal final answer", "Next normal request", "Next normal answer",

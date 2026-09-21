@@ -1,5 +1,6 @@
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { readArchiveVisibility, type ArchiveVisibility } from "./archive.js";
 import type {
   GraphEdge,
   GraphNode,
@@ -210,6 +211,7 @@ async function validateExactEdgeInventorySnapshot(
   snapshot: GraphSnapshot,
   inventory: Partial<GraphQueryResult>,
   expectedManifest: GraphQueryIndexManifest,
+  archived?: ArchiveVisibility,
 ): Promise<Partial<GraphQueryResult>> {
   if (!inventory.edgeInventory) return inventory;
   const edgeInventoryRevision = [
@@ -217,6 +219,7 @@ async function validateExactEdgeInventorySnapshot(
     expectedManifest.revision ?? "legacy",
     snapshot.stats.totalNodes,
     snapshot.stats.totalEdges,
+    ...(archived ? [archived.graphRevision] : []),
   ].join(":");
   const manifest = await kv.get<GraphQueryIndexManifest>(
     KV.graphQueryManifest,
@@ -234,7 +237,8 @@ async function validateExactEdgeInventorySnapshot(
       manifest.totalNodes === snapshot.stats.totalNodes &&
       manifest.totalEdges === snapshot.stats.totalEdges,
   );
-  if (stable) return { ...inventory, edgeInventoryRevision };
+  const archiveStable = !archived || (await readArchiveVisibility(kv)).graphRevision === archived.graphRevision;
+  if (stable && archiveStable) return { ...inventory, edgeInventoryRevision };
   return {
     ...inventory,
     edgeInventoryRevision,
@@ -318,6 +322,7 @@ export function queryGraphFromSnapshotFallback(
   maxDepth: number,
   limit: number,
   offset: number,
+  archived?: ArchiveVisibility,
 ): GraphQueryResult {
   const warning =
     "The exact graph query index is temporarily unavailable. Returned a " +
@@ -343,10 +348,12 @@ export function queryGraphFromSnapshotFallback(
         })()
       : {};
   const projectNodes = snapshot.topNodes
+    .filter(node => !archived?.({ kind: "graph_node", id: node.id }))
     .filter((node) => isVisibleAfterReset(node, snapshot.resetAt))
     .filter((node) => !project || graphNodeProject(node) === project);
   const projectNodeIds = new Set(projectNodes.map((node) => node.id));
   const projectEdges = snapshot.topEdges
+    .filter(edge => !archived?.({ kind: "graph_edge", id: edge.id }))
     .filter((edge) => isVisibleAfterReset(edge, snapshot.resetAt))
     .filter(
       (edge) =>
@@ -407,7 +414,7 @@ export function queryGraphFromSnapshotFallback(
     };
   }
 
-  if (!project) {
+  if (!project && !archived?.hasArchivedGraph) {
     return {
       ...paginateFromSnapshot(snapshot, data.nodeType, limit, offset),
       ...unavailableEdgeInventory,
@@ -556,7 +563,11 @@ export async function queryGraphFromIndex(
   limit: number,
   offset: number,
   queryIndexRebuilt: boolean,
+  visibility?: ArchiveVisibility,
 ): Promise<GraphQueryResult> {
+  const archived = visibility ?? await readArchiveVisibility(kv);
+  const visibleEdge = (edge: GraphQueryEdgeRef) => !archived({ kind: "graph_edge", id: edge.id }) &&
+    !archived({ kind: "graph_node", id: edge.sourceNodeId }) && !archived({ kind: "graph_node", id: edge.targetNodeId });
   if (data.startNodeId) {
     const visited = new Set<string>();
     const visitedEdges = new Map<string, GraphQueryEdgeRef>();
@@ -570,7 +581,7 @@ export async function queryGraphFromIndex(
     >();
     while (queue.length > 0) {
       const { nodeId, depth } = queue.shift()!;
-      if (visited.has(nodeId) || depth > maxDepth) continue;
+      if (visited.has(nodeId) || depth > maxDepth || archived({ kind: "graph_node", id: nodeId })) continue;
       visited.add(nodeId);
       const node = await kv.get<GraphNode>(KV.graphNodes, nodeId);
       if (!node || !isVisibleAfterReset(node, snapshot.resetAt)) continue;
@@ -582,6 +593,7 @@ export async function queryGraphFromIndex(
         adjacencyCache,
       );
       for (const ref of adjacency.refs) {
+        if (!visibleEdge(ref)) continue;
         if (project && ref.project !== undefined && ref.project !== project) {
           continue;
         }
@@ -607,6 +619,7 @@ export async function queryGraphFromIndex(
         snapshot.resetAt,
       ),
       manifest,
+      archived,
     );
     return {
       ...paginateGraph(resultNodes, resultEdges, maxDepth, limit, offset),
@@ -623,6 +636,7 @@ export async function queryGraphFromIndex(
     ...(Array.isArray(data.queries) ? data.queries : []),
   ].map((query) => query.toLowerCase());
   const documents = (await readAllGraphQueryDocuments(kv))
+    .filter(document => !archived({ kind: "graph_node", id: document.id }))
     .filter(
       (document) =>
         !snapshot.resetAt ||
@@ -649,6 +663,7 @@ export async function queryGraphFromIndex(
   const { refs } = await readGraphQueryEdgeRefs(kv, universeIds);
   const universeEdges = refs.filter(
     (ref) =>
+      visibleEdge(ref) &&
       (!snapshot.resetAt ||
         (typeof ref.createdAt === "string" && ref.createdAt >= snapshot.resetAt)) &&
       universeIds.has(ref.sourceNodeId) &&
@@ -665,6 +680,7 @@ export async function queryGraphFromIndex(
       snapshot.resetAt,
     ),
     manifest,
+    archived,
   );
   const pageEdgeIds = universeEdges
     .filter(

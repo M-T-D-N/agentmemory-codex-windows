@@ -20,10 +20,19 @@ import { saveImageToDisk } from "../utils/image-store.js";
 import { createHash } from "node:crypto";
 import {
   isCodexInternalAmbientText,
+  stripCodexAmbientUiBlocks,
   isExcludedCodexAmbientSession,
 } from "./observation-visibility.js";
 import { safeAudit } from "./audit.js";
 import { sessionLifecycleLockKey } from "./session-lifecycle.js";
+import { canonicalCodexCwd } from "./codex-source-identity.js";
+
+function sameCodexCaptureCwd(session: Session, cwd: string): boolean {
+  if (session.cwd === cwd) return true;
+  if (!session.codexNativeCapture) return false;
+  try { return canonicalCodexCwd(session.cwd) === canonicalCodexCwd(cwd); }
+  catch { return false; }
+}
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -206,9 +215,12 @@ export function registerObserveFunction(
         if (isCodexCapture && (
           !requestedProject || requestedProject === "*" || requestedProject.length > 512 ||
           typeof payload.cwd !== "string" || !payload.cwd.trim() ||
-          (existingSession && (existingSession.project !== requestedProject || existingSession.cwd !== payload.cwd))
+          (existingSession && (existingSession.project !== requestedProject || !sameCodexCaptureCwd(existingSession, payload.cwd)))
         )) {
           return { success: false, error: "Codex session project or cwd mismatch" };
+        }
+        if (isCodexCapture && existingSession?.codexNativeCapture) {
+          return { success: true, skipped: true, nativeSourceManaged: true, sessionId: payload.sessionId };
         }
         const normalCodexPrompt = isCodexCapture && payload.hookType === "prompt_submit"
           && typeof raw.userPrompt === "string" && !!raw.userPrompt.trim()
@@ -238,7 +250,7 @@ export function registerObserveFunction(
           );
           if (isCodexInternalAmbientText(existingSession?.firstPrompt)) {
             captureUpdates.push({ type: "set", path: "firstPrompt",
-              value: raw.userPrompt!.replace(/\s+/g, " ").trim().slice(0, 200) });
+              value: stripCodexAmbientUiBlocks(raw.userPrompt!).replace(/\s+/g, " ").trim().slice(0, 200) });
           }
         }
         const auditReactivation = async () => {
@@ -359,7 +371,7 @@ export function registerObserveFunction(
             updates.push({ type: "set", path: "semanticGraphStatus", value: "pending" });
           }
           if (!session.firstPrompt && typeof raw.userPrompt === "string") {
-            const trimmed = raw.userPrompt.replace(/\s+/g, " ").trim();
+            const trimmed = stripCodexAmbientUiBlocks(raw.userPrompt).replace(/\s+/g, " ").trim();
             if (trimmed.length > 0) {
               updates.push({
                 type: "set",
@@ -386,7 +398,7 @@ export function registerObserveFunction(
           // those fields keep their original no-op behaviour.
           const trimmedPrompt =
             typeof raw.userPrompt === "string"
-              ? raw.userPrompt.replace(/\s+/g, " ").trim().slice(0, 200)
+              ? stripCodexAmbientUiBlocks(raw.userPrompt).replace(/\s+/g, " ").trim().slice(0, 200)
               : undefined;
           const ts = new Date().toISOString();
           await kv.set(KV.sessions, payload.sessionId, {

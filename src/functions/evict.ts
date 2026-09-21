@@ -15,6 +15,7 @@ import { deleteAccessLog } from "./access-tracker.js";
 import { logger } from "../logger.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { sessionLifecycleLockKey } from "./session-lifecycle.js";
+import { readArchiveCleanupProtection } from "./archive.js";
 
 interface EvictionConfig {
   staleSessionDays: number;
@@ -131,8 +132,9 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
       };
 
       let recoveredStaleSessions = 0;
+      const protectedArchive = await readArchiveCleanupProtection(kv);
       const allSessions = await kv.list<Session>(KV.sessions).catch(() => []);
-      const sessions = allSessions.filter(session => !kv.hasObservationRecovery(session.id));
+      const sessions = allSessions.filter(session => !kv.hasObservationRecovery(session.id) && !protectedArchive({ kind: "session", id: session.id }));
       const protectedSessionsSkipped = allSessions.length - sessions.length;
       const summaries = await kv
         .list<SessionSummary>(KV.summaries)
@@ -290,7 +292,7 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
-      const memories = await kv.list<Memory>(KV.memories).catch(() => []);
+      const memories = (await kv.list<Memory>(KV.memories)).filter(mem => !protectedArchive({ kind: "memory", id: mem.id }));
       const evictedMemIds = new Set<string>();
       for (const mem of memories) {
         if (mem.forgetAfter) {

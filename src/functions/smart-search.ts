@@ -7,6 +7,9 @@ import type {
   Lesson,
 } from "../types.js";
 import { KV } from "../state/schema.js";
+import { memoryToObservation } from "../state/memory-utils.js";
+import { createSearchCandidateSelection, type SearchCandidateSelection } from "./search-candidates.js";
+import { readArchiveVisibility } from "./archive.js";
 import { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { recordAccessBatch } from "./access-tracker.js";
@@ -80,7 +83,7 @@ const LESSON_CONTENT_PREVIEW_CHARS = 240;
 export function registerSmartSearchFunction(
   sdk: ISdk,
   kv: StateKV,
-  searchFn: (query: string, limit: number) => Promise<HybridSearchResult[]>,
+  searchFn: (query: string, limit: number, selection?: SearchCandidateSelection) => Promise<HybridSearchResult[]>,
 ): void {
   sdk.registerFunction("mem::smart-search",
     async (data: {
@@ -170,7 +173,8 @@ export function registerSmartSearchFunction(
           }
         }
 
-        const projectScoped: typeof expanded = [];
+        const archiveHidden = await readArchiveVisibility(kv);
+        const projectScoped: Array<(typeof expanded)[number] & { project?: string }> = [];
         for (const entry of expanded) {
           const session = await kv
             .get<Session>(KV.sessions, entry.sessionId)
@@ -180,17 +184,11 @@ export function registerSmartSearchFunction(
             entry.observation,
           );
           if (!observation) continue;
-          if (projectFilter) {
-            const memoryProject = session
-              ? session.project
-              : (
-                  await kv
-                    .get<Memory>(KV.memories, entry.obsId)
-                    .catch(() => null)
-                )?.project;
-            if (memoryProject !== projectFilter) continue;
-          }
-          projectScoped.push({ ...entry, observation });
+          const memory = await kv.get<Memory>(KV.memories, entry.obsId);
+          if (archiveHidden(memory ? { kind: "memory", id: entry.obsId } : { kind: "observation", id: entry.obsId, sessionId: entry.sessionId })) continue;
+          const project = memory?.project ?? session?.project;
+          if (projectFilter && project !== projectFilter) continue;
+          projectScoped.push({ ...entry, observation, ...(project ? { project } : {}) });
         }
 
         const scoped = filterAgentId
@@ -227,22 +225,15 @@ export function registerSmartSearchFunction(
       const lessonLimit = Math.min(limit, 10);
       const includeLessons = data.includeLessons !== false;
 
-      // Over-fetch when filtering. Hybrid search can't filter on
-      // agentId (BM25/vector indexes don't carry it), so we ask the
-      // searcher for more hits than we need and trim post-filter. 3×
-      // is a defensible middle ground: enough headroom for a small
-      // workload, capped at 300 so a 100-limit request never asks for
-      // thousands of hits.
-      const overFetchLimit = Math.max(Math.min(limit * 10, 300), 100);
-
       const [hybridResults, lessons] = await Promise.all([
-        searchFn(data.query, overFetchLimit),
+        searchFn(data.query, limit, createSearchCandidateSelection(kv, { project: projectFilter, agentId: filterAgentId })),
         includeLessons
           ? recallLessons(sdk, data.query, lessonLimit, projectFilter)
           : Promise.resolve([]),
       ]);
 
-      const projectScoped: HybridSearchResult[] = [];
+      const archiveHidden = await readArchiveVisibility(kv);
+      const projectScoped: Array<HybridSearchResult & { project?: string }> = [];
       for (const result of hybridResults) {
         const session = await kv
           .get<Session>(KV.sessions, result.sessionId)
@@ -252,17 +243,12 @@ export function registerSmartSearchFunction(
           result.observation,
         );
         if (!observation) continue;
-        if (projectFilter) {
-          const memoryProject = session
-            ? session.project
-            : (
-                await kv
-                  .get<Memory>(KV.memories, result.observation.id)
-                  .catch(() => null)
-              )?.project;
-          if (memoryProject !== projectFilter) continue;
-        }
-        projectScoped.push({ ...result, observation });
+        const memory = await kv.get<Memory>(KV.memories, observation.id);
+        if (archiveHidden(memory ? { kind: "memory", id: observation.id } : { kind: "observation", id: observation.id, sessionId: result.sessionId })) continue;
+        const project = memory?.project ?? session?.project;
+        if (projectFilter && project !== projectFilter) continue;
+        if (filterAgentId && observation.agentId !== filterAgentId) continue;
+        projectScoped.push({ ...result, observation, ...(project ? { project } : {}) });
         if (projectScoped.length >= limit) break;
       }
 
@@ -279,6 +265,7 @@ export function registerSmartSearchFunction(
         type: r.observation.type,
         score: r.combinedScore,
         timestamp: r.observation.timestamp,
+        ...(r.project ? { project: r.project } : {}),
       }));
 
       if (data.trackAccess !== false) {
@@ -432,6 +419,14 @@ async function findObservations(
     () => null,
   );
   let unresolved: number[] = [];
+  const fillMemories = async () => {
+    for (const index of unresolved) {
+      if (observations[index]) continue;
+      const memory = await kv.get<Memory>(KV.memories, items[index].obsId);
+      if (memory && memory.isLatest !== false) observations[index] = memoryToObservation(memory);
+    }
+    return observations;
+  };
 
   for (let index = 0; index < items.length; index++) {
     const { obsId, sessionId } = items[index];
@@ -466,7 +461,7 @@ async function findObservations(
       }
       if (indexesByObservationId.size === 0) break;
     }
-    return observations;
+    return fillMemories();
   }
 
   for (const session of sessions) {
@@ -479,5 +474,5 @@ async function findObservations(
     observations[index] = observation;
     break;
   }
-  return observations;
+  return fillMemories();
 }

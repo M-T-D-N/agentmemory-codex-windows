@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.8`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.9`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -87,8 +87,8 @@ The current evidence is deliberately narrower than a production guarantee:
 - upstream updates require source-level review and renewed qualification;
 - large upstream-compatible CLI and API registration surfaces remain close to
   upstream structure and have not received an independent manual code audit;
-  the Windows `codex-turn.mjs` payload deliberately remains self-contained for
-  single-file deployment; and
+  the Windows hook and its shared project resolver ship together through the
+  managed payload manifest; and
 - this remains a Technical Preview, not a general production-readiness claim.
 
 ## Preview scope
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.8`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.9`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -111,8 +111,9 @@ The preview is intentionally narrow:
 - Native Windows and Codex are the supported downstream host profile.
 - Existing versioned runtime directories are preserved. Build changed contents
   with a fresh internal revision before cutover; the installer refuses a
-  different payload at an existing versioned target. Failed cutover restores the
-  predecessor configuration. Canonical `data` is never replaced by this workflow.
+  different payload at an existing versioned target. Failed cutover follows the
+  data-contract recovery boundary below; restoring predecessor binaries is not
+  unconditional. Canonical `data` is never replaced by this workflow.
 - Existing AgentMemory memory, lesson, graph, audit, and provenance stores stay
   authoritative.
 - Local Qwen is optional and capability-scoped to typed graph extraction over
@@ -186,7 +187,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.8 -OutputDirectory D:\staging\npm-preview4
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.9 -OutputDirectory D:\staging\npm-preview9
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -212,8 +213,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.8\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.8 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.9\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.9 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -229,6 +230,31 @@ preserves canonical data and instance metadata, keeps the existing task
 identity and working directory, restarts the owned tasks, and requires the
 normal status path to become healthy. It never runs a standard reinstall inside
 the live runtime and never migrates or deletes canonical data.
+
+The managed package now declares data contract version 3 for source-linked
+duplicate captures, including their partial-forget protection. It includes the
+version 2 native capture, recoverable graph writes and archive lifecycle state. The release and installed
+manifests retain that contract independently of the upstream compatibility version.
+An absent declaration means legacy contract 1. The current installer rejects a
+target contract below the installed contract before cutover. The managed worker
+checks the selected package's declaration before importing its CLI, including
+when `AGENTMEMORY_PACKAGE_DIR` selects a different package.
+
+Cutover holds the existing startup file lock, records its phase in the existing
+install manifest and retains the contract floor before copying the candidate.
+If failure follows a contract transition or candidate startup, the installer
+stops the owned runtime and leaves `cutover_failed`, candidate files, canonical
+data and the predecessor code/config backup available for review. It does not
+automatically restore predecessor binaries against possibly newer data. An
+unconfirmed stop also prevents file rollback. Complete or repair a compatible
+release; a partial package copy may require review before retry. Reverting to a
+legacy runtime requires a matching pre-upgrade **data** backup as well as its
+code/config; the installer's code/config backup alone is insufficient.
+
+These are protections in the supported installer and worker entry points. An
+old installer or an independently launched old upstream binary cannot learn this
+new contract and must not be pointed at the upgraded live store. Directly
+overwriting manifests or bypassing managed entry points is not a supported rollback.
 
 The Codex deployment sets `AGENTMEMORY_FORCE_PROXY=true`, provider
 `local-qwen`, capability `graph`, and fallback providers `none`. The provider
@@ -249,6 +275,22 @@ clients.
 
 ## Active operating profile
 
+Recall applies project and agent scope before taking the top keyword, vector,
+or graph candidates. A fixed over-fetch multiplier no longer determines whether
+an in-scope memory can appear. Canonical candidate checks are shared within each
+request and state reads use batches of at most eight. Saved memories keep their
+own project even when their first source session belongs to another project;
+compact and expanded results carry that project, and expansion resolves saved
+memories from the canonical memory store. An explicit working directory requires
+a proven matching source session directory.
+
+The primary recall path uses graph retrieval even without a populated vector
+index. Project-scoped graph traversal excludes other projects, verifies source
+session/observation provenance before returning graph-only hits, and skips
+superseded or review-retired relationships in current recall. Explicit temporal
+history remains separate. Missing graph source provenance does not authorize
+guessing a session. These changes do not start a local model or migrate data.
+
 The installed profile uses four managed hooks: `SessionStart`,
 `UserPromptSubmit`, `Stop`, and `SessionEnd`. Normal main-agent user prompts and
 final assistant responses enter the official session/observation lifecycle;
@@ -259,6 +301,12 @@ same project and working directory. Unmatched or missing turn identity fails
 closed. Internal requests preserve existing normal session history; only the
 automatic `codex_internal_prompt` exclusion can recover on a later normal
 Codex prompt, with an audit entry. Other exclusion reasons remain in force.
+
+`memory_recall` and `memory_smart_search` expose an optional `agentId`, including
+smart-search expansion. Omission preserves the configured agent scope; an
+explicit `*` requests a cross-agent read within the selected project. Invalid
+explicit agent IDs fail before search rather than silently selecting the default.
+This does not assign an owner to existing unscoped sessions or observations.
 
 `memory_sessions` requires `project` (explicit `*` for cross-project reads),
 returns newest sessions first, defaults to 20 rows, caps requests at 500, and
@@ -278,6 +326,451 @@ destination, including an explicitly matching nested Git path. Missing or
 ambiguous targets, path escapes, linked checkouts, and unverified retained source
 identities fail closed. The registry and its sibling relocation manifest remain
 the routing authority; hooks do not rewrite them or create a parallel registry.
+
+Existing unassigned normal Codex sessions can be reconciled through authenticated
+`POST /agentmemory/session/start` with `action: "reconcile-owner"`. First send an
+exact `project`, `sessionId`, a `sourcePath` relative to the configured Codex source
+root, and `dryRun: true`. The preview returns the native identity, current/target
+owner, observation counts, and `expectedVersion`. Apply the same request with
+`dryRun: false`, that version, and a non-empty `reason` (at most 512 characters).
+A stale preview or conflicting owner is rejected before changes. There is no
+blanket adoption of unassigned history and no wildcard write scope.
+
+The trusted source root defaults to the Windows account's `.codex` directory,
+independently of the service's synthetic HOME. An optional absolute
+`codex_source_root` in `config/codex-workspace.json` overrides it and is preserved
+by updates. Inherited environment variables and request bodies cannot override
+it. Only normal CLI/Desktop `session_meta` identity under `sessions` or
+`archived_sessions` is read; linked paths, unknown sources and inherited fork
+history are rejected. Normally this operation reads only the bounded metadata
+header and does not enable automatic collection. When the canonical cwd differs
+from the initial header, reconciliation additionally requires the exact native
+thread index to agree with the canonical cwd and a complete supported inventory
+whose last verified turn context names that cwd. Preview and audit expose
+`verifiedCurrentCwd`; the initial source header, canonical cwd and project are
+preserved. Merely finding a directory mentioned in conversation text or an
+earlier turn does not prove the current cwd.
+
+Reconciliation preserves existing session/observation IDs, contents, counts and
+graph cursors. It uses the existing writer exclusion barrier, records an audit,
+and stores pending/completed reconciliation provenance on the canonical session.
+The session owner is written first so future captures inherit the correct owner;
+completion is written only after observation updates acknowledge success. An
+interrupted application remains pending and can be previewed again and resumed.
+An ambiguous StateModule write still requires the existing worker restart and
+canonical verification procedure before further writes. Other agents, excluded
+sessions and recovery-protected observations are not reassigned. Derived memory,
+lesson and graph ownership is not changed by this session-only operation.
+
+The same authenticated endpoint accepts `action: "inspect-source"`, exact
+`project`, `sessionId`, relative `sourcePath`, and optional `limit` (1–200, default
+20). This read-only comparison identifies source messages, existing matches,
+missing observations and ambiguous legacy correspondence without returning the
+conversation text. It reads at most 256 bounded windows per request and reports
+partial tails, unsupported records and pending display/primary correspondence
+separately. A ready comparison is diagnostic evidence, not an apply authorization
+or a graph-completion claim. Initial legacy matching requires a complete native
+inventory so a read-window boundary cannot hide another matching repeated input.
+Existing capture observations without an explained source match are reported as
+`unmatchedCaptures`; a complete inventory with unresolved captures is blocked.
+Manual curation and tool observations do not require a native conversation match.
+Known internal host notifications use the same exclusion rules as native parsing;
+legacy rows with canonical source or deletion/recovery metadata remain checked.
+Automatic native capture and graph recovery are not enabled by this inspection.
+
+`action: "initialize-source"` on the same endpoint previews the initial native
+correspondence with `dryRun: true`. Applying requires the returned `expectedVersion`,
+`dryRun: false`, and a non-empty `reason`; the source root remains server-owned.
+Initialization preserves existing observation IDs and metadata. Legacy matching
+ignores already deleted, unbound empty rows as conversation candidates using
+the official empty-observation content check. Those rows and their recovery
+metadata are not modified. Protected rows with content, restored state or source
+provenance continue to require their existing lifecycle. Ordinary correspondence
+uses full-content correspondence within the existing five-second window and
+requires a unique mapping across the complete inventory. It can append one final
+LF when the resulting digest exactly matches the native source. Legacy synthetic
+user prompts can regain their complete text when the upstream 399-character
+prefix plus ellipsis reproduces the entire stored narrative and the original
+conversation type/confidence agree. This does not trim or otherwise normalize
+the source text; competing prefixes remain unresolved. For an unbound, unprotected
+synthetic user prompt, a second exact comparison can remove only ASCII space,
+tab, CR and LF from the native text boundaries. The complete result, or its
+exact upstream 399-character prefix plus ellipsis, must equal the entire stored
+narrative within five seconds and have a unique source in the complete inventory.
+Recovery restores the original native text in the same observation, preserving
+metadata and retrying index publication by that ID. Preview and audit identify
+`restoreLegacyPromptWhitespace`. Internal whitespace, Unicode spacing and other
+text changes remain unsupported; two competing sources or stored records block
+recovery. This compatibility rule does not establish which historical writer
+removed the boundary whitespace. Legacy synthetic
+assistant records can regain their complete native answer only when the upstream
+turn-ID prefix and 400-character truncation reproduce the entire stored narrative,
+the native turn ID matches the stored subtitle, and the synthetic type/confidence
+agree. Legacy image-wrapper text can be normalized only when actual native
+image triplets reproduce the entire stored user narrative, the timestamps are
+equal, and correspondence is unique. Existing image references and payloads are
+preserved; literal image-tag text does not qualify. Competing source matches still block recovery. Arbitrary trimming and fuzzy
+matching are not supported. Unfinished raw
+captures can be converted in place through the existing zero-LLM synthetic path
+only when their owner, shape and complete source correspondence are verified.
+When a later native source generation omits an existing capture, initialization
+can inspect up to 16 older source candidates for that exact session. Only a
+matching source kind and cwd, complete prior inventory, full unchanged text,
+unique identity and the existing five-second legacy window permit adoption.
+Previously bound rows must retain their native key. Matching retained records
+store their relative path in codexSource.retainedSourcePath and use the existing
+indexPending publication retry. Preview/audit report adoptRetainedSource and
+retainedSourceObservations; inspection counts retainedSourceMessageCount apart
+from current native messages. This preserves already captured history outside a
+continuation boundary or superseded source file without changing the current
+replay cursor or importing uncaptured prior tails. Ambiguous, protected, changed,
+missing and unsupported evidence remains unresolved.
+For a complete source whose verified task completion is blocked only by a unique
+unmatched UserMessage display item, initialize-source accepts
+reviewSourceHolds: true (default false). Preview scans the complete source,
+reports at most 128 exact source holds, and includes the option and their
+provenance in expectedVersion. Apply requires that preview version and a reason.
+Only genuine primary messages are eligible for collection. Each hold retains the
+session, turn, item, byte/record locations, text and record digests, and the
+verified completion location/digest in canonical codexNativeCapture.sourceHolds;
+it stores no display body and creates no synthetic primary or graph completion.
+Repeated ambiguous display text, conflicting item identities, unmatched assistant
+items, a mismatched final response, unknown records and incomplete tails remain
+blocking. An approved hold is not a general permission to skip parser failures.
+
+Incremental reads and restarts cross only those exact reviewed holds. Later
+unknown input requires a fresh explicit preview/apply. Capture reports
+caught_up_with_holds, inspection reports ready_with_source_holds, and both
+report sourceHoldCount; native health also reports the aggregate sourceHolds.
+completeNativeInventory describes a complete source scan and does not mean
+that a held item acquired a primary message. Observation-level
+unresolvedCaptures remains separate and retains its existing protections.
+Held sessions and cursors use version 2. Older readers refuse them rather than
+silently marking their tails caught up; unaffected sessions keep version 1.
+Export/import preserves validated source holds, discards the local cursor and
+requires source reconciliation. Older versions reject this held transfer state.
+Rolling back therefore leaves held sessions unprocessable until a supporting
+version is restored; it must not be reported as fully reconciled collection.
+
+Complete marked ambient UI blocks are stripped before classifying a mixed user
+message. A following request remains eligible in replay, observation visibility
+and session summaries, including its normal final response. The request text
+and native message identity are preserved. Internal-only, unmarked host and
+incomplete host payloads remain excluded.
+For proven duplicate captures, initialize-source accepts the explicit
+reconcileDuplicates option (default false). Complete inventory and the same
+existing exact/legacy proofs must uniquely link each row to one native message.
+An existing canonical binding is preferred; otherwise a stable observation-ID
+order chooses the representative without claiming it was chronologically first.
+Other rows retain their IDs and metadata and store codexSource.duplicateOfObservationId.
+Any supported body recovery still restores the full native body in place.
+Preview/audit expose linkDuplicateCaptures and the exact duplicateCaptures plan.
+Distinct primary messages, conflicting ownership/provenance, protected rows,
+orphaned links and alias chains remain blocked. Existing valid links need no
+opt-in for later capture or import reconciliation. Archive/restore remains a
+separate explicit official lifecycle operation; review graph provenance before
+archiving redundant rows. Forget must select the entire linked native-message
+group, or the whole session, so a duplicate is neither resurrected nor left orphaned.
+All repairs are included in the versioned preview and audit, and use the existing
+index publication retry. Existing final responses from a turn without a normal
+user message can receive verified native provenance when the stored turn subtitle,
+complete content and unique correspondence agree. Their IDs, content and derived
+references remain intact; `codexSource.legacyExcludedReason` records their original
+exclusion from normal capture. Inspection counts these source records separately.
+The preview and audit identify adopted excluded finals. This does not insert
+previously uncaptured internal responses or change normal capture eligibility.
+Final-response hooks record their collection time, which may trail the native
+answer by more than five seconds. An unbound, unprotected assistant capture may
+be adopted outside that window only when its exact stored turn ID and complete
+answer prove a unique source in the complete inventory, and collection follows
+the native answer. Preview and audit report `adoptDelayedFinal`; the original
+collection timestamp is preserved alongside the canonical source timestamp.
+Historical `codex-task-recovery:prompt_submit:<item ID>` imports may use a
+displayed UserMessage item ID instead of the primary message or execution turn
+ID. Complete inventory can link that item to one primary user message only when
+the turn and full text agree and neither identity has a competing claim. An
+unbound, unprotected import with that exact item provenance and unchanged full
+body can then be adopted outside the ordinary time window. Its original ID,
+timestamp and metadata remain intact. Preview and audit report
+`adoptImportedUserItem`; this source-derived proof is not persisted, and display
+items are never collected as additional messages or used without a primary.
+Historical `obs_codex_recovery_*` user observations can regain their native text
+when the original content-part assembly reproduces the complete stored digest
+and deterministic observation ID. The exact source timestamp and stored
+`Codex original turn` provenance must agree, and competing source claims still
+block recovery. This handles separators once introduced by image or blank parts
+without applying arbitrary whitespace normalization. Preview and audit report
+`restoreLegacyRecoveryParts`; the source-derived helper proof is not persisted.
+Legacy `MM/dd/yyyy HH:mm:ss` timestamps can be restored to the native UTC instant
+only when they exactly reproduce its UTC calendar fields, the complete body is
+identical, and the complete source inventory proves a unique correspondence.
+This recovery does not shift arbitrary dates or widen the ordinary time window;
+competing messages in the same second remain unresolved. Timestamp repairs are
+identified in the preview and audit and re-enter the existing index retry path.
+Any unexplained stored capture, ambiguous match or
+unresolved legacy forget evidence blocks the entire initialization. An initialized
+session accepts `action: "capture-source"` with exact `project` and `sessionId`.
+Its canonical cursor advances only after the bounded batch has been stored.
+For a canonical session already assigned to a later verified cwd, initialization
+keeps the immutable initial source identity and binds its existing cwd through
+`captureCwd` in the same canonical capture state. A complete source inventory and
+the ordinary observation correspondence checks are still required. Capture and
+source relocation check that binding against the current canonical session;
+changing the canonical cwd again requires reconciliation. Transfer preserves the
+binding but discards executable cursors and requires a fresh source comparison.
+This does not move observations, reassign projects or infer missing owners.
+Normal managed hooks then request native capture and still inject recall context,
+without also storing another copy of the hook text.
+
+For already initialized sessions, the service performs a startup catch-up and a
+60-second recovery sweep. Each serial batch selects up to eight sources in stable
+ID order, reads up to four windows each, and yields between windows after about
+two seconds; an in-flight state or source call is allowed to finish. An unfinished
+sweep resumes after a 100 ms yield instead of waiting a minute per batch. Hooks
+updating a source's checked time cannot move it behind the current sweep.
+Sources with a progressing unread tail request another bounded sweep; unchanged
+partial tails and failed reads do not request rapid retries. Discovery is paged
+until its current cycle ends, then waits for the next capture sweep. Once there
+is no progressing backlog or unfinished inventory cycle, ordinary 60-second
+polling remains. The in-memory sweep position is only scheduling state; restart
+begins a fresh sweep using the existing canonical capture cursors and IDs.
+Health exposes `lastCaptureCycleCompletedAt` as a completed inspection pass,
+not proof that every source, graph or historical hold has been reconciled.
+Capture wakes the existing graph backlog after storage; the source reader itself
+does not acquire or start Qwen.
+
+The internal `mem::codex-source-index` function reads the managed source root's
+Codex `state_5.sqlite` thread index in bounded ID-ordered pages (default 200,
+maximum 500). This requires Node's built-in `node:sqlite`; it is loaded only when
+the function is called. The adapter opens the source index read-only, selects
+identity metadata only, and never uses it as an AgentMemory state store. It
+keeps Codex's registered task ID and rollout path, including replacement filenames,
+instead of interpreting filename suffixes as new tasks. Subagent sources are
+excluded, unsupported metadata remains unknown, and missing/newer index versions,
+incompatible schemas or read failures are errors rather than empty coverage.
+Candidates still require original-header, project, inherited-history and existing
+observation checks before registration or capture; listing alone authorizes no writes.
+
+The startup/60-second source drain now discovers tasks from that index before
+capturing initialized sessions. It shares the hook's project registry and Git
+routing implementation. Each discovery pass reads at most 500 index entries,
+inspects at most eight new/uninitialized or moved sources and yields between entries after
+about two seconds; an in-flight source or state call is allowed to finish. The
+in-memory index position advances through the page and cycles from the beginning;
+after restart it begins a fresh cycle. This position is not capture-completion evidence.
+
+A previously unseen source needs a supported standalone or paginated-fork header, a real
+conversation message, a matching current working directory/project and no orphaned
+observations, summary or forget evidence. Discovery creates one canonical session
+with its native cursor at zero, then the ordinary capture path stores messages.
+An existing session with the exact managed owner and matching project can also
+transition after the existing preview/apply correspondence check succeeds; each
+automatic inventory is bounded to four read windows. Existing observation IDs and
+content are preserved. Unassigned/other owners, source replacements, ambiguous or
+incomplete correspondence and unknown inherited-history formats still require reconciliation.
+For an initialized source moved between `sessions` and `archived_sessions`,
+discovery verifies the existing file identity, source metadata and cursor anchor
+at the indexed path, then updates only the source location and capture wait state.
+The saved cursor is not advanced by this check. The normal drain captures any
+unread tail, preserving observation IDs and graph provenance. Copies with a new
+file identity are held for reconciliation rather than borrowing the old cursor.
+An already owned hook session whose worktree no longer exists can initialize
+using its canonical project and the matching index/header or verified later cwd, after the same
+complete observation correspondence check. It does not infer a new project from
+the absent directory name. A new source without an existing owner still needs
+verifiable project routing. Codex task archival does not archive, hide or delete
+the AgentMemory records derived from that task.
+Empty originals do not create empty sessions. These unresolved cases remain visible;
+automatic discovery is not a claim that historical migration or whole-Codex graph
+coverage has completed. The packaged hook now includes `codex-project.mjs` beside
+`codex-turn.mjs`; both are required when copying the hook independently.
+
+A paginated fork must declare matching parent ID, ordinal and byte boundaries in
+its native header. The adapter retains that reference in source provenance and
+reads the child's own rollout only; it does not recapture the parent history.
+New final answers may continue that inherited conversation without another user
+prompt; internal title/ambient turns remain excluded.
+Records before the child's creation time or without a valid timestamp stop the
+read as unknown. Cursor identity includes the parent boundary, and export/import
+preserves it while requiring host cursor reconciliation.
+
+A same-task continuation with `history_base` reads the declared prefix from one
+proven earlier rollout, followed by the current file after its metadata header.
+The adapter checks the same native task ID, supported source kind, chronological
+header timestamps, and exact line/byte boundary. Filename matches only select
+candidates; they never establish task identity. The logical source retains the
+original creation time and the prior relative path. Original files stay unchanged,
+and bytes beyond the declared earlier boundary are excluded. Cursor identity binds
+both files and the reference, so replacement or a changed prior file requires
+reconciliation; appending to the current file remains resumable. Transfer preserves
+the reference and requires host cursor reconciliation. Missing or ambiguous prior
+files, nested external segments, and fork bases remain unsupported and held.
+Working-directory differences still require the separate ownership reconciliation;
+joining source history does not authorize project reassignment.
+
+Initialized native sessions use per-observation graph completion records. An older
+insert remains eligible even when the forward cursor is newer or the session was
+previously complete. A valid zero-entity result is recorded as processed. Records
+match the exact source input and graph reset boundary; changed inputs and graph
+resets invalidate the prior result. The forward/backfill cursors remain progress
+hints rather than proof that every observation was processed.
+
+Validated graph assignments and completion records are stored in one recoverable
+StateModule write plan before application. Startup recovery reuses those exact
+assignments and checks source identity, source content, and target preconditions;
+it does not rerun the model for a partially applied result. An uncertain write
+acknowledgement retains the existing worker-recovery boundary. Canonical writers
+wait for a successful active application and remain blocked if recovery fails.
+Completion transfer through every backup surface and whole-corpus activation
+still require the remaining lifecycle integration and acceptance checks.
+
+Managed Codex forget now retains minimal capture exclusions in the official
+StateModule store before deleting observations: session/observation identifiers,
+an exact native source key when available, or legacy timestamp/kind/content
+digest. It retains no deleted conversation body or attachment. An ambiguous
+legacy exclusion blocks source reconciliation instead of guessing. Failed
+deletion remains distinguishable from completed deletion when its original row
+survives. These exclusions apply to both inspection and initialized native capture.
+
+A whole-session forget excludes native history through its recorded forget time
+and the exact targeted captures. It does not prohibit all future messages in the
+same Codex task. A later whole-session forget can extend that time boundary.
+Capture exclusions survive ordinary merge/replace imports. Imports that would
+restore a forgotten capture or contradict surviving canonical rows are rejected
+before import changes. Explicit forget remains deletion, not recoverable archive.
+Exports containing exclusions or native capture provenance use
+`0.9.29-codex-lifecycle-1`; older readers
+must reject that unsupported version rather than silently omit the exclusions.
+The portable package compatibility version remains `0.9.29`.
+Exports containing reversible archive lifecycle metadata use
+`0.9.29-codex-lifecycle-2` and include the original targets with their archive
+states. Explicit archive inspection and mutation use `memory_archive` or
+`POST /agentmemory/archive`; automatic archive policy is not enabled.
+Use `action: "candidates"` with one exact `project` to review the current
+retention/TTL candidates. `policy` accepts `all` (default), `retention`, or `ttl`;
+`threshold` defaults to 0.15; `limit`/`offset` page the project-filtered results.
+The response includes an evaluation time, policy parameters, exact target IDs,
+selection reasons and invalid-policy record count without returning original
+bodies or changing access logs, retention scores, archive state or source records.
+Retention uses the existing default decay formula recomputed from current records
+and access history; unavailable history fails the request rather than selecting
+records as unused. TTL retains the existing strict `now > forgetAfter` rule.
+Archived/deleted targets and unresolved project ownership are excluded. This
+preview covers memory and semantic retention plus memory TTL, not other cleanup
+heuristics. Each page is evaluated against current data, not a historical snapshot.
+Candidate status alone is not approval: inspect each target and request its
+individual archive preview before applying a reviewed change. Existing automatic
+cleanup settings are not enabled or changed by this read-only action.
+Automatic TTL/contradiction cleanup, age/capacity eviction, retention eviction
+and lesson decay preserve targets with archive lifecycle history and their source
+sessions. A manual restore does not authorize deleting the same original on the
+next automatic sweep; use explicit lifecycle review for subsequent cleanup.
+Unprotected records retain the existing cleanup rules. Protection is resolved
+before mutations and cleanup stops on unreadable or invalid archive provenance.
+Retention eviction and lesson decay join the existing observation writer boundary
+so archive/restore cannot race their candidate selection and writes. These rules
+do not enable automatic cleanup or replace explicit forget with archive.
+Explicit `POST /agentmemory/forget` requires the archive's exact `project` when
+an archived memory, session, observation or affected graph target is involved.
+Its session dry-run reports `archiveTargets`. After confirmed original deletion,
+the same operation removes only that target's archive metadata and audits the
+removal; surviving graph originals keep their archive state. If metadata cleanup
+fails after source deletion, retry the same exact request to finish cleanup.
+Deleting a source does not create a content-bearing archive or permit restore of
+the deleted original. Pending archive imports must be recovered first. A session
+forget that would remove another archived target's required project provenance
+is rejected for explicit dependency review instead of silently orphaning it.
+The same metadata cleanup now applies to governance memory deletion and lesson
+soft-delete. Supply `project` to the existing MCP/REST delete request for an
+archive target. Governance bulk filtering honors that exact project before
+preview or mutation, and a mixed-project explicit ID list is rejected before
+deletion when a project is supplied. After a bulk cleanup failure, use the returned
+failure IDs with exact governance deletion to finish metadata cleanup; repeating
+a content filter cannot rediscover an already removed original. Lesson deletion
+keeps the upstream soft-delete contract: its row remains marked `deleted`, while
+its archive metadata is removed. This is not physical erasure of lesson content.
+Direct graph purge and the graph-provenance stage of explicit forget now use
+the existing durable graph write plan. Version 2 supports exact deletions alongside
+assignments; version 1 assignment plans remain readable. A deletion stores its
+original digest and address, not a backup of the deleted body. The plan includes
+the canonical graph, affected lookup/query indexes, matching archive metadata
+removal and the completed audit state. Archive-only cleanup plans are rejected.
+After an ambiguous state acknowledgement, ordinary graph reads and canonical
+writes remain fenced until the existing fresh-worker recovery reapplies the
+same plan. It accepts already-applied changes and refuses conflicting state.
+In source forget, graph failure leaves the source records present; recover the
+graph plan before retrying that exact source deletion. Independently supported
+graph records keep their archive state and remaining provenance. Inspect the
+completed purge audit and canonical results after recovery rather than treating
+an old inventory as a fresh purge request. The patched engine's process-crash
+qualification and managed rollback boundary are documented below and above;
+full release acceptance and explicit activation approval remain required.
+Ordinary memory lists/counts/details, semantic/procedural lists, skill list and
+matching, working context and related-memory traversal also exclude archived
+or import-pending originals. Related-memory traversal does not use a hidden
+memory as a bridge. These filters run before page counts, ranking limits or
+context budgets, and a restore exposes the same canonical ID. Explicit archive
+inspection remains the route for viewing a hidden original.
+Snapshot creation and restoration use the same transfer
+boundary. Merge imports preserve the destination's existing archive or restore
+decision; a stale backup does not change that decision. Replacing an archived
+original with different content, transferring metadata without its original, or
+reassigning its project is rejected before import writes. Replace imports require
+a destination without archive lifecycle history; use merge for an existing store.
+An interrupted archive import retains a hidden pending state until the identical
+payload's originals are verified as stored. Export and manual visibility changes
+remain unavailable for that pending target until recovery finishes. The export
+version fence protects transfers; the managed data-contract floor separately
+protects supported runtime updates and package selection for the live store.
+Legacy Mesh payloads cannot carry archive/restore history or its source records.
+Stores with any archive lifecycle history therefore reject legacy Mesh push,
+pull, receive and export, including after a restore. Receive also rejects a
+payload containing archive metadata instead of silently discarding it. Use the
+archive-aware export/import functions to transfer lifecycle originals; merge
+preserves the destination's own archive/restore decision. This is an explicit
+compatibility boundary, not automatic archive synchronization between peers.
+A refused transfer leaves the synchronization cursor unchanged. REST transfer
+refusals return HTTP 409. Copies previously sent to a peer are not recalled.
+Claude MEMORY.md regeneration omits archived and import-pending memories before
+its line budget and exposes the same original again after restore. Metadata read
+failure prevents a new file write. Regeneration and Mesh export participate in
+the existing writer boundary so an archive transition cannot race their reads.
+Previously generated or independently copied files are not automatically erased;
+the explicit bridge-read operation still reads the configured file as it exists.
+Ordinary injected context, lesson recall/list, session pages and observation pages
+now exclude archive targets before their result limits. Session-level archive
+also hides that session's observations. When individual observations are archived,
+the session's aggregate summary and cached first prompt are withheld from ordinary
+session/context responses; context can still use the remaining observations.
+Original summaries and independently retained memories stay in canonical storage.
+Restoring a lesson takes effect on its next recall even with a warm lesson index.
+Direct graph queries also filter archive state before node/edge pagination and
+traversal. Archived nodes cannot act as bridges, and their incident edges stay
+out of ordinary results without deleting canonical relationships. Exact edge
+inventory revisions include the graph archive state and become inexact if it
+changes during the read. With archived graph targets, the default viewer query
+uses the existing exact index; if unavailable, its bounded snapshot fallback
+filters archive state and reports potentially incomplete totals. It never falls
+back to canonical graph enumeration. Temporal retrieval respects current archive
+visibility as well. `graph-stats` retains canonical snapshot counts and labels
+them `includesArchived: true` when applicable; those are not active-only counts.
+
+For an exact project, use `action: "list"` to page archive metadata (20 by default,
+maximum 100, with `state: "archived"`, `"restored"` or `"all"`). Use `action:
+"inspect"` and an exact `{kind, id}` target to read its canonical original and
+lifecycle state; observation targets also need `sessionId`. Inspection does not
+restore or strengthen the record. Use `action: "archive"` or `"restore"` for a
+preview, then pass `dryRun: false`, the returned `expectedRevision` and
+`expectedDigest`, and a reason to apply that reviewed change. Stale previews and
+missing/deleted originals are rejected. This tool preserves source references and
+does not substitute for an explicitly requested forget. The remaining full
+acceptance checks must finish before deploying this development candidate
+against live data.
+Transferred native sessions retain source identity but discard the host-specific
+cursor and require reconciliation before capture resumes. Observations-only
+imports also invalidate an affected native cursor. A verified resumed session
+may retain post-forget observations; earlier observations, an old first prompt,
+and the forgotten summary cannot be restored through that exception.
 
 Durable writes and graph provenance remain exact-project scoped. The legacy
 session/observation `POST /agentmemory/forget` apply path is irreversible and does
@@ -365,18 +858,44 @@ and runs after the exclusive interval. Whole-install backups preserve recovery
 rows; older workers do not implement their visibility or protection semantics.
 Keep a recovery-capable worker with this data when restoring an installation.
 
-The managed user-prompt hook performs
-bounded federated recall across projects, labels every source project, and
-treats `*` as a read-only scope. Automatic recall and graph context require a
-concrete topic, filename, or identifier shared with the current user prompt;
+Native capture uses a strict index flush and keeps failed publication pending.
+Within one persistence instance, fingerprints of successfully stored BM25 and
+vector snapshots let queued or unchanged flush requests avoid duplicate writes
+when the current persisted manifest still matches the committed generation.
+The fingerprint covers the serialized content, including externally retained
+vector buffers; it is not based only on request counts or snapshot length.
+Changed snapshots remain serialized, failed publication is retried, and a new
+worker performs its first requested save normally. Unchanged observation
+reindexing preserves posting and tie order. Previous-shard cleanup remains
+sequential and records every attempted target and outcome in one grouped audit.
+This changes neither stored formats nor the canonical source/graph lifecycle.
+
+The managed user-prompt hook searches the exact current project first. A
+successful local read with no topical result may fall back to a bounded `*`
+search; a failed local read does not silently broaden scope. A matching local
+result stays local, and graph succession still expands through each node's exact
+source project. Automatic recall and graph context require a
+concrete topic, filename, or identifier shared with the effective request;
 product names, generic follow-ups, search score and project membership alone
-do not qualify. Current-project weighting applies only after this selection.
-Ambiguous follow-ups without a topic produce no automatic retrieval context;
-the hook does not infer a topic from earlier injected or model-generated text.
+do not qualify. Current-project candidates take priority after this selection.
+Recall output includes the source project, record ID and timestamp (or an explicit
+unknown time). Repeated scoped record IDs are emitted once. Automatic candidate
+searches pass the existing `trackAccess: false` option through REST to StateModule
+search, so merely considering a result does not strengthen its access-based
+retention. Explicit searches retain their default access tracking.
+When a short follow-up omits its topic, the hook can reuse the most recent
+topical user prompt among 12 recent observations in the same exact project and
+session. It uses at most two existing observation-page reads (700 ms each),
+without a separate topic cache or model call. The captured user message remains
+unchanged. If no topic is found, automatic retrieval abstains; earlier injected
+or model-generated text does not supply a topic.
 Explicit MCP recall remains available. Graph neighbors need their own topic
 match, except for explicit supersession links preserving a matched decision's
-replacement and historical status. Existing request and output budgets remain
-unchanged. This lexical selection can miss synonyms or unrecognized Korean
+replacement and historical status. Local and fallback candidate queries share
+the existing 1,200 ms retrieval budget; output budgets and bounded successor
+expansion are unchanged. Generic display/publishing commands such as
+`띄워줘` and `게시 진행` can use this same-session topic recovery. This lexical
+selection can miss synonyms or unrecognized Korean
 inflections; it is not a semantic relevance guarantee. Durable promotion is
 performed by the current Codex turn through the official memory,
 lesson, and manual graph tools. Local Qwen may add graph entities and relations
@@ -592,6 +1111,84 @@ canonical data.
 
 ### Runtime responsiveness recovery
 
+#### Storage acknowledgement and crash qualification
+
+Unmodified iii-engine 0.11.2's file-backed KV acknowledges an in-memory mutation and
+persists dirty scopes on a default five-second timer. The state path is a directory
+of per-scope binary snapshots, not a SQLite database. A successful StateModule RPC
+therefore does not prove that its value or a graph recovery plan has reached disk.
+See the [pinned KV implementation](https://github.com/iii-hq/iii/blob/iii/v0.11.2/engine/src/builtins/kv.rs).
+
+The opt-in `test/engine-write-recovery.test.ts` launches an explicitly supplied,
+hash-verified 0.11.2 engine on an isolated loopback port and temporary data directory.
+It checks owned process identity before forced exit and checks recovery through
+the real StateModule. Enable with `AGENTMEMORY_TEST_ENGINE` and
+`AGENTMEMORY_TEST_ENGINE_SHA256`, and set `AGENTMEMORY_TEST_ENGINE_DURABILITY=required`
+for the patched engine; an optional `AGENTMEMORY_ENGINE_TEST_REPORT`
+receives local evidence. This covers eight crash boundaries and one bounded-page RPC case. It is
+not part of routine unit runs or a test against the live installation.
+An additional opt-in `AGENTMEMORY_TEST_ENGINE_PERFORMANCE=true` case measures
+ten durable writes in one synthetic 20 MiB scope with 80 rows. It can write
+`AGENTMEMORY_ENGINE_PERFORMANCE_REPORT` and is separate from the eight crash
+boundaries. This isolates large-scope persistence cost; it is not a whole-graph
+throughput or many-small-records benchmark.
+
+The unmodified engine fails immediate post-acknowledgement crash recovery.
+This downstream pins a modified release build with `state::flush` and
+`state::list_page`. The managed
+launcher fixes `AGENTMEMORY_STATE_DURABILITY=file-flush-v1`; worker startup verifies
+the barrier before recovery and function registration. Ordinary writes wait for
+flush success. Graph plans flush the intent, assignment batch and intent removal
+in that order. A flush failure fences subsequent writes for recovery. Portable
+hosts retain the default behavior unless they explicitly require this mode.
+
+The engine patch uses the existing canonical file store and dirty-scope lock,
+waits for file writes/sync/rename, retains unpersisted work on errors, and lets an
+in-flight flush finish independently of RPC caller cancellation. It adds no second
+database and does not change the stored snapshot format. The qualified release
+binary passed all eight synthetic process-crash boundaries; this does not certify
+Windows power-loss recovery, disk failure recovery or full production acceptance.
+
+To rebuild the engine, check out `iii/v0.11.2` at the exact `source_commit` in
+`config/third-party-inputs.json`, apply `patches/iii-0.11.2-state-flush.patch`, then
+run `cargo build --release --locked -p iii --bin iii` in an x64 MSVC build environment.
+The manifest records the Rust/Cargo, MSVC and Windows SDK versions and Cargo.lock
+hash used for the pinned binary. The package builder verifies the binary hash and
+normalized-LF patch hash and includes the patch and license in the payload. Source
+reconstruction is documented; bit-for-bit rebuild reproducibility is not claimed.
+
+#### Bounded graph-index recovery
+
+The managed engine additionally provides `state::list_page` without changing
+canonical file layout or durability semantics. Each response contains actual
+stored keys, values, the scope's row count and a next offset. The default page
+contains at most 128 rows (API maximum 256) and its serialized JSON never exceeds
+1 MiB. An oversized single row, invalid offset or unsupported adapter returns an
+error; the engine never substitutes a whole-scope response. Page order follows
+the existing insertion order. Pages are not a snapshot transaction: the caller
+must serialize mutations across a traversal.
+
+The explicit `mem::graph-snapshot-rebuild` operation holds the existing graph
+write lock while reading both canonical scopes in pages. It yields between pages,
+enforces a six-second timeout per page and a 128 MiB total serialized inventory
+budget, and checks stable counts, exact keys and duplicate entries before derived
+writes. It preserves reset visibility and source provenance. Partial derived
+writes keep the query manifest dirty; success publishes the complete index last.
+No canonical node or relationship is deleted or replaced by this operation.
+An unavailable managed paging surface fails without a whole-list fallback.
+Portable engines retain the previous 25,000-node whole-response ceiling and
+refuse a known oversized snapshot before enumeration. Recovery does not require
+resetting the graph; corpora outside the bounded budget remain an explicit error.
+
+Managed health snapshots expose `cpu.percent` as the process's share of available
+CPU capacity, plus `cpu.corePercent` and `cpu.availableParallelism` for the original
+core-equivalent measurement and denominator. Portable profiles preserve their
+existing CPU metric. This prevents normal multicore processing from reporting
+health 503 solely because process CPU time exceeds one wall-clock core; event-loop,
+connection and resource-pressure checks still apply.
+
+#### Existing supervisor
+
 The Windows daemon checks the database-free liveness and MCP metadata routes
 every 30 seconds, with a three-second timeout per route and loopback proxy
 bypass. Three consecutive failures end that owned run with
@@ -602,6 +1199,16 @@ the Codex consumer is present. No second watchdog or memory store is added.
 Authenticated stop requests use the same bounded cleanup even when the worker
 cannot process its stop file. This limits the impact of a stalled worker; it
 does not establish or repair the underlying cause of the stall.
+
+The liveness response retains HTTP 200 and `status: ok` to identify a running
+worker, and includes a database-free `writeRecoveryRequired` flag. An uncertain
+canonical write acknowledgement, failed graph recovery initialization, or a durable
+graph plan left without an active application sets this flag. The Windows daemon
+counts it as an unsuccessful recovery probe using the same three-failure rule.
+A healthy in-flight graph plan does not request a restart. Startup resumes the
+existing graph plan before exposing the API; a canonical conflict still refuses
+recovery rather than overwriting the conflicting value. No readiness probe
+starts Qwen or changes its hold and ownership rules.
 
 
 ### Stall diagnostics (local r96)
@@ -643,3 +1250,83 @@ SDK results/errors are unchanged, the diagnostic thread does not keep an exiting
 worker alive, and diagnostic IO failures do not block the existing recovery path.
 A diagnostic thread or IO failure emits one fixed warning per run without error
 details, paths or payloads; IO retries continue on the existing one-second cadence.
+
+
+### Hidden desktop windows and capture continuity
+
+The Windows watcher keeps AgentMemory available while an identity-verified
+official Codex process is alive, even when no top-level window is visible.
+Background turns can continue with hidden windows; window absence alone is not
+proof of app exit. Window probe results remain diagnostic. Unknown identity
+preserves the service, and verified app exit still uses the existing graceful
+stop path. MCP leases alone never extend its lifetime. Closing a window while
+Codex remains in the background therefore no longer stops AgentMemory; fully
+exiting Codex does. Qwen foreground priority and owned-instance cleanup are
+unchanged.
+
+This prevents the observed hidden-window shutdown gap. It cannot recreate a
+hook invocation the host never delivered or retroactively capture requests
+lost during installation. Missing historical observations require the official
+exact-project import lifecycle with original provenance; no alternate queue
+or database is introduced.
+
+### Native reconciliation warnings (unreleased)
+
+Managed native capture publishes a bounded, in-memory diagnostic summary through
+the existing `/agentmemory/livez` and `/agentmemory/health` responses. `nativeCapture`
+reports recent attempts, completed drain batches, the last completed discovery
+cycle, discovery/capture issues, and known failed graph extractions in initialized
+native sessions. `checking` describes an operating reconciler, **not** proof that
+every source has been read or every graph is current. Discovery problems remain
+visible until a complete subsequent discovery cycle is clean. A drain with no
+completion for more than three minutes is `stalled`; this diagnostic does not
+cancel it, launch a competing drain, or change Qwen ownership.
+
+The next genuine managed user-prompt hook reads this summary with a one-second
+deadline and returns a fixed `systemMessage` warning for missing/disabled/stalled
+reconciliation, outstanding issues, graph failures, or a required write recovery.
+Normal `local_qwen_deferred:*` yields are not counted as graph extraction errors.
+Warnings contain no source content, session identifiers, paths, or raw errors.
+The authenticated hook requests `livez?notify=true`. Within a worker lifetime,
+the existing liveness handler compares one in-memory aggregate status snapshot:
+unchanged status and issue counts suppress repeat warnings, while status/count
+changes or a worker restart allow a new warning. Timestamp changes and another
+failure of the same kind alone do not repeat it. Ordinary health/liveness reads
+do not consume this comparison. This is a notification attempt, not proof that
+a person read it; no persistent queue or delivery-acknowledgement store is added.
+If the liveness request itself fails, each newly failed prompt check may warn.
+
+Capture errors in `SessionStart`, `UserPromptSubmit`, and `Stop` also return a
+warning and exit zero so Codex can consume the warning and continue the user's
+work. This is notification transport success, **not** a successful capture; no
+capture-completion state is written by that error handler. `SessionEnd` and invalid
+payloads retain the nonzero error path. Existing recall context shares the same
+single JSON output when capture succeeds.
+
+Codex documents `systemMessage` as a warning in its UI or event stream in its
+[hook output contract](https://learn.chatgpt.com/docs/hooks#common-output-fields).
+Hook delivery still requires a running, configured Codex host and an applicable
+hook event. This is not an out-of-app desktop notification service, and generating
+warning JSON alone is not evidence that a person saw it. Whole-corpus and live
+host acceptance remain separate from these diagnostic and adapter tests.
+
+### Retained unresolved legacy captures
+
+Explicit full-inventory initialization may use `retainUnmatched: true` to keep
+intact, unbound legacy observations whose native correspondence cannot be proved.
+Their IDs, contents, ownership and graph provenance stay unchanged. Confirmed
+native messages are captured with their own deterministic identities; a retained
+legacy observation is not declared a duplicate or assigned a guessed source.
+The existing session capture state records matching-relevant fingerprints, and
+changed records require reconciliation. Protected, native-bound, raw and forgotten
+records are never eligible for this option. Preview identity covers the option.
+
+Native `caught_up` describes the source cursor only. Initialization, capture and
+source inspection report unresolved counts. A proven source with reviewed legacy
+ambiguities is `ready_with_unresolved`; newly changed or unreviewed correspondence
+still blocks reconciliation. The scheduler reports historical unresolved counts
+separately from current capture failures. Graph processing may continue, but these counts must not be
+reported as complete historical correspondence. Archiving preserves this status;
+individual forget is blocked until correspondence is resolved. Lifecycle transfer
+discards trusted capture checkpoints and requires reinitialization with a new
+explicit review. No observation is deleted, rewritten or automatically archived.

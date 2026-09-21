@@ -1,6 +1,7 @@
 import type { Session } from "../types.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
 import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
+import type { ArchiveVisibility } from "./archive.js";
 
 export interface SessionQuery {
   project: string;
@@ -44,7 +45,7 @@ export function parseSessionQuery(args: Record<string, unknown>): SessionQuery |
   };
 }
 
-export function selectSessionPage(sessions: Session[], query: SessionQuery) {
+export function selectSessionPage(sessions: Session[], query: SessionQuery, archived?: ArchiveVisibility) {
   const agent = query.agentId?.trim();
   const filterAgent = agent === "*" ? undefined : agent ||
     (isAgentScopeIsolated() ? getAgentId() : undefined);
@@ -52,6 +53,7 @@ export function selectSessionPage(sessions: Session[], query: SessionQuery) {
     .filter(s => s && typeof s.id === "string" && !!s.id.trim()
       && typeof s.project === "string" && !!s.project.trim())
     .filter(s => query.includeExcluded || !isExcludedCodexAmbientSession(s))
+    .filter(s => !archived?.({ kind: "session", id: s.id }))
     .filter(s => query.project === "*" || s.project === query.project)
     .filter(s => !query.sessionId || s.id === query.sessionId)
     .filter(s => !filterAgent || s.agentId === filterAgent)
@@ -59,7 +61,11 @@ export function selectSessionPage(sessions: Session[], query: SessionQuery) {
       const byTime = String(a.startedAt ?? "").localeCompare(String(b.startedAt ?? ""));
       return (query.order === "desc" ? -byTime : byTime) || a.id.localeCompare(b.id);
     });
-  const page = filtered.slice(query.offset, query.offset + query.limit);
+  const page = filtered.slice(query.offset, query.offset + query.limit).map(session => {
+    if (!archived?.hasArchivedObservations(session.id)) return session;
+    const { summary: _summary, firstPrompt: _prompt, ...visible } = session;
+    return visible;
+  });
   return { sessions: page, total: filtered.length, limit: query.limit, offset: query.offset,
     nextOffset: query.offset + page.length < filtered.length ? query.offset + page.length : null };
 }

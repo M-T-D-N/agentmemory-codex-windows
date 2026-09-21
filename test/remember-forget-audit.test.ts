@@ -8,6 +8,7 @@ vi.mock("../src/state/keyed-mutex.js", () => ({
   withKeyedLock: <T>(_key: string, fn: () => Promise<T>) => fn(),
 }));
 
+import { codexTextDigest } from "../src/replay/codex-match.js";
 import { registerRememberFunction } from "../src/functions/remember.js";
 import {
   getSearchIndex,
@@ -55,6 +56,43 @@ function mockSdk() {
 }
 
 describe("mem::forget audit coverage (issue #125)", () => {
+  it("refuses partial forget of source-linked copies before touching data or graph provenance", async () => {
+    const kv = mockKV(); const sdk = mockSdk(); registerRememberFunction(sdk as never, kv as never);
+    const source = { version: 1, key: codexTextDigest("native"), nativeMessageId: "native", kind: "user", timestamp: "2026-09-13T00:00:01Z", textDigest: codexTextDigest("body"), ordinal: 3, byteOffset: 100 };
+    const original = { id: "a", sessionId: "linked", project: "p", title: "prompt_submit", narrative: "body", timestamp: source.timestamp, codexSource: source };
+    const alias = { ...original, id: "b", codexSource: { ...source, duplicateOfObservationId: "a" } };
+    await kv.set("mem:sessions", "linked", { id: "linked", project: "p", observationCount: 2 });
+    await kv.set("mem:obs:linked", "a", original); await kv.set("mem:obs:linked", "b", alias);
+    await expect(sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "linked", observationIds: ["a"] } })).rejects.toThrow("all captures linked");
+    expect(await kv.list("mem:obs:linked")).toEqual([original, alias]);
+    expect(await kv.list("mem:codex:capture-exclusions")).toEqual([]);
+    expect(await kv.list("mem:audit")).toEqual([]);
+    await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "linked", observationIds: ["a", "b"] } });
+    expect(await kv.list("mem:obs:linked")).toEqual([]);
+  });
+  it("retains source exclusion before deletion and refuses deletion if that write fails", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    try {
+      const sdk = mockSdk(); const kv = mockKV(); registerRememberFunction(sdk as never, kv as never);
+      await kv.set("mem:sessions", "native", { id: "native", project: "p", status: "active", observationCount: 1 });
+      await kv.set("mem:obs:native", "native-o", { id: "native-o", sessionId: "native", title: "prompt_submit", narrative: "do not restore", timestamp: "2026-09-13T00:00:00Z" });
+      const set = kv.set;
+      kv.set = async (scope, key, data) => { if (scope === "mem:codex:capture-exclusions") throw Error("exclusion write failed"); return set(scope, key, data); };
+      await expect(sdk.trigger({ function_id: "mem::forget", payload: { sessionId: "native", observationIds: ["native-o"] } })).rejects.toThrow("exclusion write failed");
+      expect(await kv.get("mem:obs:native", "native-o")).not.toBeNull();
+      kv.set = set;
+      const remove = kv.delete;
+      kv.delete = async (scope, key) => { if (scope === "mem:obs:native") throw Error("delete interrupted"); return remove(scope, key); };
+      await expect(sdk.trigger({ function_id: "mem::forget", payload: { sessionId: "native", observationIds: ["native-o"] } })).rejects.toThrow("delete interrupted");
+      const exclusions = await kv.list("mem:codex:capture-exclusions");
+      expect(exclusions).toHaveLength(1);
+      expect(JSON.stringify(exclusions)).not.toContain("do not restore");
+      kv.delete = remove;
+      expect(await sdk.trigger({ function_id: "mem::forget", payload: { sessionId: "native", observationIds: ["native-o"] } })).toMatchObject({ success: true, deleted: 1 });
+      expect(await kv.get("mem:obs:native", "native-o")).toBeNull();
+      expect(await kv.list("mem:codex:capture-exclusions")).toEqual(exclusions);
+    } finally { vi.unstubAllEnvs(); }
+  });
   it("previews actual content and history references without changing any data", async () => {
     const sdk = mockSdk(); const kv = mockKV(); registerRememberFunction(sdk as never, kv as never);
     await kv.set("mem:sessions", "s", { id: "s", project: "p", status: "completed", observationCount: 999 });

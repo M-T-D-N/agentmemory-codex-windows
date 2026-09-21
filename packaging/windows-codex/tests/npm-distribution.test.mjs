@@ -54,7 +54,7 @@ function runInstaller(release, root, workspace, extra = []) {
   }).concat(extra), { encoding: 'utf8', timeout: 60_000, windowsHide: true, env: powershellEnvironment() });
 }
 
-async function fixture() {
+async function fixture(dataContractVersion) {
   const dir = await mkdtemp(path.join(tmpdir(), 'am-fresh-test-'));
   const release = path.join(dir, 'release'), workspace = path.join(dir, 'workspace'), root = path.join(dir, 'install space');
   await mkdir(path.join(release, 'payload/config'), { recursive: true });
@@ -65,11 +65,133 @@ async function fixture() {
   const manifest = { schema_version: 1, product: 'AgentMemory for Codex on Windows', product_id: 'agentmemory-codex-windows',
     downstream_version: '0.1.0-preview.4', agentmemory_version: '0.9.29', release_revision: 'r84', source_commit: 'a'.repeat(40),
     package_relative_path: 'runtime/0.9.29-codex-r84/agentmemory', release_files: [], immutable_files: [] };
+  if (dataContractVersion !== undefined) manifest.data_contract_version = dataContractVersion;
   for (const name of ['Install-WindowsCodex.ps1', 'Initialize-WindowsCodex.ps1']) manifest.release_files.push({ path: name, sha256: await sha256(path.join(release, name)) });
   for (const name of ['hook-spec.json', 'mcp-launcher-environment.json']) manifest.immutable_files.push({ path: `config/${name}`, sha256: await sha256(path.join(release, 'payload/config', name)) });
   await writeFile(path.join(release, 'release-manifest.json'), JSON.stringify(manifest));
   return { dir, release, workspace, root };
 }
+
+for (const floor of [2, 3]) test('data-contract downgrade is rejected before backups, runtime actions or data changes (floor ' + floor + ')', { skip: !windows }, async () => {
+  const f = await fixture(floor);
+  try {
+    const prepared = runInstaller(f.release, f.root, f.workspace, ['-Fresh', '-Execute']);
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const installedPath = path.join(f.root, 'config/install-manifest.json');
+    const installed = JSON.parse(await readFile(installedPath, 'utf8'));
+    assert.equal(installed.data_contract_version, floor);
+    installed.installation_status = 'activated';
+    await writeFile(installedPath, JSON.stringify(installed));
+    const before = await readFile(installedPath, 'utf8');
+    const dataPath = path.join(f.root, 'data/canonical-fixture');
+    await writeFile(dataPath, 'archived original');
+    const releasePath = path.join(f.release, 'release-manifest.json');
+    const release = JSON.parse(await readFile(releasePath, 'utf8'));
+    if (floor === 2) delete release.data_contract_version;
+    else release.data_contract_version = 2;
+    await writeFile(releasePath, JSON.stringify(release));
+    const rejected = runInstaller(f.release, f.root, f.workspace, ['-Execute']);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /Runtime downgrade cannot read/);
+    assert.equal(await readFile(installedPath, 'utf8'), before);
+    assert.equal(await readFile(dataPath, 'utf8'), 'archived original');
+    await assert.rejects(readdir(path.join(f.root, 'backups/releases')), { code: 'ENOENT' });
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
+test('managed worker checks data compatibility and failed cutover before importing package code', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'am-worker-contract-'));
+  try {
+    for (const part of ['bin', 'config', 'runtime/package/dist']) await mkdir(path.join(dir, part), { recursive: true });
+    const worker = path.join(dir, 'bin/agentmemory-worker.mjs');
+    await copyFile(path.join(packaging, 'node/agentmemory-worker.mjs'), worker);
+    const marker = path.join(dir, 'imported');
+    await writeFile(path.join(dir, 'runtime/package/dist/cli.mjs'), 'import {writeFileSync} from "node:fs"; writeFileSync(process.env.AM_WORKER_TEST_MARKER,"imported"); throw Error("fixture entry reached");');
+    for (const [required, supported, status, allowed] of [[2, 1, 'activated', false], [3, 2, 'activated', false], [3, 3, 'activated', true], [2, 2, 'cutover_failed', false],
+      ['2', 2, 'activated', false], [null, 2, 'activated', false], [2, null, 'activated', false],
+      [2, 2, 'activated', true], [undefined, undefined, undefined, true]]) {
+      await rm(marker, { force: true });
+      await writeFile(path.join(dir, 'config/install-manifest.json'), JSON.stringify({ package_relative_path: 'runtime/package',
+        data_contract_version: required, installation_status: status }));
+      await writeFile(path.join(dir, 'runtime/package/package.json'), JSON.stringify({ agentmemoryDownstream: { dataContractVersion: supported } }));
+      const result = spawnSync(process.execPath, [worker], { encoding: 'utf8', timeout: 10_000, windowsHide: true,
+        env: { ...process.env, AGENTMEMORY_PACKAGE_DIR: '', AGENTMEMORY_STOP_FILE: path.join(dir, 'stop'), AGENTMEMORY_STOP_TOKEN: 'fixture', AM_WORKER_TEST_MARKER: marker } });
+      assert.notEqual(result.status, 0);
+      if (allowed) {
+        assert.match(result.stderr, /fixture entry reached/);
+        assert.equal(await readFile(marker, 'utf8'), 'imported');
+      } else {
+        assert.match(result.stderr, /data contract|cutover requires completion/);
+        await assert.rejects(readFile(marker), { code: 'ENOENT' });
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+for (const currentContract of [1, 2]) test(`failed candidate start preserves writes and blocks predecessor restart (contract ${currentContract})`, { skip: !windows }, async () => {
+  const f = await fixture(2);
+  try {
+    const manifestPath = path.join(f.release, 'release-manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    const files = {
+      'src/AgentMemoryHiddenLauncher.cs': 'fixture source', 'src/iii-0.11.2-state-flush.patch': 'candidate patch',
+      'bin/agentmemory-hidden-launcher.exe': 'fixture launcher', 'bin/iii.exe': 'fixture engine',
+      'scripts/agentmemory-stop.ps1': 'param($Root,$TimeoutSeconds)', 'scripts/agentmemory-watch-stop.ps1': 'param($Root,$TimeoutSeconds)',
+      'config/iii-config.yaml': 'fixture: true', 'config/third-party-inputs.json': '{}', 'config/upstream-source.json': '{}',
+      [`${manifest.package_relative_path}/package.json`]: '{"name":"fixture"}',
+    };
+    for (const [name, content] of Object.entries(files)) {
+      const target = path.join(f.release, 'payload', name);
+      await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, content);
+      manifest.immutable_files.push({ path: name, sha256: await sha256(target) });
+    }
+    manifest.adapter_source_hashes = { hidden_launcher: await sha256(path.join(f.release, 'payload/src/AgentMemoryHiddenLauncher.cs')),
+      hidden_launcher_normalized: await sha256(path.join(f.release, 'payload/src/AgentMemoryHiddenLauncher.cs')) };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const prepared = runInstaller(f.release, f.root, f.workspace, ['-Fresh', '-Execute']);
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const installedPath = path.join(f.root, 'config/install-manifest.json');
+    const installed = JSON.parse(await readFile(installedPath, 'utf8'));
+    installed.installation_status = 'activated'; installed.data_contract_version = currentContract;
+    await writeFile(installedPath, JSON.stringify(installed));
+    await writeFile(path.join(f.root, 'src/iii-0.11.2-state-flush.patch'), 'predecessor patch');
+    const harness = path.join(f.dir, 'cutover-mocked.ps1');
+    await writeFile(harness, `param($Release,$Root,$Workspace,$Node)
+$ErrorActionPreference='Stop'
+function Import-Module { param($Name,$ErrorAction) }
+function Stop-ScheduledTask { param($TaskPath,$TaskName,$ErrorAction) }
+function Start-ScheduledTask { param($TaskPath,$TaskName,$ErrorAction)
+  $probe=$null
+  try { $probe=[IO.File]::Open((Join-Path $Root 'data/startup.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) } catch [IO.IOException] {}
+  if ($probe) { $probe.Dispose(); throw 'Installer did not hold the startup lock' }
+  Add-Content -LiteralPath (Join-Path $Root 'data/start-attempts') -Value 'candidate'
+  Set-Content -LiteralPath (Join-Path $Root 'data/native-after-start') -Value 'new canonical observation'
+  throw 'injected candidate startup failure'
+}
+try {
+  & (Join-Path $Release 'Install-WindowsCodex.ps1') -ReleaseRoot $Release -InstallRoot $Root -WorkspaceRoot $Workspace -ProjectRegistry (Join-Path $Workspace 'projects.json') -NodePath $Node -ManagedRequirementsPath (Join-Path $Workspace 'global-requirements.toml') -Execute
+} catch {
+  $failure=$_
+  $probe=[IO.File]::Open((Join-Path $Root 'data/startup.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+  $probe.Dispose()
+  throw $failure
+}
+`);
+    const result = spawnSync(ps, powershellArgs(harness, { Release: f.release, Root: f.root, Workspace: f.workspace, Node: process.execPath }),
+      { encoding: 'utf8', timeout: 60_000, windowsHide: true, env: powershellEnvironment() });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Automatic rollback was withheld/);
+    assert.match(result.stderr, /injected candidate startup failure/);
+    assert.match(await readFile(path.join(f.root, 'data/native-after-start'), 'utf8'), /new canonical observation/);
+    assert.deepEqual((await readFile(path.join(f.root, 'data/start-attempts'), 'utf8')).trim().split(/\r?\n/), ['candidate']);
+    assert.equal(await readFile(path.join(f.root, 'src/iii-0.11.2-state-flush.patch'), 'utf8'), 'candidate patch');
+    const after = JSON.parse(await readFile(installedPath, 'utf8'));
+    assert.equal(after.data_contract_version, 2); assert.equal(after.installation_status, 'cutover_failed');
+    const backups = await readdir(path.join(f.root, 'backups/releases'));
+    assert.equal(backups.length, 1);
+    assert.equal(await readFile(path.join(f.root, 'backups/releases', backups[0], 'src/iii-0.11.2-state-flush.patch'), 'utf8'), 'predecessor patch');
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
 
 test('fresh dry-run writes nothing; execute prepares a protected owned root and refuses overwrite', { skip: !windows }, async () => {
   const f = await fixture();
@@ -135,6 +257,65 @@ test('installer refuses a tampered release before creating fresh state', { skip:
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /hash mismatch/);
     await assert.rejects(readdir(f.root), { code: 'ENOENT' });
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
+test('managed environment resolves native source outside synthetic HOME and rejects ambiguous roots', { skip: !windows }, async () => {
+  const f = await fixture();
+  try {
+    const prepared = runInstaller(f.release, f.root, f.workspace, ['-Fresh', '-Execute']);
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const configPath = path.join(f.root, 'config/codex-workspace.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    const harness = path.join(f.dir, 'source-environment.ps1');
+    await writeFile(harness, `param($Script, $Root)
+$ErrorActionPreference = 'Stop'
+$expectedDefault = Join-Path ([System.Environment]::GetFolderPath('UserProfile')) '.codex'
+$env:AGENTMEMORY_CODEX_SOURCE_ROOT = 'C:\\untrusted-inherited-root'
+$env:AGENTMEMORY_STATE_DURABILITY = 'disabled'
+. $Script -Root $Root
+[ordered]@{ actual = $env:AGENTMEMORY_CODEX_SOURCE_ROOT; expectedDefault = $expectedDefault; syntheticHome = $env:HOME; stateDurability = $env:AGENTMEMORY_STATE_DURABILITY } | ConvertTo-Json
+`);
+    const run = () => spawnSync(ps, powershellArgs(harness, {
+      Script: path.join(packaging, 'powershell/agentmemory-env.ps1'), Root: f.root,
+    }), { encoding: 'utf8', timeout: 15_000, windowsHide: true, env: powershellEnvironment() });
+    let result = run();
+    assert.equal(result.status, 0, result.stderr);
+    const first = JSON.parse(result.stdout);
+    assert.equal(first.actual, first.expectedDefault);
+    assert.equal(first.stateDurability, 'file-flush-v1');
+    assert.notEqual(first.actual, path.join(first.syntheticHome, '.codex'));
+    const custom = path.join(f.dir, 'custom-native-source');
+    await writeFile(configPath, JSON.stringify({ ...config, codex_source_root: custom }));
+    result = run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).actual, custom);
+    for (const value of ['C:relative', '\\relative', '', 123]) {
+      await writeFile(configPath, JSON.stringify({ ...config, codex_source_root: value }));
+      result = run();
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /must be an absolute path/);
+    }
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
+test('update rejects an invalid custom native root before changing the installation', { skip: !windows }, async () => {
+  const f = await fixture();
+  try {
+    assert.equal(runInstaller(f.release, f.root, f.workspace, ['-Fresh', '-Execute']).status, 0);
+    const manifestPath = path.join(f.root, 'config/install-manifest.json');
+    const installed = JSON.parse(await readFile(manifestPath, 'utf8'));
+    installed.installation_status = 'activated';
+    await writeFile(manifestPath, JSON.stringify(installed));
+    const configPath = path.join(f.root, 'config/codex-workspace.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    const invalid = JSON.stringify({ ...config, codex_source_root: 'C:relative' });
+    await writeFile(configPath, invalid);
+    const result = runInstaller(f.release, f.root, f.workspace, ['-Execute']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /must be an absolute path/);
+    assert.equal(await readFile(configPath, 'utf8'), invalid);
+    await assert.rejects(readdir(path.join(f.root, 'backups/releases')), { code: 'ENOENT' });
   } finally { await rm(f.dir, { recursive: true, force: true }); }
 });
 
@@ -217,6 +398,15 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Daemon parse failed' }
+$liveness=$ast.Find({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$body.writeRecoveryRequired')},$true)
+if (!$liveness) {throw 'Missing write-recovery liveness check'}
+$rejectBody=[ScriptBlock]::Create('param($body) Set-StrictMode -Version Latest; return ('+$liveness.Clauses[0].Item1.Extent.Text+')')
+foreach ($json in @('{"status":"ok","service":"agentmemory"}','{"status":"ok","service":"agentmemory","writeRecoveryRequired":false}')) {
+  if (& $rejectBody ($json | ConvertFrom-Json)) {throw 'Healthy or compatible liveness rejected'}
+}
+foreach ($json in @('{"status":"ok","service":"agentmemory","writeRecoveryRequired":true}','{"status":"failed","service":"agentmemory"}','{"status":"ok","service":"other"}')) {
+  if (!(& $rejectBody ($json | ConvertFrom-Json))) {throw 'Unhealthy liveness accepted'}
+}
 foreach ($name in @('Test-RuntimeRecoveryDue','Stop-OwnedProcess')) {
   $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
   if (!$function) { throw "Missing runtime function: $name" }

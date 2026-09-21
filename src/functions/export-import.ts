@@ -23,19 +23,27 @@ import type {
   Lesson,
   Insight,
   AccessLogExport,
+  CodexCaptureExclusion,
+  GraphObservationResult,
 } from "../types.js";
 import { importOrigin } from "../types.js";
 import { normalizeAccessLog } from "./access-tracker.js";
 import { KV } from "../state/schema.js";
 import { checkPayloadFrameSize } from "../state/frame-guard.js";
 import { StateKV } from "../state/kv.js";
-import { VERSION } from "../version.js";
+import { VERSION, CODEX_LIFECYCLE_EXPORT_VERSION, ARCHIVE_LIFECYCLE_EXPORT_VERSION } from "../version.js";
+import { collectArchiveExport, prepareArchiveImport, finishArchiveImport } from "./archive-transfer.js";
+import { assertCodexExclusionContent, prepareCodexExclusionImport, validateCodexExclusion } from "./codex-capture-exclusion.js";
+import { codexSessionForTransfer, hasNativeCaptureState } from "../replay/codex-capture-state.js";
 import { recordAudit } from "./audit.js";
 import { indexRecords } from "./search.js";
 import { resetLessonIndex } from "./lessons.js";
 import { logger } from "../logger.js";
 import { isGraphExtractionEnabled } from "../config.js";
 import { semanticGraphCursorsAtEnd } from "./semantic-graph-backlog.js";
+import { graphObservationComplete, graphObservationDigest, readGraphCompletionContext, validateGraphObservationResult } from "./graph-observation-result.js";
+import { refreshImportedGraphIndexes } from "./graph.js";
+import { isVisibleAfterReset } from "./graph-query-index.js";
 
 // Bounded-concurrency chunk size for the import delete/write loops. A
 // "replace" or "merge" of a large export (up to MAX_TOTAL_OBSERVATIONS,
@@ -62,11 +70,11 @@ async function runChunked<T>(
   }
 }
 
-export function registerExportImportFunction(
-  sdk: ISdk, kv: StateKV, onObservationsImported?: () => void,
-): void {
-  sdk.registerFunction("mem::export", 
-    async (data?: { maxSessions?: number; offset?: number }) => {
+export async function captureExportData(
+  kv: StateKV, data?: { maxSessions?: number; offset?: number },
+): Promise<ExportData> {
+  return withObservationRecovery(async () => {
+      if (await kv.get(KV.graphWritePlan, "current")) throw Error("Graph recovery must finish before export");
       const rawMax = Number(data?.maxSessions);
       const maxSessions = Number.isFinite(rawMax) && rawMax > 0 ? Math.min(Math.floor(rawMax), 1000) : undefined;
       const rawOffset = Number(data?.offset);
@@ -84,7 +92,6 @@ export function registerExportImportFunction(
         paginatedSessions.map((session) =>
           kv
             .list<CompressedObservation>(KV.observations(session.id))
-            .catch(() => [] as CompressedObservation[])
             .then((obs) => ({ sessionId: session.id, obs })),
         ),
       );
@@ -98,7 +105,7 @@ export function registerExportImportFunction(
       const uniqueProjects = [...new Set(paginatedSessions.map((s) => s.project))];
       const profileResults = await Promise.all(
         uniqueProjects.map((project) =>
-          kv.get<ProjectProfile>(KV.profiles, project).catch(() => null),
+          kv.get<ProjectProfile>(KV.profiles, project),
         ),
       );
       for (const profile of profileResults) {
@@ -123,34 +130,51 @@ export function registerExportImportFunction(
         checkpoints,
         accessLogs,
       ] = await Promise.all([
-        kv.list<GraphNode>(KV.graphNodes).catch(() => []),
-        kv.list<GraphEdge>(KV.graphEdges).catch(() => []),
-        kv.list<SemanticMemory>(KV.semantic).catch(() => []),
-        kv.list<ProceduralMemory>(KV.procedural).catch(() => []),
-        kv.list<Action>(KV.actions).catch(() => []),
-        kv.list<ActionEdge>(KV.actionEdges).catch(() => []),
-        kv.list<Sentinel>(KV.sentinels).catch(() => []),
-        kv.list<Sketch>(KV.sketches).catch(() => []),
-        kv.list<Crystal>(KV.crystals).catch(() => []),
-        kv.list<Facet>(KV.facets).catch(() => []),
-        kv.list<Lesson>(KV.lessons).catch(() => []),
-        kv.list<Insight>(KV.insights).catch(() => []),
-        kv.list<Routine>(KV.routines).catch(() => []),
-        kv.list<Signal>(KV.signals).catch(() => []),
-        kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
-        kv.list<AccessLogExport>(KV.accessLog).catch(() => []),
+        kv.list<GraphNode>(KV.graphNodes),
+        kv.list<GraphEdge>(KV.graphEdges),
+        kv.list<SemanticMemory>(KV.semantic),
+        kv.list<ProceduralMemory>(KV.procedural),
+        kv.list<Action>(KV.actions),
+        kv.list<ActionEdge>(KV.actionEdges),
+        kv.list<Sentinel>(KV.sentinels),
+        kv.list<Sketch>(KV.sketches),
+        kv.list<Crystal>(KV.crystals),
+        kv.list<Facet>(KV.facets),
+        kv.list<Lesson>(KV.lessons),
+        kv.list<Insight>(KV.insights),
+        kv.list<Routine>(KV.routines),
+        kv.list<Signal>(KV.signals),
+        kv.list<Checkpoint>(KV.checkpoints),
+        kv.list<AccessLogExport>(KV.accessLog),
       ]);
 
+      const codexCaptureExclusions = (await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions)).map(validateCodexExclusion);
+      const graphSnapshot = await kv.get<{ resetAt?: string }>(KV.graphSnapshot, "current");
+      const resetAt = graphSnapshot?.resetAt;
+      if (resetAt !== undefined && (typeof resetAt !== "string" || !Number.isFinite(Date.parse(resetAt)))) throw Error("Invalid graph reset boundary in export");
+      const transferGraphRows = <T extends { stale?: boolean; createdAt?: string }>(rows: T[]): T[] =>
+        rows.map(row => isVisibleAfterReset(row, resetAt) ? row : { ...row, stale: true });
+      const graphObservationResults: Record<string, GraphObservationResult[]> = {};
+      for (const session of paginatedSessions) {
+        const completion = await readGraphCompletionContext(kv, session);
+        if (!completion) continue;
+        const sources = new Map((observations[session.id] ?? []).map(row => [row.id, row]));
+        graphObservationResults[session.id] = [...completion.results.values()].filter(row => sources.has(row.id))
+          .map(row => ({ ...row, importedGraphVerified: graphObservationComplete(session, sources.get(row.id)!, completion) }));
+      }
+      const lifecycle = hasNativeCaptureState({ sessions: paginatedSessions, observations, codexCaptureExclusions });
       const exportData: ExportData = {
-        version: VERSION,
+        version: lifecycle ? CODEX_LIFECYCLE_EXPORT_VERSION : VERSION,
         exportedAt: new Date().toISOString(),
-        sessions: paginatedSessions,
+        sessions: paginatedSessions.map(codexSessionForTransfer),
         observations,
+        ...(codexCaptureExclusions.length ? { codexCaptureExclusions } : {}),
+        ...(Object.keys(graphObservationResults).length ? { graphObservationResults } : {}),
         memories,
         summaries,
         profiles: profiles.length > 0 ? profiles : undefined,
-        graphNodes: graphNodes.length > 0 ? graphNodes : undefined,
-        graphEdges: graphEdges.length > 0 ? graphEdges : undefined,
+        graphNodes: lifecycle || graphNodes.length > 0 ? transferGraphRows(graphNodes) : undefined,
+        graphEdges: lifecycle || graphEdges.length > 0 ? transferGraphRows(graphEdges) : undefined,
         semanticMemories:
           semanticMemories.length > 0 ? semanticMemories : undefined,
         proceduralMemories:
@@ -190,30 +214,25 @@ export function registerExportImportFunction(
         summaries: summaries.length,
       });
 
-      // Only session collections page on ?maxSessions/?offset, so a large
-      // store can exceed the transport cap even at ?maxSessions=1.
-      const oversized = checkPayloadFrameSize(
-        exportData,
-        "narrow the range with ?maxSessions / ?offset, or export fewer collections; the non-session collections (memories, graph, semantic, actions, lessons, ...) are not yet paginated",
-      );
-      if (oversized) {
-        logger.warn("Export exceeds transport frame limit", {
-          bytes: oversized.bytes,
-        });
-        return oversized;
+      assertCodexExclusionContent(exportData, codexCaptureExclusions);
+      const archiveStates = await collectArchiveExport(kv, exportData);
+      if (archiveStates.length) {
+        exportData.archiveStates = archiveStates;
+        exportData.version = ARCHIVE_LIFECYCLE_EXPORT_VERSION;
       }
-
       return exportData;
-    },
-  );
+  });
+}
 
-  sdk.registerFunction("mem::import",
-    async (data: {
+export async function importExportData(
+  kv: StateKV, data: {
       exportData: ExportData;
       strategy?: "merge" | "replace" | "skip";
-    }) => {
+  }, onObservationsImported?: () => void,
+) {
       let wakeGraph = false;
       const result = await withObservationRecovery(async () => {
+      if (await kv.get(KV.graphWritePlan, "current")) throw Error("Graph recovery must finish before import");
       if (
         !data?.exportData ||
         typeof data.exportData !== "object" ||
@@ -222,9 +241,12 @@ export function registerExportImportFunction(
         return { success: false, error: "exportData with string version is required" };
       }
       const strategy = data.strategy || "merge";
-      const importData = data.exportData;
+      if (!["merge", "replace", "skip"].includes(strategy)) return { success: false, error: "Invalid import strategy" };
+      let importData = structuredClone(data.exportData);
 
       const supportedVersions = new Set(["0.3.0", "0.4.0", "0.5.0", "0.6.0", "0.6.1", "0.7.0", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6", "0.7.7", "0.7.9", "0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4", "0.8.5", "0.8.6", "0.8.7", "0.8.8", "0.8.9", "0.8.10", "0.8.11", "0.8.12", "0.8.13", "0.9.0", "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7", "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.9.14", "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19", "0.9.20", "0.9.21", "0.9.22", "0.9.23", "0.9.24", "0.9.25", "0.9.26", "0.9.27", "0.9.28", "0.9.29"]);
+      supportedVersions.add(CODEX_LIFECYCLE_EXPORT_VERSION);
+      supportedVersions.add(ARCHIVE_LIFECYCLE_EXPORT_VERSION);
       if (!supportedVersions.has(importData.version)) {
         return {
           success: false,
@@ -303,7 +325,91 @@ export function registerExportImportFunction(
         };
       }
 
+      if (importData.version === ARCHIVE_LIFECYCLE_EXPORT_VERSION ? !Array.isArray(importData.archiveStates) : importData.archiveStates !== undefined) {
+        return { success: false, error: "Archive state requires the archive lifecycle export format" };
+      }
+      if (hasNativeCaptureState(importData) && importData.version !== CODEX_LIFECYCLE_EXPORT_VERSION && importData.version !== ARCHIVE_LIFECYCLE_EXPORT_VERSION) {
+        return { success: false, error: "Native Codex capture state requires the lifecycle export format" };
+      }
+      importData = { ...importData, sessions: importData.sessions.map(codexSessionForTransfer) };
       kv.assertRecoveryImportAllowed(importData, strategy === "replace");
+      const exclusionsToImport = await prepareCodexExclusionImport(kv, importData);
+      for (const name of ["graphNodes", "graphEdges", "accessLogs"] as const) {
+        if (importData[name] !== undefined && !Array.isArray(importData[name])) throw Error(`${name} must be an array`);
+      }
+      if ((importData.accessLogs?.length ?? 0) > MAX_ACCESS_LOGS) throw Error(`Too many access logs (max ${MAX_ACCESS_LOGS})`);
+      for (const node of importData.graphNodes ?? []) {
+        if (!node || typeof node.id !== "string" || !node.id || typeof node.type !== "string" || typeof node.name !== "string") throw Error("Invalid imported graph node");
+      }
+      for (const edge of importData.graphEdges ?? []) {
+        if (!edge || typeof edge.id !== "string" || !edge.id || typeof edge.type !== "string" ||
+            typeof edge.sourceNodeId !== "string" || typeof edge.targetNodeId !== "string") throw Error("Invalid imported graph edge");
+      }
+      const incomingResults = importData.graphObservationResults === undefined ? {} : importData.graphObservationResults;
+      if (!incomingResults || typeof incomingResults !== "object" || Array.isArray(incomingResults) ||
+          Object.keys(incomingResults).length > MAX_SESSIONS) throw Error("Invalid graph completion transfer buckets");
+      const incomingSessions = new Map(importData.sessions.map(session => [session.id, session]));
+      if (incomingSessions.size !== importData.sessions.length) throw Error("Duplicate imported session identity");
+      for (const [sessionId, rows] of Object.entries(incomingResults)) {
+        const session = incomingSessions.get(sessionId);
+        if (!session || session.semanticGraphCompletionVersion !== 1 || !Array.isArray(rows) || rows.length > MAX_OBS_PER_SESSION) {
+          throw Error("Graph completion transfer requires its matching session");
+        }
+        const ids = new Set<string>();
+        const observations = new Map((importData.observations[sessionId] ?? []).map(row => [row.id, row]));
+        if (observations.size !== (importData.observations[sessionId]?.length ?? 0)) throw Error("Duplicate graph source observation identity");
+        for (const row of rows) {
+          validateGraphObservationResult(row, session);
+          if (ids.has(row.id) || observations.get(row.id)?.sessionId !== sessionId) throw Error("Graph completion transfer requires a unique source observation");
+          ids.add(row.id);
+        }
+      }
+      const existingSessions = await kv.list<Session>(KV.sessions);
+      for (const existing of existingSessions) {
+        const incoming = incomingSessions.get(existing.id);
+        if (incoming && (incoming.semanticGraphCompletionVersion !== undefined || existing.semanticGraphCompletionVersion !== undefined ||
+            incoming.codexNativeCapture || existing.codexNativeCapture) &&
+            (incoming.project !== existing.project || incoming.agentId !== existing.agentId || incoming.cwd !== existing.cwd)) {
+          throw Error("Import cannot reassign an existing native or graph-tracked session");
+        }
+        if (incoming && existing.semanticGraphCompletionVersion === 1 && incoming.semanticGraphCompletionVersion !== 1) {
+          throw Error("Import cannot downgrade observation-specific graph completion");
+        }
+        if (incoming && existing.codexNativeCapture && !incoming.codexNativeCapture) throw Error("Import cannot remove native capture identity");
+      }
+      const graphChanged = strategy === "replace" || Boolean(importData.graphNodes?.length || importData.graphEdges?.length);
+      const graphBefore = graphChanged ? {
+        nodes: await kv.list<GraphNode>(KV.graphNodes), edges: await kv.list<GraphEdge>(KV.graphEdges),
+      } : undefined;
+      const existingResults: GraphObservationResult[] = [];
+      if (graphChanged) {
+        for (const session of existingSessions) {
+          const context = await readGraphCompletionContext(kv, session);
+          if (context) existingResults.push(...context.results.values());
+        }
+      }
+      const archivePlan = await prepareArchiveImport(kv, importData, strategy);
+      if (archivePlan.pending.length) await recordAudit(kv, "import", "mem::import", archivePlan.pending.map(row => row.id), {
+        phase: "retain-archive-state", count: archivePlan.pending.length,
+      });
+      for (const state of archivePlan.pending) await kv.set(KV.archiveStates, state.id, state);
+      if (exclusionsToImport.length) await recordAudit(kv, "import", "mem::import", exclusionsToImport.map(row => row.id), {
+        phase: "retain-capture-exclusions", count: exclusionsToImport.length,
+      });
+      for (const exclusion of exclusionsToImport) await kv.set(KV.codexCaptureExclusions, exclusion.id, exclusion);
+      if (existingResults.length) {
+        await recordAudit(kv, "import", "mem::import", [], { phase: "invalidate-graph-completion", count: existingResults.length });
+        await runChunked(existingResults, async row => { await kv.set(KV.graphObservationResults(row.sessionId), row.id, { ...row, importedGraphVerified: false }); });
+        wakeGraph = true;
+      }
+      if (graphChanged) {
+        for (const session of existingSessions) {
+          if (session.semanticGraphCompletionVersion === 1) {
+            await kv.update(KV.sessions, session.id, [{ type: "set", path: "semanticGraphStatus", value: "pending" }]);
+            wakeGraph = true;
+          }
+        }
+      }
 
       const stats = {
         sessions: 0,
@@ -315,7 +421,8 @@ export function registerExportImportFunction(
       };
 
       if (strategy === "replace") {
-        const existing = await kv.list<Session>(KV.sessions);
+        const existing = existingSessions;
+        await runChunked(existingResults, row => kv.delete(KV.graphObservationResults(row.sessionId), row.id));
         // Collect observation deletes across all sessions, then run them in
         // one bounded pass: a runChunked nested inside a runChunked callback
         // multiplies in-flight deletes to chunk-size squared.
@@ -419,6 +526,7 @@ export function registerExportImportFunction(
       const changedObservationSessions = new Set<string>();
 
       await runChunked(importData.sessions, async (session) => {
+        if (archivePlan.protects(KV.sessions, session.id)) { stats.skipped++; return; }
         if (strategy === "skip") {
           const existing = await kv
             .get<Session>(KV.sessions, session.id);
@@ -433,6 +541,7 @@ export function registerExportImportFunction(
 
       for (const [sessionId, obs] of Object.entries(importData.observations)) {
         await runChunked(obs, async (o) => {
+          if (archivePlan.protects(KV.observations(sessionId), o.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
             const existing = await kv
               .get<CompressedObservation>(KV.observations(sessionId), o.id);
@@ -441,11 +550,11 @@ export function registerExportImportFunction(
               return;
             }
           }
-          o.origin = importOrigin(o.origin, o.timestamp);
-          await kv.set(KV.observations(sessionId), o.id, o);
+          const imported = { ...o, origin: importOrigin(o.origin, o.timestamp) };
+          await kv.set(KV.observations(sessionId), o.id, imported);
           changedObservationSessions.add(sessionId);
           stats.observations++;
-          indexObs.push(o);
+          indexObs.push(imported);
         });
       }
 
@@ -462,6 +571,9 @@ export function registerExportImportFunction(
           updates.push({ type: "set", path: "observationCount", value: observations.length });
           stats.reconciledSessions++;
         }
+        if (changedObservationSessions.has(sessionId) && session.codexNativeCapture) {
+          updates.push({ type: "set", path: "codexNativeCapture", value: codexSessionForTransfer(session).codexNativeCapture });
+        }
         if (changedObservationSessions.has(sessionId) && isGraphExtractionEnabled()
           && !semanticGraphCursorsAtEnd(session, observations)) {
           updates.push({ type: "set", path: "semanticGraphStatus", value: "pending" });
@@ -471,6 +583,7 @@ export function registerExportImportFunction(
       });
 
       await runChunked(importData.memories, async (memory) => {
+        if (archivePlan.protects(KV.memories, memory.id)) { stats.skipped++; return; }
         if (strategy === "skip") {
           const existing = await kv
             .get<Memory>(KV.memories, memory.id)
@@ -480,14 +593,11 @@ export function registerExportImportFunction(
             return;
           }
         }
-        // Older exports + hand-edited dumps can omit this field.
-        if (!Array.isArray(memory.sessionIds)) {
-          memory.sessionIds = [];
-        }
-        memory.origin = importOrigin(memory.origin, memory.createdAt);
-        await kv.set(KV.memories, memory.id, memory);
+        const imported = { ...memory, sessionIds: Array.isArray(memory.sessionIds) ? memory.sessionIds : [],
+          origin: importOrigin(memory.origin, memory.createdAt) };
+        await kv.set(KV.memories, memory.id, imported);
         stats.memories++;
-        indexMems.push(memory);
+        indexMems.push(imported);
       });
 
       await runChunked(importData.summaries, async (summary) => {
@@ -506,6 +616,7 @@ export function registerExportImportFunction(
 
       if (importData.graphNodes) {
         await runChunked(importData.graphNodes, async (node) => {
+          if (archivePlan.protects(KV.graphNodes, node.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
             const existing = await kv.get(KV.graphNodes, node.id).catch(() => null);
             if (existing) { stats.skipped++; return; }
@@ -515,6 +626,7 @@ export function registerExportImportFunction(
       }
       if (importData.graphEdges) {
         await runChunked(importData.graphEdges, async (edge) => {
+          if (archivePlan.protects(KV.graphEdges, edge.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
             const existing = await kv.get(KV.graphEdges, edge.id).catch(() => null);
             if (existing) { stats.skipped++; return; }
@@ -524,6 +636,7 @@ export function registerExportImportFunction(
       }
       if (importData.semanticMemories) {
         await runChunked(importData.semanticMemories, async (sem) => {
+          if (archivePlan.protects(KV.semantic, sem.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
             const existing = await kv.get(KV.semantic, sem.id).catch(() => null);
             if (existing) { stats.skipped++; return; }
@@ -533,6 +646,7 @@ export function registerExportImportFunction(
       }
       if (importData.proceduralMemories) {
         await runChunked(importData.proceduralMemories, async (proc) => {
+          if (archivePlan.protects(KV.procedural, proc.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
             const existing = await kv.get(KV.procedural, proc.id).catch(() => null);
             if (existing) { stats.skipped++; return; }
@@ -638,6 +752,7 @@ export function registerExportImportFunction(
       }
       if (importData.lessons) {
         await runChunked(importData.lessons, async (lesson) => {
+          if (archivePlan.protects(KV.lessons, lesson.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
             const existing = await kv.get(KV.lessons, lesson.id).catch(() => null);
             if (existing) { stats.skipped++; return; }
@@ -701,17 +816,35 @@ export function registerExportImportFunction(
         });
       }
 
-      if (
-        strategy === "replace" ||
-        (importData.graphNodes?.length ?? 0) > 0 ||
-        (importData.graphEdges?.length ?? 0) > 0
-      ) {
-        // Canonical import rows are authoritative. Invalidate only the
-        // rebuildable query manifest. Reads use the bounded fallback until an
-        // explicit snapshot rebuild refreshes the derived index.
+      if (graphChanged) {
         await kv.delete(KV.graphQueryManifest, "current");
+        const mergeRows = <T extends { id: string }>(previous: T[], incoming: T[] = []): T[] => {
+          const rows = new Map((strategy === "replace" ? [] : previous).map(row => [row.id, row]));
+          for (const row of incoming) if (strategy !== "skip" || !rows.has(row.id)) rows.set(row.id, row);
+          return [...rows.values()];
+        };
+        await refreshImportedGraphIndexes(kv,
+          mergeRows(graphBefore!.nodes, importData.graphNodes), mergeRows(graphBefore!.edges, importData.graphEdges),
+          graphBefore!.nodes, graphBefore!.edges);
       }
 
+      for (const [sessionId, rows] of Object.entries(incomingResults)) {
+        const session = await kv.get<Session>(KV.sessions, sessionId);
+        if (!session || session.semanticGraphCompletionVersion !== 1) throw Error("Imported graph completion lost its session");
+        const context = await readGraphCompletionContext(kv, session);
+        const observations = new Map((await kv.list<CompressedObservation>(KV.observations(sessionId))).map(row => [row.id, row]));
+        for (const row of rows) {
+          const observation = observations.get(row.id);
+          const importedGraphVerified = strategy !== "skip" && Array.isArray(importData.graphNodes) && Array.isArray(importData.graphEdges) &&
+            row.importedGraphVerified !== false && row.graphEpoch === context!.epoch && row.project === session.project &&
+            Boolean(observation && observation.sessionId === sessionId && row.inputDigest === graphObservationDigest(observation));
+          await kv.set(KV.graphObservationResults(sessionId), row.id, { ...row, importedGraphVerified });
+        }
+        await kv.update(KV.sessions, sessionId, [{ type: "set", path: "semanticGraphStatus", value: "pending" }]);
+        wakeGraph = true;
+      }
+
+      await finishArchiveImport(kv, importData, archivePlan.completed);
       logger.info("Import complete", { strategy, ...stats });
       await recordAudit(kv, "import", "mem::import", [], {
         strategy,
@@ -724,6 +857,17 @@ export function registerExportImportFunction(
         catch { logger.warn("Graph wake deferred after import was stored"); }
       }
       return result;
-    },
-  );
+}
+
+export function registerExportImportFunction(
+  sdk: ISdk, kv: StateKV, onObservationsImported?: () => void,
+): void {
+  sdk.registerFunction("mem::export", async (data?: { maxSessions?: number; offset?: number }) => {
+    const exported = await captureExportData(kv, data);
+    const oversized = checkPayloadFrameSize(exported,
+      "narrow the range with ?maxSessions / ?offset, or export fewer collections; the non-session collections (memories, graph, semantic, actions, lessons, ...) are not yet paginated");
+    if (oversized) logger.warn("Export exceeds transport frame limit", { bytes: oversized.bytes });
+    return oversized ?? exported;
+  });
+  sdk.registerFunction("mem::import", (data: Parameters<typeof importExportData>[1]) => importExportData(kv, data, onObservationsImported));
 }

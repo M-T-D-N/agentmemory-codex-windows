@@ -1,5 +1,7 @@
 import type { StateKV } from "../state/kv.js";
 import { KV, OBSERVATION_REFERENCE_ROW_SCOPES } from "../state/schema.js";
+import { prepareArchiveForget } from "./archive-forget.js";
+import { assertCompleteCodexDuplicateForget } from "../replay/codex-duplicate-match.js";
 
 type Row = Record<string, unknown>;
 
@@ -35,12 +37,14 @@ export async function previewSessionForget(kv: StateKV, data: {
     throw new Error("observationIds must be 1-500 unique non-empty strings; omit it only for a session preview");
   }
   const ids = selected as string[] | undefined;
+  const archiveForget = includeDeleted ? { targets: [] } : await prepareArchiveForget(kv, { project, sessionId, observationIds: ids });
   const session = await kv.get<Row>(KV.sessions, sessionId);
-  if (!session) return { success: true, dryRun: true, project, sessionId, exists: false, targets: [], references: [], referenceCount: 0 };
+  if (!session) return { success: true, dryRun: true, project, sessionId, exists: false, targets: [], references: [], referenceCount: 0, archiveTargets: archiveForget.targets };
   if (session.project !== project) throw new Error("session project mismatch");
   const observations = await kv.list<Row>(KV.observations(sessionId), { includeDeleted });
   const summary = await kv.get<Row>(KV.summaries, sessionId);
   const targetIds = new Set(ids ?? observations.map((row) => String(row.id)));
+  assertCompleteCodexDuplicateForget(observations as Array<Row & { id: string }>, targetIds);
   const targets = ids ? ids.map((id) => {
     const row = observations.find((item) => item.id === id && item.sessionId === sessionId);
     const fields = row ? observationContentFields(row) : [];
@@ -91,6 +95,7 @@ export async function previewSessionForget(kv: StateKV, data: {
     sessionStatus: session.status, actualObservationCount: observations.length,
     semanticGraphStatus: session.semanticGraphStatus,
     references, referenceCount, referencesTruncated: referenceCount > references.length,
+    archiveTargets: archiveForget.targets,
     checkedScopes: [...OBSERVATION_REFERENCE_ROW_SCOPES, KV.graphSnapshot, "all observation and enriched-chunk buckets enumerated by state::list_groups"],
     permanentDeletion: true,
     limitations: ["Read-only inventory, not a transaction or authorization to delete.", "Concurrent writers can change references after this response; verify the matching lifecycle before applying deletion."],

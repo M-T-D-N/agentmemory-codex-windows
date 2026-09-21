@@ -4,6 +4,8 @@ import { hasCjk, segmentCjk } from "./cjk-segmenter.js";
 export const KV = {
   sessions: "mem:sessions",
   observations: (sessionId: string) => `mem:obs:${sessionId}`,
+  codexCaptureExclusions: "mem:codex:capture-exclusions",
+  archiveStates: "mem:archive:states",
   memories: "mem:memories",
   summaries: "mem:summaries",
   config: "mem:config",
@@ -16,6 +18,8 @@ export const KV = {
   claudeBridge: "mem:claude-bridge",
   graphNodes: "mem:graph:nodes",
   graphEdges: "mem:graph:edges",
+  graphWritePlan: "mem:graph:write-plan",
+  graphObservationResults: (sessionId: string) => `mem:graph:results:${sessionId}`,
   // #814: precomputed snapshot of the top-degree subgraph and aggregate
   // type counts. Saves /graph/query and /graph/stats from a full
   // kv.list enumeration over 75K+ node corpora, which exceeds the iii

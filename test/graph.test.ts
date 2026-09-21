@@ -2584,7 +2584,7 @@ describe("Graph Functions", () => {
       let listCalls = 0;
       const baseList = kv.list;
       kv.list = async <T,>(scope: string): Promise<T[]> => {
-        listCalls += 1;
+        if (scope !== "mem:archive:states") listCalls += 1;
         return baseList.call(kv, scope) as Promise<T[]>;
       };
 
@@ -2618,7 +2618,7 @@ describe("Graph Functions", () => {
       let listCalls = 0;
       const baseList = kv.list;
       kv.list = async <T,>(scope: string): Promise<T[]> => {
-        listCalls += 1;
+        if (scope !== "mem:archive:states") listCalls += 1;
         return baseList.call(kv, scope) as Promise<T[]>;
       };
 
@@ -2640,7 +2640,7 @@ describe("Graph Functions", () => {
       let listCalls = 0;
       const baseList = kv.list;
       kv.list = async <T,>(scope: string): Promise<T[]> => {
-        listCalls += 1;
+        if (scope !== "mem:archive:states") listCalls += 1;
         return baseList.call(kv, scope) as Promise<T[]>;
       };
       const walked = (await sdk.trigger("mem::graph-query", {
@@ -2675,7 +2675,7 @@ describe("Graph Functions", () => {
       let listCalls = 0;
       const baseList = kv.list;
       kv.list = async <T,>(scope: string): Promise<T[]> => {
-        listCalls += 1;
+        if (scope !== "mem:archive:states") listCalls += 1;
         return baseList.call(kv, scope) as Promise<T[]>;
       };
 
@@ -2695,7 +2695,7 @@ describe("Graph Functions", () => {
       let listCalls = 0;
       const baseList = kv.list;
       kv.list = async <T,>(scope: string): Promise<T[]> => {
-        listCalls += 1;
+        if (scope !== "mem:archive:states") listCalls += 1;
         return baseList.call(kv, scope) as Promise<T[]>;
       };
 
@@ -2998,6 +2998,86 @@ describe("Graph Functions", () => {
 
   // The hot query path must never enumerate canonical graph scopes. Only the
   // explicit snapshot rebuild endpoint may do so, behind its size guards.
+  describe("bounded managed graph rebuild", () => {
+    it("rebuilds more than 25K nodes through bounded pages without changing originals", async () => {
+      const rows = Array.from({ length: 25001 }, (_, i) => ({
+        id: `paged_${i}`, type: "concept", name: `paged-${i}`, project: "memory", properties: {},
+        sourceObservationIds: [`obs_${i}`], sourceSessionIds: ["session"],
+        createdAt: "2026-01-01T00:00:00Z", stale: false,
+      }));
+      const base = mockKV();
+      for (const row of rows) await base.set("mem:graph:nodes", row.id, row);
+      let pages = 0;
+      const pageKv = {
+        ...base, usesManagedState: true,
+        list: async (scope: string) => {
+          if (["mem:graph:nodes", "mem:graph:edges"].includes(scope)) throw Error("unsafe full enumeration");
+          return base.list(scope);
+        },
+        listPage: async (scope: string, offset: number) => {
+          pages++;
+          const source = scope === "mem:graph:nodes" ? rows : [];
+          const page = source.slice(offset, offset + 128);
+          return { entries: page.map(value => ({ key: value.id, value })), total: source.length,
+            next_offset: offset + page.length < source.length ? offset + page.length : null };
+        },
+      };
+      const localSdk = mockSdk();
+      const set = vi.spyOn(pageKv, "set");
+      registerGraphFunction(localSdk as never, pageKv as never, mockProvider as never);
+      const result = await localSdk.trigger("mem::graph-snapshot-rebuild", {});
+      expect(result).toMatchObject({ success: true, totalNodes: 25001, totalEdges: 0, enumeration: "paged" });
+      expect(pages).toBe(197);
+      expect(set.mock.calls.every(([scope]) => !["mem:graph:nodes", "mem:graph:edges"].includes(scope))).toBe(true);
+      expect(await base.get("mem:graph:query-manifest", "current")).toMatchObject({ dirty: false, totalNodes: 25001 });
+      const query = await localSdk.trigger("mem::graph-query", { project: "memory", queries: ["paged-25000"], limit: 10 });
+      expect(query.warning).toBeUndefined();
+      expect(query.fromSnapshot).not.toBe(true);
+      expect(query.nodes.map((node: GraphNode) => node.id)).toContain("paged_25000");
+    });
+
+    it("keeps a partial rebuild visibly dirty and preserves canonical records", async () => {
+      const base = mockKV();
+      const node = { id: "n", type: "concept", name: "exact", project: "memory", properties: {}, sourceObservationIds: [], createdAt: "2026-01-01T00:00:00Z", stale: false };
+      await base.set("mem:graph:query-manifest", "current", { version: 1, dirty: false });
+      await base.set("mem:graph:nodes", "n", node);
+      const pageKv = { ...base, usesManagedState: true,
+        listPage: async (scope: string) => scope === "mem:graph:nodes" ? { entries: [{ key: "n", value: node }], total: 1, next_offset: null } : { entries: [], total: 0, next_offset: null },
+        set: async (scope: string, key: string, value: unknown) => {
+          if (scope === "mem:graph:query-documents") throw Error("derived write failed");
+          return base.set(scope, key, value);
+        },
+      };
+      const localSdk = mockSdk();
+      registerGraphFunction(localSdk as never, pageKv as never, mockProvider as never);
+      expect(await localSdk.trigger("mem::graph-snapshot-rebuild", {})).toMatchObject({ success: false, error: "derived write failed" });
+      expect(await base.get("mem:graph:query-manifest", "current")).toMatchObject({ dirty: true });
+      expect(await base.get("mem:graph:nodes", "n")).toEqual(node);
+    });
+
+    it("rejects a known oversized portable graph before requesting a whole scope", async () => {
+      const base = mockKV();
+      await base.set("mem:graph:snapshot", "current", { version: 1, stats: { totalNodes: 25001, totalEdges: 0 }, topNodes: [], topEdges: [], updatedAt: "2026-01-01T00:00:00Z" });
+      const list = vi.fn().mockRejectedValue(Error("unsafe enumeration"));
+      const localSdk = mockSdk();
+      registerGraphFunction(localSdk as never, { ...base, list } as never, mockProvider as never);
+      expect(await localSdk.trigger("mem::graph-snapshot-rebuild", { force: true })).toMatchObject({ success: false, tooLarge: true });
+      expect(list).not.toHaveBeenCalled();
+    });
+
+    it("refuses changed totals before writing derived records", async () => {
+      const base = mockKV();
+      const pageKv = { ...base, usesManagedState: true, listPage: vi.fn()
+        .mockResolvedValueOnce({ entries: [{ key: "n", value: { id: "n" } }], total: 2, next_offset: 1 })
+        .mockResolvedValueOnce({ entries: [{ key: "m", value: { id: "m" } }], total: 3, next_offset: 2 }) };
+      const set = vi.spyOn(pageKv, "set");
+      const localSdk = mockSdk();
+      registerGraphFunction(localSdk as never, pageKv as never, mockProvider as never);
+      expect(await localSdk.trigger("mem::graph-snapshot-rebuild", {})).toMatchObject({ success: false, error: expect.stringMatching(/changed/) });
+      expect(set).not.toHaveBeenCalled();
+    });
+  });
+
   describe("budget + tooLarge guards (#814 v2)", () => {
     it("graph-query startNodeId refuses enumeration when no index exists", async () => {
       const base = mockKV();
@@ -3005,7 +3085,7 @@ describe("Graph Functions", () => {
       const guarded = {
         ...base,
         list: async <T>(scope: string): Promise<T[]> => {
-          listCalls += 1;
+          if (scope !== "mem:archive:states") listCalls += 1;
           return base.list<T>(scope);
         },
       };

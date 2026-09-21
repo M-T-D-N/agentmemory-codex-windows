@@ -22,6 +22,8 @@ import {
   type ObservationSourceInput,
 } from "./provenance.js";
 import { sessionLifecycleLockKey } from "./session-lifecycle.js";
+import { retainCodexForgetExclusions } from "./codex-capture-exclusion.js";
+import { prepareArchiveForget } from "./archive-forget.js";
 import {
   GRAPH_WRITE_LOCK,
   detachForgottenGraphProvenance,
@@ -345,6 +347,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       }
       return withObservationWrite(async () => {
       kv.assertRecoveryImportAllowed({ sessionId: data.sessionId, observationIds: data.observationIds });
+      let finishArchiveForget = data.sessionId ? async () => 0 : await prepareArchiveForget(kv, data);
       let deleted = 0;
       const deletedMemoryIds: string[] = [];
       const deletedObservationIds: string[] = [];
@@ -368,6 +371,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             withKeyedLock(
               sessionLifecycleLockKey(sessionId),
               async () => {
+                finishArchiveForget = await prepareArchiveForget(kv, data);
                 const session = await kv.get<Session>(KV.sessions, sessionId);
                 const summary = await kv.get(KV.summaries, sessionId);
                 const observations = await kv.list<ForgetObservation>(
@@ -403,6 +407,8 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
                     .map((id) => observationById.get(id))
                     .filter((observation): observation is ForgetObservation => Boolean(observation));
                 if (wholeSession || targetObservations.length > 0) {
+                  await retainCodexForgetExclusions(kv, session,
+                    targetObservations as unknown as Array<{ id: string; [key: string]: unknown }>, wholeSession);
                   graphResult = await detachForgottenGraphProvenance(kv, {
                     project: session.project,
                     sessionId,
@@ -489,6 +495,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
+      const archiveStatesRemoved = await finishArchiveForget();
       if (deleted > 0) {
         await flushIndexSave();
         await safeAudit(
@@ -517,6 +524,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       return {
         success: true,
         deleted,
+        ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}),
         ...(sessionId && alreadyAbsent && deleted === 0 ? { alreadyAbsent: true } : {}),
         ...(sessionId ? graphResult : {}),
       };

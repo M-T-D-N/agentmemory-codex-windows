@@ -5,6 +5,9 @@ import type { Lesson } from "../types.js";
 import { SearchIndex } from "../state/search-index.js";
 import { lessonToObservation } from "../state/memory-utils.js";
 import { recordAudit, safeAudit } from "./audit.js";
+import { readArchiveVisibility, readArchiveCleanupProtection, assertArchiveTargetOwnership } from "./archive.js";
+import { registerObservationWriter } from "../state/observation-write.js";
+import { prepareArchiveTargetForget } from "./archive-forget.js";
 import {
   validateObservationProvenance,
   type ObservationSourceInput,
@@ -239,11 +242,12 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
       const limit = data.limit ?? 10;
 
       const idx = await ensureLessonIndex(kv);
-      const filtering = !!data.project || minConfidence > 0.1;
-      const fetchLimit = filtering
-        ? Math.max(limit * 10, 100)
-        : Math.max(limit * 5, 50);
-      const hits = idx.search(data.query, fetchLimit);
+      const archived = await readArchiveVisibility(kv);
+      const hits = idx.search(data.query, Number.MAX_SAFE_INTEGER).filter(hit => {
+        const lesson = lessonRecords.get(hit.obsId);
+        return lesson && !lesson.deleted && lesson.confidence >= minConfidence &&
+          !archived({ kind: "lesson", id: lesson.id }) && (!data.project || data.project === "*" || lesson.project === data.project);
+      });
       const maxHit = hits.length > 0 ? hits[0].score : 0;
 
       const scored: Array<{ lesson: Lesson; score: number }> = [];
@@ -297,9 +301,10 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
       const limit = data.limit ?? 50;
       const minConfidence = data.minConfidence ?? 0;
       let lessons = await kv.list<Lesson>(KV.lessons);
+      const archived = await readArchiveVisibility(kv);
 
       lessons = lessons.filter(
-        (l) => !l.deleted && l.confidence >= minConfidence,
+        (l) => !l.deleted && !archived({ kind: "lesson", id: l.id }) && l.confidence >= minConfidence,
       );
 
       if (data.project && data.project !== "*") {
@@ -342,14 +347,21 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction("mem::lesson-delete",
-    async (data: { lessonId: string }) => {
+  registerObservationWriter(sdk, "mem::lesson-delete",
+    async (data: { lessonId: string; project?: string }) => {
       if (!data.lessonId) {
         return { success: false, error: "lessonId is required" };
       }
 
       const lesson = await kv.get<Lesson>(KV.lessons, data.lessonId);
+      if (data.project !== undefined && (typeof data.project !== "string" || !data.project.trim() || data.project !== data.project.trim() || data.project === "*" || data.project.length > 512 || data.project.includes("\0"))) {
+        return { success: false, error: "exact lesson project is required" };
+      }
+      if (lesson && data.project !== undefined) await assertArchiveTargetOwnership(kv, { kind: "lesson", id: data.lessonId }, lesson, data.project);
+      const finishArchive = await prepareArchiveTargetForget(kv, [{ kind: "lesson", id: data.lessonId }], data.project, "mem::lesson-delete");
       if (!lesson || lesson.deleted) {
+        const archiveStatesRemoved = await finishArchive();
+        if (archiveStatesRemoved) return { success: true, alreadyDeleted: true, archiveStatesRemoved };
         return { success: false, error: "lesson not found" };
       }
 
@@ -360,6 +372,7 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
       lessonRecords.delete(lesson.id);
       if (lessonIndex) lessonIndex.remove(lesson.id);
       noteLessonMutation();
+      const archiveStatesRemoved = await finishArchive();
 
       try {
         await recordAudit(kv, "lesson_delete", "mem::lesson-delete", [
@@ -367,13 +380,14 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
         ]);
       } catch {}
 
-      return { success: true, lesson };
+      return { success: true, lesson, ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}) };
     },
   );
 
-  sdk.registerFunction("mem::lesson-decay-sweep", 
+  registerObservationWriter(sdk, "mem::lesson-decay-sweep",
     async () => {
-      const lessons = await kv.list<Lesson>(KV.lessons);
+      const protectedArchive = await readArchiveCleanupProtection(kv);
+      const lessons = (await kv.list<Lesson>(KV.lessons)).filter(lesson => !protectedArchive({ kind: "lesson", id: lesson.id }));
       let decayed = 0;
       let softDeleted = 0;
       const now = Date.now();

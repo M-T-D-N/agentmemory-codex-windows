@@ -6,6 +6,8 @@ import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { logger } from "../logger.js";
+import { readArchiveVisibility } from "./archive.js";
+import { registerObservationWriter } from "../state/observation-write.js";
 
 function parseMemoryMd(content: string): {
   sections: Map<string, string>;
@@ -111,7 +113,7 @@ export function registerClaudeBridgeFunction(
     },
   );
 
-  sdk.registerFunction("mem::claude-bridge-sync", 
+  registerObservationWriter(sdk, "mem::claude-bridge-sync",
     async () => {
       if (!config.enabled || !config.memoryFilePath) {
         return { success: false, error: "Claude bridge not configured" };
@@ -119,7 +121,8 @@ export function registerClaudeBridgeFunction(
 
       try {
         const memories = await kv.list<Memory>(KV.memories);
-        const latestMemories = memories.filter((m) => m.isLatest);
+        const hidden = await readArchiveVisibility(kv);
+        const latestMemories = memories.filter((m) => m.isLatest && !hidden({ kind: "memory", id: m.id }));
 
         let projectSummary = "";
         if (config.projectPath) {

@@ -58,6 +58,17 @@ foreach ($required in @($node, $iii, (Join-Path $sourceRoot 'pnpm-lock.yaml'), (
 }
 
 $thirdParty = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'config\third-party-inputs.json') | ConvertFrom-Json
+$stateDurability = $thirdParty.iii_engine.PSObject.Properties['state_durability']
+if ($null -eq $stateDurability -or [string]$stateDurability.Value -ne 'file-flush-v1') {
+    throw 'The pinned engine has not been qualified for the required StateModule durability barrier.'
+}
+$enginePatch = Join-Path $PSScriptRoot 'patches\iii-0.11.2-state-flush.patch'
+if ([string]$thirdParty.iii_engine.source_commit -notmatch '^[a-f0-9]{40}$' -or
+    [string]$thirdParty.iii_engine.patch_sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+    (Get-NormalizedTextSha256 -Path $enginePatch) -ne [string]$thirdParty.iii_engine.patch_sha256 -or
+    [string]$thirdParty.iii_engine.build_profile -ne 'release') {
+    throw 'Patched engine source, patch hash and release build provenance are required.'
+}
 $iiiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $iii).Hash
 if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'licenses\iii-LICENSE_ELv2')).Hash -ne [string]$thirdParty.iii_engine.license_sha256) {
     throw 'iii-engine license hash mismatch.'
@@ -69,6 +80,9 @@ if ($iiiHash -ne [string]$thirdParty.iii_engine.sha256) {
 $packageJson = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
 $version = [string]$packageJson.version
 $downstreamVersion = [string]$packageJson.agentmemoryDownstream.version
+if ($packageJson.agentmemoryDownstream.dataContractVersion -ne 3) {
+    throw 'This managed runtime requires data contract version 3.'
+}
 if ($downstreamVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
     throw 'package.json agentmemoryDownstream.version must be a semantic version.'
 }
@@ -142,6 +156,7 @@ foreach ($directory in @($scriptsOut, $binOut, $configOut, $srcOut)) {
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'powershell\*.ps1') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-turn.mjs') -Destination $scriptsOut
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-project.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'node\agentmemory-worker.mjs') -Destination $binOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\iii-config.yaml') -Destination $configOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\hook-spec.json') -Destination $configOut
@@ -149,6 +164,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\third-party-inputs.json'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\mcp-launcher-environment.json') -Destination $configOut
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'upstream-source.json') -Destination $configOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'launcher\AgentMemoryHiddenLauncher.cs') -Destination $srcOut
+Copy-Item -LiteralPath $enginePatch -Destination $srcOut
 Copy-Item -LiteralPath $iii -Destination (Join-Path $binOut 'iii.exe')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-WindowsCodex.ps1') -Destination $releaseRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Initialize-WindowsCodex.ps1') -Destination $releaseRoot
@@ -208,6 +224,7 @@ $manifest = [ordered]@{
     product_id = 'agentmemory-codex-windows'
     downstream_version = $downstreamVersion
     agentmemory_version = $version
+    data_contract_version = [int]$packageJson.agentmemoryDownstream.dataContractVersion
     release_revision = $ReleaseRevision
     package_relative_path = "runtime/$runtimeRelease/agentmemory"
     upstream = [ordered]@{
@@ -220,6 +237,10 @@ $manifest = [ordered]@{
         node = (& $node --version).Trim()
         pnpm = (& $pnpm --version).Trim()
         iii = [string]$thirdParty.iii_engine.version
+        iii_source_commit = [string]$thirdParty.iii_engine.source_commit
+        iii_patch_sha256 = [string]$thirdParty.iii_engine.patch_sha256
+        iii_state_durability = [string]$thirdParty.iii_engine.state_durability
+        iii_build_profile = [string]$thirdParty.iii_engine.build_profile
     }
     adapter_source_hashes = [ordered]@{
         hidden_launcher = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'launcher\AgentMemoryHiddenLauncher.cs')).Hash

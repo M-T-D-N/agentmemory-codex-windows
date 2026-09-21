@@ -8,9 +8,13 @@ import {
 } from "../functions/session-lifecycle.js";
 import type { ContextReader } from "../functions/context.js";
 import { selectSessionPage } from "../functions/session-query.js";
+import { readArchiveVisibility } from "../functions/archive.js";
+import { legacyMeshArchiveError } from "../functions/archive-transfer.js";
+import { registerObservationWriter } from "../state/observation-write.js";
+import { parseArchiveToolInput } from "../functions/archive-tools.js";
 import { safeAudit } from "../functions/audit.js";
 import type { ObservationSourceInput } from "../functions/provenance.js";
-import { KV } from "../state/schema.js";
+import { KV, STREAM } from "../state/schema.js";
 import { checkPayloadFrameSize } from "../state/frame-guard.js";
 import { StateKV } from "../state/kv.js";
 import { getLatestHealth } from "../health/monitor.js";
@@ -27,6 +31,14 @@ import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
+import { readCodexSourceIdentity } from "../functions/codex-source-identity.js";
+import { readCodexInventory } from "../replay/codex-inventory.js";
+import { readCodexThreadIndex } from "../functions/codex-source-index.js";
+import { reconcileCodexSessionAgent, type SessionAgentReconcileInput } from "../functions/session-agent-reconcile.js";
+import { inspectCodexSource, type CodexSourceInspectInput } from "../functions/codex-source-inspect.js";
+import { initializeCodexSourceCapture, captureCodexSourceWindow } from "../functions/codex-source-capture.js";
+import { indexRecords, flushIndexSave } from "../functions/search.js";
+import { registerCodexSourceBacklog } from "../functions/codex-source-backlog.js";
 import {
   isCodexInternalAmbientText,
   isExcludedCodexAmbientSession,
@@ -198,6 +210,8 @@ export function registerApiTriggers(
   secret?: string,
   metricsStore?: MetricsStore,
   provider?: { name?: string; circuitState?: unknown },
+  onNativeCaptured?: () => void,
+  nativeSourceStatus?: () => unknown,
 ): void {
   sdk.registerFunction(
     "middleware::api-auth",
@@ -231,13 +245,27 @@ export function registerApiTriggers(
     viewerPort: getBoundViewerPort(),
     viewerSkipped: getViewerSkipped(),
     streamsPort: bootStreamsPort,
+    ...(nativeSourceStatus ? { nativeCapture: nativeSourceStatus() } : {}),
   });
 
+  let lastNotificationState: string | undefined;
   sdk.registerFunction("api::liveness",
-    async (): Promise<Response> => ({
-      status_code: 200,
-      body: { status: "ok", ...instanceInfo() },
-    }),
+    async (req?: ApiRequest): Promise<Response> => {
+      const notify = req?.query_params?.["notify"] === "true";
+      if (notify) {
+        const denied = checkAuth(req!, secret);
+        if (denied) return denied;
+      }
+      const body = { status: "ok", ...instanceInfo(), writeRecoveryRequired: kv.requiresWriteRecovery() };
+      if (!notify) return { status_code: 200, body };
+      const source = (body.nativeCapture ?? {}) as Record<string, unknown>;
+      const state = JSON.stringify([body.writeRecoveryRequired, source.status ?? "unknown",
+        source.discoveryIssues ?? 0, source.captureIssues ?? 0, source.graphFailures ?? 0,
+        Number(source.consecutiveFailures) > 0]);
+      const notificationChanged = state !== lastNotificationState;
+      lastNotificationState = state;
+      return { status_code: 200, body: { ...body, notificationChanged } };
+    },
   );
   sdk.registerTrigger({
     type: "http",
@@ -464,6 +492,7 @@ export function registerApiTriggers(
         format?: string;
         token_budget?: number;
         agentId?: string;
+        trackAccess?: boolean;
       }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -515,6 +544,9 @@ export function registerApiTriggers(
       // applies. Honors body.agentId (POST body), ?agentId=... query
       // param, or implicit fallback to the worker's AGENT_ID when
       // AGENTMEMORY_AGENT_SCOPE=isolated.
+      if (body.trackAccess !== undefined && typeof body.trackAccess !== "boolean") {
+        return { status_code: 400, body: { error: "trackAccess must be a boolean" } };
+      }
       const bodyAgentId =
         typeof body.agentId === "string" && body.agentId.trim().length > 0
           ? (body.agentId as string).trim()
@@ -530,6 +562,7 @@ export function registerApiTriggers(
             : undefined,
         token_budget: body.token_budget as number | undefined,
         agentId: bodyAgentId ?? queryAgentId,
+        trackAccess: body.trackAccess as boolean | undefined,
       };
       const result = await sdk.trigger({ function_id: "mem::search", payload: payload });
       return { status_code: 200, body: result };
@@ -654,11 +687,90 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/replay/import-jsonl", http_method: "POST" },
   });
 
+  sdk.registerFunction("mem::session-owner-reconcile", async (input: SessionAgentReconcileInput) => {
+    const sourceRoot = process.env["AGENTMEMORY_CODEX_SOURCE_ROOT"];
+    if (!sourceRoot) throw new Error("Managed Codex source root is not configured");
+    return reconcileCodexSessionAgent(kv, input, getAgentId() ?? "", (sourcePath, sessionId) =>
+      readCodexSourceIdentity(sourceRoot, sourcePath, sessionId), async sessionId =>
+      (await readCodexThreadIndex(sourceRoot, { sessionId, limit: 1 })).entries[0], async (sourcePath, sessionId) => {
+        const { last } = await readCodexInventory({ sourceRoot, sourcePath, sessionId });
+        return { source: last.source, complete: last.caughtUp, cwd: last.cursor.parser.cwd };
+      });
+  });
+  sdk.registerFunction("mem::codex-source-inspect", async (input: CodexSourceInspectInput) => {
+    return inspectCodexSource(kv, input, { sourceRoot: process.env["AGENTMEMORY_CODEX_SOURCE_ROOT"] ?? "", agentId: getAgentId() ?? "" });
+  });
+  const nativeIndexReady = new Set<string>();
+  const managedNativeSource = () => ({ sourceRoot: process.env["AGENTMEMORY_CODEX_SOURCE_ROOT"] ?? "", agentId: getAgentId() ?? "" });
+  sdk.registerFunction("mem::codex-source-initialize", async (input: Parameters<typeof initializeCodexSourceCapture>[1]) => {
+    const result = await initializeCodexSourceCapture(kv, input, managedNativeSource());
+    if (!result.dryRun) nativeIndexReady.delete(input.sessionId);
+    return result;
+  });
+  sdk.registerFunction("mem::codex-source-capture", async (input: { sessionId: string; project: string }) => {
+    const result = await captureCodexSourceWindow(kv, input, managedNativeSource(), {
+      rebuildIndex: !nativeIndexReady.has(input.sessionId),
+      publish: async (rows, eventRows) => {
+        await indexRecords(rows, []); await flushIndexSave({ requireSuccess: true });
+        for (const observation of eventRows) {
+          for (const group_id of [STREAM.group(observation.sessionId), STREAM.viewerGroup]) await sdk.trigger({
+            function_id: "stream::set", payload: { stream_name: STREAM.name, group_id, item_id: observation.id,
+              data: { type: "compressed", observation, sessionId: observation.sessionId } },
+          });
+        }
+      },
+    });
+    if (!result.indexPending) nativeIndexReady.add(input.sessionId);
+    if (result.captured > 0) {
+      try { onNativeCaptured?.(); } catch { logger.warn("Graph wake deferred after native capture was stored"); }
+    }
+    return result;
+  });
+  registerCodexSourceBacklog(sdk, kv, () => getAgentId() ?? "");
+
   sdk.registerFunction("api::session::start",
     async (
       req: ApiRequest<{ sessionId: string; project: string; cwd: string }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
+      if (body.action !== undefined) {
+        if (typeof body.action !== "string" || !["reconcile-owner", "inspect-source", "initialize-source", "capture-source"].includes(body.action)) return { status_code: 400, body: { error: "Unsupported session action" } };
+        const configurationError = requireConfiguredSecret(secret, "Codex owner reconciliation");
+        if (configurationError) return configurationError;
+        const authError = checkAuth(req, secret);
+        if (authError) return authError;
+        if (!process.env["AGENTMEMORY_CODEX_SOURCE_ROOT"]) {
+          return { status_code: 503, body: { error: "Managed Codex source root is not configured" } };
+        }
+        try {
+          if (body.action === "initialize-source") {
+            const result = await sdk.trigger({ function_id: "mem::codex-source-initialize", payload: {
+              project: body.project, sessionId: body.sessionId, sourcePath: body.sourcePath,
+              dryRun: body.dryRun, expectedVersion: body.expectedVersion, reason: body.reason, reconcileDuplicates: body.reconcileDuplicates, retainUnmatched: body.retainUnmatched, reviewSourceHolds: body.reviewSourceHolds,
+            } });
+            return { status_code: 200, body: result };
+          }
+          if (body.action === "capture-source") {
+            const result = await sdk.trigger({ function_id: "mem::codex-source-capture", payload: {
+              project: body.project, sessionId: body.sessionId,
+            } });
+            return { status_code: 200, body: result };
+          }
+          if (body.action === "inspect-source") {
+            const result = await sdk.trigger({ function_id: "mem::codex-source-inspect", payload: {
+              project: body.project, sessionId: body.sessionId, sourcePath: body.sourcePath, limit: body.limit,
+            } });
+            return { status_code: 200, body: result };
+          }
+          const result = await sdk.trigger({ function_id: "mem::session-owner-reconcile", payload: {
+            project: body.project, sessionId: body.sessionId, sourcePath: body.sourcePath,
+            dryRun: body.dryRun, expectedVersion: body.expectedVersion, reason: body.reason,
+          } });
+          return { status_code: 200, body: result };
+        } catch (error) {
+          return { status_code: 409, body: { success: false, error: error instanceof Error ? error.message : "Owner reconciliation failed" } };
+        }
+      }
       const sessionId = asNonEmptyString(body.sessionId);
       const project = asNonEmptyString(body.project);
       const cwd = asNonEmptyString(body.cwd);
@@ -1060,10 +1172,11 @@ export function registerApiTriggers(
         0,
         parseOptionalInt(req.query_params?.["offset"]) ?? 0,
       );
+      const archived = await readArchiveVisibility(kv);
       const selected = selectSessionPage(sessions, {
         project, sessionId: sessionId ?? undefined, includeExcluded, limit, offset, order: "asc",
         agentId: typeof req.query_params?.["agentId"] === "string" ? req.query_params["agentId"] : undefined,
-      });
+      }, archived);
       const page = selected.sessions;
       // Bounded fan-out: each kv.get is a full engine invocation, so
       // Promise.all over hundreds of sessions saturates the invocation
@@ -1075,7 +1188,7 @@ export function registerApiTriggers(
         const chunk = page.slice(batch, batch + 10);
         const results = await Promise.all(
           chunk.map((s) =>
-            kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
+            archived.hasArchivedObservations(s.id) ? Promise.resolve(null) : kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
           ),
         );
         summaries.push(...results);
@@ -1112,6 +1225,7 @@ export function registerApiTriggers(
         KV.observations(sessionId),
       );
       const session = await kv.get<Session>(KV.sessions, sessionId);
+      const archived = await readArchiveVisibility(kv);
       const project = normalizeReadProject(req.query_params?.["project"]);
       if (!project) {
         return {
@@ -1122,6 +1236,7 @@ export function registerApiTriggers(
       if (
         !session ||
         isExcludedCodexAmbientSession(session) ||
+        archived({ kind: "session", id: sessionId }) ||
         (project !== "*" && session.project !== project)
       ) {
         return { status_code: 404, body: { error: "session not found in project" } };
@@ -1141,6 +1256,7 @@ export function registerApiTriggers(
       const offset = Math.max(0, parseOptionalInt(req.query_params?.["offset"]) ?? 0);
       const filtered = observations
         .filter((observation) => observation.sessionId === sessionId)
+        .filter((observation) => !archived({ kind: "observation", id: observation.id, sessionId }))
         .map((observation) => sanitizeCodexAmbientObservation(observation))
         .filter((observation): observation is CompressedObservation => !!observation)
         .filter((observation) => !filterAgentId || observation.agentId === filterAgentId)
@@ -1944,6 +2060,22 @@ export function registerApiTriggers(
     },
   });
 
+  sdk.registerFunction("api::archive", async (req: ApiRequest): Promise<Response> => {
+    const authErr = checkAuth(req, secret);
+    if (authErr) return authErr;
+    let payload;
+    try { payload = parseArchiveToolInput(req.body); }
+    catch (error) { return { status_code: 400, body: { error: error instanceof Error ? error.message : "Invalid archive request" } }; }
+    try {
+      const result = await sdk.trigger({ function_id: "mem::archive", payload });
+      return { status_code: result && typeof result === "object" && (result as { success?: boolean }).success === false ? 422 : 200, body: result };
+    } catch (error) {
+      return { status_code: 422, body: { error: error instanceof Error ? error.message : "Archive operation failed" } };
+    }
+  });
+  sdk.registerTrigger({ type: "http", function_id: "api::archive",
+    config: { api_path: "/agentmemory/archive", http_method: "POST" } });
+
   sdk.registerFunction("api::graph-stats", 
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -2281,7 +2413,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::governance-delete", 
     async (
-      req: ApiRequest<{ memoryIds: string[]; reason?: string }>,
+      req: ApiRequest<{ memoryIds: string[]; reason?: string; project?: string }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
@@ -2291,7 +2423,9 @@ export function registerApiTriggers(
           body: { error: "memoryIds array is required" },
         };
       }
-      const result = await sdk.trigger({ function_id: "mem::governance-delete", payload: req.body });
+      const result = await sdk.trigger({ function_id: "mem::governance-delete", payload: {
+        memoryIds: req.body.memoryIds, reason: req.body.reason, project: req.body.project,
+      } });
       return { status_code: 200, body: result };
     },
   );
@@ -2312,11 +2446,15 @@ export function registerApiTriggers(
         dateTo?: string;
         qualityBelow?: number;
         dryRun?: boolean;
+        project?: string;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const result = await sdk.trigger({ function_id: "mem::governance-bulk", payload: req.body || {} });
+      const result = await sdk.trigger({ function_id: "mem::governance-bulk", payload: {
+        type: req.body?.type, dateFrom: req.body?.dateFrom, dateTo: req.body?.dateTo,
+        qualityBelow: req.body?.qualityBelow, dryRun: req.body?.dryRun, project: req.body?.project,
+      } });
       return { status_code: 200, body: result };
     },
   );
@@ -2418,6 +2556,8 @@ export function registerApiTriggers(
         ? undefined
         : explicitAgentId ?? (isAgentScopeIsolated() ? getAgentId() : undefined);
       let filtered = latest ? memories.filter((m) => m.isLatest) : memories;
+      const archived = await readArchiveVisibility(kv);
+      filtered = filtered.filter(memory => !archived({ kind: "memory", id: memory.id }));
       if (project !== "*") {
         filtered = filtered.filter((memory) => memory.project === project);
       }
@@ -2497,7 +2637,8 @@ export function registerApiTriggers(
         };
       }
       const memory = await kv.get<import("../types.js").Memory>(KV.memories, id);
-      if (!memory || (project !== "*" && memory.project !== project)) {
+      const archived = await readArchiveVisibility(kv);
+      if (!memory || archived({ kind: "memory", id }) || (project !== "*" && memory.project !== project)) {
         return { status_code: 404, body: { error: `memory not found: ${id}` } };
       }
       return { status_code: 200, body: { memory } };
@@ -2514,7 +2655,8 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const semantic = await kv.list<import("../types.js").SemanticMemory>(KV.semantic);
-      return { status_code: 200, body: { semantic } };
+      const archived = await readArchiveVisibility(kv);
+      return { status_code: 200, body: { semantic: semantic.filter(row => !archived({ kind: "semantic", id: row.id })) } };
     },
   );
   sdk.registerTrigger({
@@ -2528,7 +2670,8 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const procedural = await kv.list<import("../types.js").ProceduralMemory>(KV.procedural);
-      return { status_code: 200, body: { procedural } };
+      const archived = await readArchiveVisibility(kv);
+      return { status_code: 200, body: { procedural: procedural.filter(row => !archived({ kind: "procedural", id: row.id })) } };
     },
   );
   sdk.registerTrigger({
@@ -3243,8 +3386,8 @@ export function registerApiTriggers(
       if (secretErr) return secretErr;
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const result = await sdk.trigger({ function_id: "mem::mesh-receive", payload: req.body || {} });
-      return { status_code: 200, body: result };
+      const result = await sdk.trigger({ function_id: "mem::mesh-receive", payload: req.body || {} }) as { success?: boolean };
+      return { status_code: result.success === false ? 409 : 200, body: result };
     },
   );
   sdk.registerTrigger({
@@ -3253,13 +3396,15 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/mesh/receive", http_method: "POST" },
   });
 
-  sdk.registerFunction("api::mesh-export", 
+  registerObservationWriter(sdk, "api::mesh-export",
     async (req: ApiRequest): Promise<Response> => {
       const secretErr = requireConfiguredSecret(secret, "mesh");
       if (secretErr) return secretErr;
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const since = req.query_params?.["since"] as string;
+      const archiveError = await legacyMeshArchiveError(kv);
+      if (archiveError) return { status_code: 409, body: { error: archiveError } };
       if (since) {
         const parsed = new Date(since).getTime();
         if (Number.isNaN(parsed)) {
@@ -3755,7 +3900,7 @@ export function registerApiTriggers(
     const body = req.body as Record<string, unknown>;
     const lessonId = typeof body?.lessonId === "string" ? body.lessonId.trim() : "";
     if (!lessonId) return { status_code: 400, body: { error: "lessonId is required" } };
-    const result = await sdk.trigger({ function_id: "mem::lesson-delete", payload: { lessonId } });
+    const result = await sdk.trigger({ function_id: "mem::lesson-delete", payload: { lessonId, project: body.project } });
     const resp = result as { success?: boolean; error?: string };
     if (resp?.success === false && resp.error === "lesson not found") {
       return { status_code: 404, body: { error: "lesson not found" } };

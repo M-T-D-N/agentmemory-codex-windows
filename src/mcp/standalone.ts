@@ -13,6 +13,7 @@ import { VERSION } from "../version.js";
 import { generateId } from "../state/schema.js";
 import type { Session } from "../types.js";
 import { parseSessionQuery, selectSessionPage, type SessionQuery } from "../functions/session-query.js";
+import { readArchiveVisibility } from "../functions/archive.js";
 import {
   resolveHandle,
   invalidateHandle,
@@ -271,7 +272,9 @@ async function handleLocal(
       const limit = v.limit ?? DEFAULT_LIMIT;
       const all =
         await kvInstance.list<Record<string, unknown>>("mem:memories");
+      const archived = await readArchiveVisibility(kvInstance);
       const results = all
+        .filter(m => typeof m.id === "string" && !archived({ kind: "memory", id: m.id }))
         .filter((m) => {
           const text = [
             typeof m["title"] === "string" ? m["title"] : "",
@@ -292,6 +295,7 @@ async function handleLocal(
     case "memory_sessions": {
       return textResponse(selectSessionPage(
         await kvInstance.list<Session>("mem:sessions"), v.sessionQuery!,
+        await readArchiveVisibility(kvInstance),
       ), true);
     }
 

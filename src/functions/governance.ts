@@ -6,17 +6,29 @@ import { recordAudit, safeAudit, queryAudit } from "./audit.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { getSearchIndex, vectorIndexRemove, flushIndexSave } from "./search.js";
 import { logger } from "../logger.js";
+import { registerObservationWriter } from "../state/observation-write.js";
+import { prepareArchiveTargetForget } from "./archive-forget.js";
+
+const exactProject = (project: unknown) => typeof project === "string" && Boolean(project) && project === project.trim() && project !== "*" && project.length <= 512 && !project.includes("\0");
 
 export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::governance-delete", 
-    async (data: { memoryIds: string[]; reason?: string }) => {
+  registerObservationWriter(sdk, "mem::governance-delete",
+    async (data: { memoryIds: string[]; reason?: string; project?: string }) => {
       if (
         !data.memoryIds ||
         !Array.isArray(data.memoryIds) ||
-        data.memoryIds.length === 0
+        data.memoryIds.length === 0 || data.memoryIds.some(id => typeof id !== "string" || !id.trim())
       ) {
         return { success: false, error: "memoryIds array is required" };
       }
+      if (data.project !== undefined && !exactProject(data.project)) return { success: false, error: "exact project is required" };
+      if (data.project !== undefined) {
+        for (const id of data.memoryIds) {
+          const row = await kv.get<Memory>(KV.memories, id);
+          if (row && row.project !== data.project) return { success: false, error: "memory project mismatch" };
+        }
+      }
+      const finishArchive = await prepareArchiveTargetForget(kv, data.memoryIds.map(id => ({ kind: "memory", id })), data.project, "mem::governance-delete");
 
       let deleted = 0;
       for (const id of data.memoryIds) {
@@ -29,6 +41,7 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
           deleted++;
         }
       }
+      const archiveStatesRemoved = await finishArchive();
 
       if (deleted > 0) await flushIndexSave();
 
@@ -47,18 +60,19 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
         requested: data.memoryIds.length,
         deleted,
       });
-      return { success: true, deleted, total: data.memoryIds.length };
+      return { success: true, deleted, total: data.memoryIds.length, ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}) };
     },
   );
 
-  sdk.registerFunction("mem::governance-bulk", 
+  registerObservationWriter(sdk, "mem::governance-bulk",
     async (data: GovernanceFilter & { dryRun?: boolean }) => {
 
       const hasFilter =
         (data.type && data.type.length > 0) ||
         data.dateFrom ||
         data.dateTo ||
-        data.qualityBelow !== undefined;
+        data.qualityBelow !== undefined || data.project !== undefined;
+      if (data.project !== undefined && !exactProject(data.project)) return { success: false, error: "exact project is required" };
       if (!hasFilter && !data.dryRun) {
         return {
           success: false,
@@ -67,7 +81,7 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       const memories = await kv.list<Memory>(KV.memories);
-      let candidates = memories;
+      let candidates = data.project === undefined ? memories : memories.filter(memory => memory.project === data.project);
 
       if (data.type && data.type.length > 0) {
         candidates = candidates.filter((m) => data.type!.includes(m.type));
@@ -94,16 +108,19 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
         candidates = candidates.filter((m) => m.strength < data.qualityBelow!);
       }
 
+      const finishArchive = await prepareArchiveTargetForget(kv, candidates.map(memory => ({ kind: "memory", id: memory.id })), data.project, "mem::governance-bulk");
       if (data.dryRun) {
         return {
           success: true,
           dryRun: true,
           wouldDelete: candidates.length,
           ids: candidates.map((m) => m.id),
+          ...(finishArchive.targets.length ? { archiveTargets: finishArchive.targets } : {}),
         };
       }
 
       const BATCH_SIZE = 50;
+      let archiveStatesRemoved = 0;
       const successfulIds: string[] = [];
       const failures: Array<{ id: string; error: string }> = [];
       for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
@@ -114,6 +131,7 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
             await deleteAccessLog(kv, mem.id);
             getSearchIndex().remove(mem.id);
             vectorIndexRemove(mem.id);
+            archiveStatesRemoved += await finishArchive({ kind: "memory", id: mem.id });
           }),
         );
         results.forEach((result, j) => {
@@ -160,6 +178,7 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
         deleted: successfulIds.length,
         failed: failures.length,
         failures: failures.length > 0 ? failures : undefined,
+        ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}),
       };
     },
   );

@@ -16,8 +16,10 @@ import {
 import { safeAudit } from "./audit.js";
 import { getSearchIndex, vectorIndexRemove, flushIndexSave } from "./search.js";
 import { logger } from "../logger.js";
+import { readArchiveCleanupProtection } from "./archive.js";
+import { registerObservationWriter } from "../state/observation-write.js";
 
-const DEFAULT_DECAY: DecayConfig = {
+export const DEFAULT_DECAY: DecayConfig = {
   lambda: 0.01,
   sigma: 0.3,
   tierThresholds: {
@@ -65,8 +67,8 @@ function resolveDecayConfig(
 function computeReinforcementBoost(
   accessTimestamps: number[],
   sigma: number,
+  now = Date.now(),
 ): number {
-  const now = Date.now();
   let boost = 0;
   for (const tAccess of accessTimestamps) {
     if (!Number.isFinite(tAccess)) continue;
@@ -104,6 +106,27 @@ function computeSalience(
   return Math.min(1, baseSalience + accessBonus);
 }
 
+export function computeRetentionEntry(
+  memory: Memory | SemanticMemory,
+  source: "episodic" | "semantic",
+  log: AccessLog,
+  config: DecayConfig,
+  now: number,
+): RetentionScore {
+  let recent = log.recent, count = log.count;
+  const semantic = source === "semantic" ? memory as SemanticMemory : undefined;
+  if (semantic && !recent.length && !count) {
+    const legacy = Date.parse(semantic.lastAccessedAt);
+    recent = Number.isFinite(legacy) ? [legacy] : [];
+    count = semantic.accessCount;
+  }
+  const salience = computeSalience(memory, count);
+  const temporalDecay = Math.exp(-config.lambda * ((now - Date.parse(memory.createdAt)) / 86400000));
+  const reinforcementBoost = computeReinforcementBoost(recent, config.sigma, now);
+  return { memoryId: memory.id, source, score: Math.min(1, salience * temporalDecay + reinforcementBoost),
+    salience, temporalDecay, reinforcementBoost, lastAccessed: log.lastAt || (semantic ? semantic.lastAccessedAt : (memory as Memory).updatedAt), accessCount: count };
+}
+
 export function registerRetentionFunctions(
   sdk: ISdk,
   kv: StateKV,
@@ -129,12 +152,7 @@ export function registerRetentionFunctions(
 
       const scores: RetentionScore[] = [];
 
-      const computeDecay = (createdAt: string): number =>
-        Math.exp(
-          -config.lambda *
-            ((Date.now() - new Date(createdAt).getTime()) /
-              (1000 * 60 * 60 * 24)),
-        );
+      const now = Date.now();
 
       // Build all entries in memory first, then flush with Promise.all
       // so a full rescore is one batched KV write instead of N sequential
@@ -146,27 +164,7 @@ export function registerRetentionFunctions(
       for (const mem of memories) {
         if (!mem.isLatest) continue;
         const log = logsById.get(mem.id) ?? emptyAccessLog(mem.id);
-        const salience = computeSalience(mem, log.count);
-        const temporalDecay = computeDecay(mem.createdAt);
-        const reinforcementBoost = computeReinforcementBoost(
-          log.recent,
-          config.sigma,
-        );
-        const score = Math.min(
-          1,
-          salience * temporalDecay + reinforcementBoost,
-        );
-
-        const entry: RetentionScore = {
-          memoryId: mem.id,
-          source: "episodic",
-          score,
-          salience,
-          temporalDecay,
-          reinforcementBoost,
-          lastAccessed: log.lastAt || mem.updatedAt,
-          accessCount: log.count,
-        };
+        const entry = computeRetentionEntry(mem, "episodic", log, config, now);
 
         scores.push(entry);
         pendingWrites.push([mem.id, entry]);
@@ -176,42 +174,7 @@ export function registerRetentionFunctions(
       for (const sem of semanticMems) {
         const log = logsById.get(sem.id) ?? emptyAccessLog(sem.id);
 
-        // Pre-0.8.3 fallback: use sem.lastAccessedAt only when mem:access is empty.
-        let accessTimestamps: number[];
-        let effectiveCount: number;
-        if (log.recent.length > 0 || log.count > 0) {
-          accessTimestamps = log.recent;
-          effectiveCount = log.count;
-        } else if (sem.lastAccessedAt) {
-          const legacyTs = Date.parse(sem.lastAccessedAt);
-          accessTimestamps = Number.isFinite(legacyTs) ? [legacyTs] : [];
-          effectiveCount = sem.accessCount;
-        } else {
-          accessTimestamps = [];
-          effectiveCount = sem.accessCount;
-        }
-
-        const salience = computeSalience(sem, effectiveCount);
-        const temporalDecay = computeDecay(sem.createdAt);
-        const reinforcementBoost = computeReinforcementBoost(
-          accessTimestamps,
-          config.sigma,
-        );
-        const score = Math.min(
-          1,
-          salience * temporalDecay + reinforcementBoost,
-        );
-
-        const entry: RetentionScore = {
-          memoryId: sem.id,
-          source: "semantic",
-          score,
-          salience,
-          temporalDecay,
-          reinforcementBoost,
-          lastAccessed: log.lastAt || sem.lastAccessedAt,
-          accessCount: effectiveCount,
-        };
+        const entry = computeRetentionEntry(sem, "semantic", log, config, now);
 
         scores.push(entry);
         pendingWrites.push([sem.id, entry]);
@@ -271,7 +234,7 @@ export function registerRetentionFunctions(
     },
   );
 
-  sdk.registerFunction("mem::retention-evict", 
+  registerObservationWriter(sdk, "mem::retention-evict",
     async (data?: {
       threshold?: number;
       dryRun?: boolean;
@@ -289,8 +252,11 @@ export function registerRetentionFunctions(
       const { decrementImageRef } = await import("./image-refs.js");
 
       const allScores = await kv.list<RetentionScore>(KV.retentionScores);
+      const protectedArchive = await readArchiveCleanupProtection(kv);
       const candidates = allScores
-        .filter((s) => s.score < threshold)
+        .filter((s) => s.score < threshold &&
+          !(s.source !== "semantic" && protectedArchive({ kind: "memory", id: s.memoryId })) &&
+          !(s.source !== "episodic" && protectedArchive({ kind: "semantic", id: s.memoryId })))
         .sort((a, b) => a.score - b.score)
         .slice(0, maxEvict);
 

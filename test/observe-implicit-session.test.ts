@@ -352,6 +352,23 @@ describe("observe implicit session create (#638)", () => {
     expect(kv.store.get("mem:obs:ses_repeated_recovery")?.size).toBe(1);
   });
 
+  it.each(["new", "empty", "reactivate"])("keeps a mixed browser request visible when the session is %s", async mode => {
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const { isExcludedCodexAmbientSession } = await import("../src/functions/observation-visibility.js");
+    const sdk = mockSdk(); const kv = mockKV(); registerObserveFunction(sdk as never, kv as never);
+    if (mode !== "new") await kv.set("mem:sessions", "mixed", { id: "mixed", project: "/project/a", cwd: "/project/a", status: "active", observationCount: 0,
+      ...(mode === "reactivate" ? { captureExcluded: true, captureExclusionReason: "codex_internal_prompt", firstPrompt: "<in-app-browser-context>old truncated context" } : {}) });
+    const prompt = '<in-app-browser-context source="ambient-ui-state">' + "x".repeat(500) + '</in-app-browser-context>\n\n## My request:\nKeep identifiers\n';
+    const result = await sdk.trigger("mem::observe", { sessionId: "mixed", project: "/project/a", cwd: "/project/a", hookType: "prompt_submit", timestamp: new Date().toISOString(),
+      data: { prompt, codex_capture: true, codex_turn_id: "mixed-turn" } });
+    expect(result).toHaveProperty("observationId");
+    const session = kv.store.get("mem:sessions")!.get("mixed") as any;
+    expect(session.firstPrompt).toBe("## My request: Keep identifiers");
+    expect(isExcludedCodexAmbientSession(session)).toBe(false);
+    expect(await sdk.trigger("mem::observe", { sessionId: "mixed", project: "/project/a", cwd: "/project/a", hookType: "post_tool_use", timestamp: new Date().toISOString(),
+      data: { tool_name: "assistant_response", tool_output: "Done", codex_capture: true, codex_turn_id: "mixed-turn" } })).toHaveProperty("observationId");
+  });
+
   it("does not create a session for a structured Codex host prompt", async () => {
     const { registerObserveFunction } = await import("../src/functions/observe.js");
     const sdk = mockSdk();

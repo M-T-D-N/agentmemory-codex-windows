@@ -55,7 +55,7 @@ if (
 ) {
     throw 'The AgentMemory environment contract is incomplete or unsupported.'
 }
-foreach ($dynamicName in @('AGENTMEMORY_SECRET', 'AGENTMEMORY_WORKSPACE_ROOT', 'AGENTMEMORY_PROJECT_REGISTRY', 'AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR', 'AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT')) {
+foreach ($dynamicName in @('AGENTMEMORY_SECRET', 'AGENTMEMORY_WORKSPACE_ROOT', 'AGENTMEMORY_PROJECT_REGISTRY', 'AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR', 'AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT', 'AGENTMEMORY_CODEX_SOURCE_ROOT')) {
     if ($null -ne $contract.fixed_environment.PSObject.Properties[$dynamicName]) {
         throw 'The AgentMemory environment contract contains a dynamic or secret value.'
     }
@@ -75,6 +75,7 @@ Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'GRAPH_EXTRACTI
 Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'GRAPH_EXTRACTION_BATCH_SIZE' -Expected '50'
 Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'AGENTMEMORY_INJECT_CONTEXT' -Expected 'false'
 Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'AGENTMEMORY_FORCE_PROXY' -Expected 'true'
+Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'AGENTMEMORY_STATE_DURABILITY' -Expected 'file-flush-v1'
 Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'AGENTMEMORY_TOOLS' -Expected 'all'
 Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'AGENTMEMORY_MCP_HTTP_HOST' -Expected '127.0.0.1'
 Get-RequiredFixedValue -Values $contract.fixed_environment -Name 'AGENTMEMORY_MCP_HTTP_PORT' -Expected '3114'
@@ -120,6 +121,7 @@ finally {
     }
 }
 
+$defaultCodexSourceRoot = Join-Path ([System.Environment]::GetFolderPath('UserProfile')) '.codex'
 $syntheticHome = Resolve-ContractRelativePath -Base $resolvedRoot -Relative ([string]$contract.synthetic_home_relative_path) -Label 'synthetic home path'
 if (-not (Test-Path -LiteralPath $syntheticHome -PathType Container)) {
     throw "AgentMemory synthetic home is missing: $syntheticHome"
@@ -212,6 +214,14 @@ if (-not (Test-Path -LiteralPath $localAILauncher -PathType Leaf)) { $localAILau
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT', $localAILauncher, 'Process')
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_WORKSPACE_ROOT', $workspaceRoot, 'Process')
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_PROJECT_REGISTRY', $projectRegistry, 'Process')
+$codexSourceRoot = $defaultCodexSourceRoot
+if ($workspaceConfig.PSObject.Properties['codex_source_root']) {
+    if ($workspaceConfig.codex_source_root -isnot [string] -or $workspaceConfig.codex_source_root -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {
+        throw 'The configured Codex source root must be an absolute path.'
+    }
+    $codexSourceRoot = [System.IO.Path]::GetFullPath($workspaceConfig.codex_source_root)
+}
+[System.Environment]::SetEnvironmentVariable('AGENTMEMORY_CODEX_SOURCE_ROOT', $codexSourceRoot, 'Process')
 
 function Get-AgentMemoryMcpHttpAccessToken {
     $keyBytes = [System.Text.Encoding]::UTF8.GetBytes($env:AGENTMEMORY_SECRET)

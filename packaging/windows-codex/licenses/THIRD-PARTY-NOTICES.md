@@ -9,6 +9,15 @@ separate from the adapter's Apache license. Read the accompanying
 `iii-LICENSE_ELv2`, including its hosted/managed-service restrictions, before
 redistributing or operating the engine for others.
 
+This downstream builds that engine from the pinned upstream source with the
+included `payload/src/iii-0.11.2-state-flush.patch`. It adds an explicit file-store
+flush operation and serializes it with periodic persistence. This binary is a
+modified downstream build, not the official upstream release binary. The engine
+and its patch retain Elastic License 2.0; the adapter license does not relicense
+them. `payload/config/third-party-inputs.json` records its upstream commit,
+patch digest and binary digest; `release-manifest.json` identifies the packaged
+build. Process-crash recovery qualification does not certify power-loss recovery.
+
 Official source and license:
 
 - https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2

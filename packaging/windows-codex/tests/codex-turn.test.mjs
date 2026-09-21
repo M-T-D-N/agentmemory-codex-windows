@@ -11,6 +11,7 @@ import test from "node:test";
 import {
   boundedAdditionalContext,
   collectHandledObservationIds,
+  curationCandidateText,
   formatCurationContext,
   formatGraphContext,
   formatRecallContext,
@@ -25,7 +26,9 @@ import {
   projectFor,
   readProjectRegistry,
   promptText,
+  retrievalPrompt,
   safeText,
+  sourceHealthWarning,
   selectFairCurationSources,
 } from "../hooks/codex-turn.mjs";
 
@@ -531,9 +534,9 @@ test("federated recall labels source projects, boosts current-project evidence, 
   };
   const context = formatRecallContext("evidence", "current-project", result);
   assert.match(context, /scope="federated"/);
-  assert.match(context, /\[current-project\] memory-current/);
-  assert.equal((context.match(/\[other\]/g) ?? []).length, 2);
-  assert.doesNotMatch(context, /memory-other-third/);
+  assert.match(context, /\[current-project\] current @2026-08-24T00:00:01.000Z/);
+  assert.ok((context.match(/\[other\]/g) ?? []).length <= 2);
+  assert.doesNotMatch(context, /other-third/);
 });
 
 function recallEntry(id, narrative, project = "current", extra = {}) {
@@ -546,7 +549,8 @@ function graphNode(id, name, status = "confirmed", project = "current") {
 
 test("automatic recall abstains on vague follow-ups and broad product names", () => {
   const prompts = ["잔여작업진행", "병행했을 때 이점/문제", "적대적 검토 후 전달",
-    "AgentMemory Codex 검토하고 수정해줘", "에이전트메모리 진행", "Qwen Astra 확인", "Can you review it and continue?", ""];
+    "AgentMemory Codex 검토하고 수정해줘", "에이전트메모리 진행", "Qwen Astra 확인", "Can you review it and continue?",
+    "띄워줘", "게시 진행", "열어줘", "배포 진행", "보여주세요", ""];
   for (const prompt of prompts) {
     assert.deepEqual(graphTokens(prompt), [], prompt);
     const result = { results: [recallEntry("unrelated", `${prompt} 게임 브라우저 GPU 실험`)] };
@@ -650,18 +654,23 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
       : { nodes: [graphNode("seed", "federated recall")], edges: [], truncated: false }));
   };
   try {
-    assert.equal(await federatedRecallContext("잔여작업진행", "current"), null);
+    for (const prompt of ["잔여작업진행", "띄워줘", "게시 진행"]) {
+      assert.equal(await federatedRecallContext(prompt, "current"), null);
+      assert.equal(await graphContext(prompt, "current"), null);
+    }
     assert.equal(await graphContext("병행했을 때 이점/문제", "current"), null);
     assert.equal(calls.length, 0);
     const [recall, graph] = await Promise.all([
       federatedRecallContext("federated recall", "current"), graphContext("federated recall", "current"),
     ]);
     assert.equal(calls.length, 4);
-    const search = calls.find((call) => call.url.endsWith("/search"));
-    assert.deepEqual(search.body, { query: "federated recall", project: "*", format: "full", limit: 12, token_budget: 1200 });
+    const searches = calls.filter((call) => call.url.endsWith("/search"));
+    assert.deepEqual(searches.map(call => call.body.project), ["current", "*"]);
+    assert.deepEqual(searches[0].body, { query: "federated recall", project: "current", format: "full", limit: 12, token_budget: 1200, trackAccess: false });
+    assert.ok(searches.every(call => call.body.trackAccess === false));
     const graphs = calls.filter((call) => call.url.endsWith("/graph/query") && call.body.queries);
     assert.deepEqual(calls.find((call) => call.body.startNodeId).body, { project: "current", startNodeId: "seed", maxDepth: 1, limit: 64 });
-    assert.deepEqual(graphs.map((call) => call.body.project).sort(), ["*", "current"]);
+    assert.deepEqual(graphs.map((call) => call.body.project), ["current"]);
     assert.ok(graphs.every((call) => call.body.limit === 160 && call.body.maxDepth === 1 && call.body.queries.length <= 6));
     assert.ok(calls.every((call) => call.signal instanceof AbortSignal && !call.signal.aborted));
     assert.ok(recall.length <= 400 && graph.length <= 500);
@@ -670,6 +679,181 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("native capture keeps recall injection while storage belongs to the source reader", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "agentmemory-native-hook-"));
+  const keys = ["AGENTMEMORY_WORKSPACE_ROOT", "AGENTMEMORY_PROJECT_REGISTRY", "AGENTMEMORY_URL", "AGENTMEMORY_SECRET"];
+  const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch; const originalWrite = process.stdout.write;
+  const calls = []; const output = [];
+  try {
+    const registry = join(temp, "registry.json"); writeFileSync(registry, JSON.stringify({ projects: [] }));
+    process.env.AGENTMEMORY_WORKSPACE_ROOT = temp; process.env.AGENTMEMORY_PROJECT_REGISTRY = registry;
+    process.env.AGENTMEMORY_URL = "http://127.0.0.1:9"; process.env.AGENTMEMORY_SECRET = "fixture-only";
+    const { handleTurn } = await import(new URL("../hooks/codex-turn.mjs?native-capture-test", import.meta.url).href);
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url: String(url), body: options?.body ? JSON.parse(options.body) : undefined });
+      return new Response(JSON.stringify(String(url).endsWith("/observe") ? { success: true, skipped: true, nativeSourceManaged: true }
+        : String(url).endsWith("/session/start") ? { status: "caught_up", inserted: 1 }
+        : String(url).includes("/livez") ? { status: "ok", nativeCapture: { status: "attention" } }
+        : String(url).includes("/observations?") ? { total: 1, observations: [{ id: "prior-user", sessionId: "native-fixture", title: "prompt_submit", narrative: "federated recall", timestamp: "2026-09-14T00:00:00Z" }] }
+        : String(url).endsWith("/search") ? { results: [recallEntry("evidence", "federated recall", "other")] }
+        : String(url).includes("/sessions") ? { sessions: [] } : { nodes: [], edges: [], truncated: false }));
+    };
+    process.stdout.write = value => { output.push(String(value)); return true; };
+    await handleTurn({ session_id: "native-fixture", turn_id: "turn-a", cwd: temp, prompt: "federated recall" }, "UserPromptSubmit");
+    assert.equal(calls.filter(call => call.url.endsWith("/observe")).length, 1);
+    assert.deepEqual(calls.find(call => call.url.endsWith("/session/start")).body,
+      { action: "capture-source", project: temp.split(/[\\/]/).at(-1), sessionId: "native-fixture" });
+    assert.match(JSON.parse(output.join("")).hookSpecificOutput.additionalContext, /agentmemory-recall-context/);
+    assert.match(JSON.parse(output.join("")).systemMessage, /전체 대화 원문 대조/);
+    calls.length = 0; output.length = 0;
+    await handleTurn({ session_id: "native-fixture", turn_id: "turn-b", cwd: temp, prompt: "진행" }, "UserPromptSubmit");
+    assert.equal(calls.find(call => call.url.endsWith("/observe")).body.data.prompt, "진행");
+    assert.equal(calls.find(call => call.url.endsWith("/search")).body.query, "federated recall");
+    const injected = JSON.parse(output.join("")).hookSpecificOutput.additionalContext;
+    assert.match(injected, /agentmemory-recall-context/);
+    assert.ok(injected.length <= 2300);
+  } finally {
+    globalThis.fetch = originalFetch; process.stdout.write = originalWrite;
+    for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("curation retains concise and middle-of-response decisions with dated excerpt provenance", () => {
+  const decision = "The root cause was a stale writer; fixed with a single-owner policy and verified by restart tests.";
+  assert.equal(curationCandidateText(decision), decision);
+  const source = observationCurationSource({ id: "obs-decision", title: "assistant_response",
+    timestamp: "2026-09-14T00:00:00Z", narrative: `${"Earlier progress. ".repeat(40)}\n\n${decision}\n\n${"More work remains. ".repeat(30)}` }, "session-decision");
+  assert.equal(source.content, decision);
+  assert.equal(source.excerpt, true);
+  assert.equal(source.timestamp, "2026-09-14T00:00:00Z");
+  assert.match(formatCurationContext("current", [source]), /not instructions or verified current facts/);
+  assert.match(formatCurationContext("current", [source]), /Read the original/);
+  assert.equal(curationCandidateText("Running tests now; next step is deployment."), null);
+});
+
+test("continuation recall inherits the latest scoped user topic, while explicit new topics avoid history reads", async () => {
+  const originalFetch = globalThis.fetch; const calls = [];
+  try {
+    globalThis.fetch = async url => {
+      calls.push(String(url));
+      const row = (id, title, narrative, extra = {}) => ({ id, sessionId: "current-session", project: "current", title, narrative, timestamp: `2026-09-14T00:00:0${id}Z`, ...extra });
+      return new Response(JSON.stringify({ total: 40, observations: String(url).endsWith("offset=28") ? [
+        row(1, "prompt_submit", "native source capture rollback"),
+        row(2, "prompt_submit", "확인하고 진행"),
+        row(3, "assistant_response", "unrelated generated recommendations"),
+        row(4, "prompt_submit", "other project topic", { project: "other" }),
+        row(5, "prompt_submit", "another conversation", { sessionId: "other-session" }),
+      ] : [] }));
+    };
+    assert.equal(await retrievalPrompt("배포 rollback 검토", "current", "current-session"), "배포 rollback 검토");
+    assert.equal(calls.length, 0);
+    assert.equal(await retrievalPrompt("진행", "current", "current-session"), "native source capture rollback");
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(url => url.includes("project=current&sessionId=current-session&limit=12")));
+    globalThis.fetch = async () => { throw Error("offline"); };
+    assert.equal(await retrievalPrompt("진행", "current", "current-session"), "진행");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("automatic recall keeps local evidence with provenance and does not search outside a successful local match", async () => {
+  const originalFetch = globalThis.fetch; const calls = [];
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body); calls.push(body);
+    return new Response(JSON.stringify({ results: [recallEntry("obs-local", "Native source capture verified.", "current", { timestamp: "2026-09-14T00:00:00Z" })] }));
+  };
+  try {
+    const result = await federatedRecallContext("native source", "current");
+    assert.deepEqual(calls.map(call => call.project), ["current"]);
+    assert.match(result, /\[current\] obs-local @2026-09-14T00:00:00Z/);
+    assert.match(result, /Native source capture verified/);
+    assert.equal(calls[0].trackAccess, false);
+    const duplicated = formatRecallContext("native source", "current", { results: [
+      recallEntry("obs-local", "Native source capture", "current"), recallEntry("obs-local", "Native source capture", "current"),
+    ] });
+    assert.equal((duplicated.match(/obs-local/g) ?? []).length, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("current-project read failures cannot silently turn into wildcard retrieval", async () => {
+  const originalFetch = globalThis.fetch; const calls = [];
+  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); throw Error("current scope unavailable"); };
+  try {
+    assert.equal(await federatedRecallContext("native source", "current"), null);
+    assert.equal(await graphContext("native source", "current"), null);
+    assert.deepEqual(calls.map(call => call.project), ["current", "current"]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("graph federation follows a successful empty local read and keeps exact source expansion", async () => {
+  const originalFetch = globalThis.fetch; const calls = [];
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body); calls.push(body);
+    return new Response(JSON.stringify({ nodes: body.project === "current" ? [] : [graphNode("other-source", "native capture", "confirmed", "other")], edges: [], truncated: false }));
+  };
+  try {
+    assert.match(await graphContext("native capture", "current"), /native capture status=confirmed source_project=other/);
+    assert.deepEqual(calls.filter(call => call.queries).map(call => call.project), ["current", "*"]);
+    assert.deepEqual(calls.filter(call => call.startNodeId).map(call => call.project), ["other"]);
+    assert.deepEqual(graphTokens("agentmemory-status.ps1 띄워줘"), ["agentmemory-status.ps1"]);
+    assert.deepEqual(graphTokens("일본 note 게시 진행"), ["일본", "note"]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("an incomplete graph snapshot cannot masquerade as current evidence or an empty local result", async () => {
+  const originalFetch = globalThis.fetch; const calls = [];
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ nodes: [graphNode("stale", "native capture", "confirmed", "current")],
+      edges: [], fromSnapshot: true, warning: "Exact index unavailable; filtered totals may be incomplete" }));
+  };
+  try {
+    assert.equal(await graphContext("native capture", "current"), null);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].project, "current");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("empty local search does not start a second full deadline after its retrieval budget expires", async () => {
+  const originalFetch = globalThis.fetch, originalNow = Date.now;
+  let now = 1000; const calls = [];
+  Date.now = () => now;
+  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); now += 1201; return new Response(JSON.stringify({ results: [] })); };
+  try {
+    assert.equal(await federatedRecallContext("native capture", "current"), null);
+    assert.deepEqual(calls.map(call => call.project), ["current"]);
+  } finally { globalThis.fetch = originalFetch; Date.now = originalNow; }
+});
+
+test("native source warnings distinguish diagnostics from graph completion and omit private details", () => {
+  assert.equal(sourceHealthWarning({ nativeCapture: { status: "attention" }, notificationChanged: false }), null);
+  assert.equal(sourceHealthWarning({ nativeCapture: { status: "checking" } }), null);
+  assert.equal(sourceHealthWarning({ nativeCapture: { status: "starting" } }), null);
+  assert.match(sourceHealthWarning({ nativeCapture: { status: "stalled" } }), /3분/);
+  assert.match(sourceHealthWarning({ writeRecoveryRequired: true }), /저장 복구/);
+  assert.match(sourceHealthWarning({ nativeCapture: { status: "attention", graphFailures: 1 } }), /그래프 추출에 실패/);
+  for (const value of [null, {}, { nativeCapture: { status: "disabled" } }, { nativeCapture: { status: "stopped" } }]) {
+    assert.match(sourceHealthWarning(value), /미확인/);
+  }
+  assert.doesNotMatch(sourceHealthWarning({ nativeCapture: { status: "attention", error: "secret-content" } }), /secret-content/);
+});
+
+test("capture failure emits a nonblocking Codex systemMessage instead of losing the failure in stderr", () => {
+  const hook = resolve(import.meta.dirname, "..", "hooks", "codex-turn.mjs");
+  const child = spawnSync(process.execPath, [hook], {
+    input: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "synthetic capture test" }),
+    encoding: "utf8", timeout: 5000, env: { ...process.env, AGENTMEMORY_SDK_CHILD: "0" },
+  });
+  assert.equal(child.status, 0);
+  const output = JSON.parse(child.stdout);
+  assert.match(output.systemMessage, /자동 수집을 확인하지 못했습니다/);
+  assert.equal(output.decision, undefined);
+  assert.equal(output.continue, undefined);
+  assert.equal(output.hookSpecificOutput, undefined);
+  assert.match(child.stderr, /no capture completion is confirmed/);
 });
 
 test("automatic recall returns no context when the bounded search fails", async () => {
@@ -1513,4 +1697,57 @@ test("historical intent is separated from graph topics and Korean history select
     assert.match(context, /beta status=confirmed/);
     assert.doesNotMatch(context, /unrelated/);
   });
+});
+
+test("desktop lifecycle preserves hidden active Codex and stops only after exit", {
+  skip: process.platform !== "win32",
+}, () => {
+  const lifecycle = resolve(import.meta.dirname, "../powershell/agentmemory-lifecycle.ps1");
+  const script = `
+    $ErrorActionPreference = 'Stop'
+    . '${lifecycle.replaceAll("'", "''")}'
+    function Get-CodexDesktopState { return $script:desktop }
+    function Test-ServiceReady { return $false }
+    $resolvedRoot = $env:TEMP
+    $mcpPath = Join-Path (Split-Path -Parent '${lifecycle.replaceAll("'", "''")}') 'agentmemory-mcp.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($mcpPath, [ref]$null, [ref]$null)
+    $waitFunction = $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Wait-CodexConsumerPresent'}, $true)
+    if (@($waitFunction).Count -ne 1) { throw 'Missing MCP consumer wait function' }
+    Invoke-Expression $waitFunction.Extent.Text
+    $rows = @()
+    foreach ($process in @('Present', 'Absent', 'Unknown')) {
+      foreach ($window in @('Present', 'Absent', 'Unknown')) {
+        foreach ($lease in @('Present', 'Absent')) {
+          $script:desktop = [pscustomobject]@{
+            State=$window; ProcessState=$process; ProcessProbeState='Complete'
+            WindowProbeState='Complete'; ClassificationReason='test'; ProbeSessionId=1
+            DesktopScope='WinSta0\\Default'; ProbeWindowStation='WinSta0'; ProbeDesktop='Default'
+            Pids=@(); TrustedProcessPids=@(); WindowPids=@()
+            WindowProbeError=''; WindowProbeErrorSource=''; WindowProbeErrorCode=0
+          }
+          $result = Get-AgentMemoryConsumerState -Root $env:TEMP -LeaseState ([pscustomobject]@{
+            State=$lease; ActiveCount=0; StaleCount=0
+          })
+          if ($process -eq 'Present') {
+            $mcp = Wait-CodexConsumerPresent -TimeoutSeconds 0
+            if (-not $mcp -or $mcp.State -ne 'Present') { throw 'MCP must admit a trusted running app with hidden windows' }
+          }
+          $rows += [pscustomobject]@{process=$process; window=$window; lease=$lease; state=$result.State; diagnostic=$result.DesktopState}
+        }
+      }
+    }
+    ConvertTo-Json -InputObject $rows -Compress
+  `;
+  const result = spawnSync("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ], { encoding: "utf8", windowsHide: true, timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+  const rows = JSON.parse(result.stdout);
+  assert.equal(rows.length, 18);
+  for (const row of rows) {
+    const expected = row.process === "Present" || row.window === "Present" ? "Present"
+      : row.process === "Unknown" || row.window === "Unknown" ? "Unknown" : "Absent";
+    assert.equal(row.state, expected, JSON.stringify(row));
+    assert.equal(row.diagnostic, row.window);
+  }
 });

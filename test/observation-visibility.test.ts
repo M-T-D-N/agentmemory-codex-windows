@@ -133,6 +133,22 @@ describe("Codex observation visibility", () => {
     ).toBeNull();
   });
 
+  it("classifies the remaining request after removing complete marked UI context", () => {
+    const request = "## My request:\nKeep my existing identifiers\n";
+    for (const block of ['<in-app-browser-context source="ambient-ui-state">state</in-app-browser-context>',
+      '<context source="ambient-ui-state">state</context>', '<agentmemory-ambient-ui-state>state</agentmemory-ambient-ui-state>']) {
+      const mixed = "\n" + block + "\n\n" + request;
+      expect(isCodexInternalAmbientText(mixed)).toBe(false);
+      expect(isExcludedCodexAmbientSession(session({ firstPrompt: mixed }))).toBe(false);
+      expect(sanitizeCodexAmbientObservation(observation(mixed))?.narrative).toBe("\n" + request);
+      expect(isCodexInternalAmbientText(block)).toBe(true);
+      expect(sanitizeCodexAmbientObservation(observation(block))).toBeNull();
+      expect(isCodexInternalAmbientText(block + '<heartbeat>internal</heartbeat>')).toBe(true);
+    }
+    expect(isCodexInternalAmbientText('<in-app-browser-context source="ambient-ui-state">unclosed request')).toBe(true);
+    expect(isCodexInternalAmbientText('<in-app-browser-context>unmarked</in-app-browser-context>request')).toBe(true);
+  });
+
   it("keeps title-only observations when no ambient content was removed", () => {
     const titleOnly = observation("");
 

@@ -16,6 +16,7 @@ import {
 } from "../functions/graph-retrieval.js";
 import { extractEntitiesFromQuery } from "../functions/query-expansion.js";
 import { rerank } from "./reranker.js";
+import type { SearchCandidateSelection } from "../functions/search-candidates.js";
 
 const RRF_K = 60;
 
@@ -35,8 +36,8 @@ export class HybridSearch {
     this.graphRetrieval = new GraphRetrieval(kv);
   }
 
-  async search(query: string, limit = 20): Promise<HybridSearchResult[]> {
-    return this.tripleStreamSearch(query, limit);
+  async search(query: string, limit = 20, selection?: SearchCandidateSelection): Promise<HybridSearchResult[]> {
+    return this.tripleStreamSearch(query, limit, undefined, selection);
   }
 
   async searchWithExpansion(
@@ -86,9 +87,11 @@ export class HybridSearch {
     query: string,
     limit: number,
     entityHints?: string[],
+    selection?: SearchCandidateSelection,
   ): Promise<HybridSearchResult[]> {
     const fetchDepth = Math.max(limit * 5, 50);
-    const bm25Results = this.bm25.search(query, fetchDepth);
+    const bm25Candidates = this.bm25.search(query, selection ? this.bm25.size : fetchDepth);
+    const bm25Results = selection ? await selection.select(bm25Candidates, fetchDepth) : bm25Candidates;
 
     let vectorResults: Array<{
       obsId: string;
@@ -100,11 +103,12 @@ export class HybridSearch {
     if (this.vector && this.embeddingProvider && this.vector.size > 0) {
       try {
         queryEmbedding = await this.embeddingProvider.embed(query);
-        vectorResults = this.vector.search(queryEmbedding, fetchDepth);
+        vectorResults = this.vector.search(queryEmbedding, selection ? this.vector.size : fetchDepth);
       } catch {
         // fall through to BM25-only
       }
     }
+    if (selection) vectorResults = await selection.select(vectorResults, fetchDepth);
 
     const entities =
       entityHints && entityHints.length > 0
@@ -116,22 +120,25 @@ export class HybridSearch {
         graphResults = await this.graphRetrieval.searchByEntities(
           entities,
           2,
-          limit,
+          selection ? Number.MAX_SAFE_INTEGER : limit,
+          selection?.project,
         );
       } catch {
         // graph search is best-effort
       }
     }
+    if (selection) graphResults = await selection.select(graphResults, limit);
 
     const topVectorObs = vectorResults.slice(0, 5).map((r) => r.obsId);
     if (topVectorObs.length > 0) {
+      let expansionResults: GraphRetrievalResult[] = [];
       try {
-        const expansionResults =
-          await this.graphRetrieval.expandFromChunks(topVectorObs, 1, 5);
-        graphResults = [...graphResults, ...expansionResults];
+        expansionResults =
+          await this.graphRetrieval.expandFromChunks(topVectorObs, 1, selection ? Number.MAX_SAFE_INTEGER : 5, selection?.project);
       } catch {
         // expansion is best-effort
       }
+      graphResults = [...graphResults, ...(selection ? await selection.select(expansionResults, 5) : expansionResults)];
     }
 
     const scores = new Map<
@@ -311,8 +318,9 @@ export class HybridSearch {
     limit: number,
   ): Promise<HybridSearchResult[]> {
     const sliced = results.slice(0, limit);
-    const observations = await Promise.all(
-      sliced.map(async (r) => {
+    const observations: Array<CompressedObservation | null> = [];
+    for (let offset = 0; offset < sliced.length; offset += 8) {
+      observations.push(...await Promise.all(sliced.slice(offset, offset + 8).map(async (r) => {
         const obs = await this.kv
           .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
           .catch(() => null);
@@ -325,8 +333,8 @@ export class HybridSearch {
           .get<Memory>(KV.memories, r.obsId)
           .catch(() => null);
         return mem && mem.isLatest !== false ? memoryToObservation(mem) : null;
-      }),
-    );
+      })));
+    }
     const enriched: HybridSearchResult[] = [];
     for (let i = 0; i < sliced.length; i++) {
       const obs = observations[i];

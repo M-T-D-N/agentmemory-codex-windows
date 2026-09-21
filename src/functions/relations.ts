@@ -13,6 +13,7 @@ import {
   vectorIndexRemove,
 } from "./search.js";
 import { memoryToObservation } from "../state/memory-utils.js";
+import { readArchiveVisibility } from "./archive.js";
 
 function computeConfidence(
   source: Memory,
@@ -216,6 +217,7 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
       minConfidence?: number;
     }) => {
       const maxHops = Math.min(data.maxHops ?? 2, 5);
+      const archived = await readArchiveVisibility(kv);
       const MAX_VISITED = 500;
       const rawMinConf = Number(data.minConfidence);
       const minConfidence = Number.isFinite(rawMinConf)
@@ -239,6 +241,7 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
       while (queue.length > 0 && visited.size < MAX_VISITED) {
         const current = queue.shift()!;
         if (visited.has(current.id) || current.hop > maxHops) continue;
+        if (archived({ kind: "memory", id: current.id })) continue;
         visited.add(current.id);
 
         const memory = await kv.get<Memory>(KV.memories, current.id);

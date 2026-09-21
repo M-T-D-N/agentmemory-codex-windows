@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { SearchIndex } from "./search-index.js";
 import { VectorIndex } from "./vector-index.js";
 import type { StateKV } from "./kv.js";
@@ -70,6 +71,7 @@ export class IndexPersistence {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private lastFailureLogAt = 0;
   private saveQueue: Promise<void> = Promise.resolve();
+  private persistedContent = new Map<string, { fingerprint: string; manifest: IndexShardManifest }>();
 
   constructor(
     private kv: StateKV,
@@ -89,7 +91,7 @@ export class IndexPersistence {
     }, DEBOUNCE_MS);
   }
 
-  async save(): Promise<void> {
+  async save(options: { requireSuccess?: boolean } = {}): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -97,13 +99,14 @@ export class IndexPersistence {
     // A scheduled snapshot can still be running when a delete path asks for
     // an immediate flush. Queue the next snapshot instead of publishing two
     // generations concurrently; the queued run serializes the latest index
-    // state after the earlier generation completes.
-    const queued = this.saveQueue.then(() => this.saveCurrent());
+    // state after the earlier generation completes. Content fingerprints let
+    // queued callers reuse a successful snapshot while still retrying failures.
+    const queued = this.saveQueue.then(() => this.saveCurrent(options.requireSuccess === true));
     this.saveQueue = queued.catch(() => {});
     await queued;
   }
 
-  private async saveCurrent(): Promise<void> {
+  private async saveCurrent(requireSuccess: boolean): Promise<void> {
     try {
       await this.saveBm25Index(this.bm25.serialize());
       if (this.vector) {
@@ -111,6 +114,7 @@ export class IndexPersistence {
       }
     } catch (err) {
       this.logFailure(err);
+      if (requireSuccess) throw err;
     }
   }
 
@@ -184,6 +188,13 @@ export class IndexPersistence {
     legacyKey: string,
     scopePrefix: string,
   ): Promise<void> {
+    // Hash the actual snapshot, including vector buffers retained by callers.
+    // A mutation counter at save-request sites would miss those changes.
+    const fingerprint = createHash("sha256").update(serialized).digest("hex");
+    const persisted = this.persistedContent.get(manifestKey);
+    if (persisted?.fingerprint === fingerprint &&
+        await this.isManifestPublished(manifestKey, persisted.manifest)) return;
+
     const previous = await this.kv
       .get<IndexShardManifest>(KV.bm25Index, manifestKey)
       .catch(() => null);
@@ -278,11 +289,12 @@ export class IndexPersistence {
       const currentShardIds = new Set(
         shards.map((shard) => `${shard.scope}\0${shard.key}`),
       );
-      for (const shard of previous.shards) {
-        if (currentShardIds.has(`${shard.scope}\0${shard.key}`)) continue;
-        await this.deleteShards([shard], "previous_generation_cleanup");
-      }
+      await this.deleteShards(
+        previous.shards.filter(shard => !currentShardIds.has(shard.scope + "\0" + shard.key)),
+        "previous_generation_cleanup",
+      );
     }
+    this.persistedContent.set(manifestKey, { fingerprint, manifest: structuredClone(nextManifest) });
   }
 
   private async auditIndexPersistence(
@@ -304,30 +316,28 @@ export class IndexPersistence {
     key: string,
     reason: string,
   ): Promise<void> {
-    let result = "deleted";
-    let error: string | undefined;
-    try {
-      await this.kv.delete(scope, key);
-    } catch (err) {
-      result = "failed";
-      error = errorMessage(err);
-    }
-    await this.auditIndexPersistence("delete", [statePath(scope, key)], {
-      scope,
-      key,
-      reason,
-      result,
-      error,
-    });
+    await this.deleteShards([{ scope, key, chars: 0 }], reason);
   }
 
   private async deleteShards(
     shards: IndexShardManifest["shards"],
     reason: string,
   ): Promise<void> {
-    for (const shard of shards) {
-      await this.deleteKey(shard.scope, shard.key, reason);
+    if (!shards.length) return;
+    const results: Array<{ scope: string; key: string; result: string; error?: string }> = [];
+    for (const { scope, key } of shards) {
+      try {
+        await this.kv.delete(scope, key);
+        results.push({ scope, key, result: "deleted" });
+      } catch (err) {
+        results.push({ scope, key, result: "failed", error: errorMessage(err) });
+      }
     }
+    await this.auditIndexPersistence("delete", shards.map(shard => statePath(shard.scope, shard.key)), {
+      reason,
+      result: results.some(row => row.result === "failed") ? "partial_failure" : "deleted",
+      results,
+    });
   }
 
   private async isManifestPublished(

@@ -113,12 +113,12 @@ function Wait-ServiceReady {
     return $false
 }
 
-function Wait-CodexWindowPresent {
+function Wait-CodexConsumerPresent {
     param([int]$TimeoutSeconds)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         try {
-            $consumer = Get-CodexDesktopState
+            $consumer = Get-AgentMemoryConsumerState -Root $resolvedRoot -LeaseState ([pscustomobject]@{State='Absent'; ActiveCount=0; StaleCount=0})
         }
         catch {
             $consumer = [pscustomobject]@{ State = 'Unknown' }
@@ -290,9 +290,9 @@ function Get-OwnedScheduledTask {
     return $task
 }
 
-$initialConsumer = Wait-CodexWindowPresent -TimeoutSeconds 10
+$initialConsumer = Wait-CodexConsumerPresent -TimeoutSeconds 10
 if (-not $initialConsumer) {
-    [Console]::Error.WriteLine('AgentMemory startup was withheld because no trusted visible Windows Codex app window was found.')
+    [Console]::Error.WriteLine('AgentMemory startup was withheld because no trusted running Windows Codex app was found.')
     exit 1
 }
 
@@ -316,13 +316,13 @@ try {
         throw 'Timed out waiting for the AgentMemory startup file lock.'
     }
     try {
-        $consumerRecheck = Get-CodexDesktopState
+        $consumerRecheck = Get-AgentMemoryConsumerState -Root $resolvedRoot -LeaseState ([pscustomobject]@{State='Absent'; ActiveCount=0; StaleCount=0})
     }
     catch {
         $consumerRecheck = [pscustomobject]@{ State = 'Unknown' }
     }
     if ($consumerRecheck.State -ne 'Present' -and -not ($consumerRecheck.State -eq 'Unknown' -and (Test-ServiceReady))) {
-        throw 'AgentMemory startup was withheld because the trusted Windows Codex app window disappeared or became indeterminate.'
+        throw 'AgentMemory startup was withheld because the trusted Windows Codex app exited or became indeterminate.'
     }
     Assert-OwnedScheduledTaskRegistration
     if (-not (Test-ServiceReady)) {

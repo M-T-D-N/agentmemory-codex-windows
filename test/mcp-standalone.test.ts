@@ -60,7 +60,7 @@ const fetchTrap = vi.fn(async (url: unknown) => {
 describe("Tools Registry", () => {
   it("getAllTools returns all tools with unique names", () => {
     const tools = getAllTools();
-    expect(tools.length).toBeGreaterThanOrEqual(41);
+    expect(tools.length).toBe(58);
     const names = new Set(tools.map((t) => t.name));
     expect(names.size).toBe(tools.length);
     for (const required of [
@@ -88,8 +88,8 @@ describe("Tools Registry", () => {
     expect(reconcile.inputSchema.required).toEqual(["project", "targets", "reason"]);
   });
 
-  it("CORE_TOOLS has 14 items", () => {
-    expect(CORE_TOOLS.length).toBe(14);
+  it("CORE_TOOLS has 15 items", () => {
+    expect(CORE_TOOLS.length).toBe(15);
   });
 
   it("V040_TOOLS has 11 items", () => {

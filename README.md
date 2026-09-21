@@ -7,7 +7,7 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.8-orange" alt="0.1.0-preview.8" />
+  <img src="https://img.shields.io/badge/release-0.1.0--preview.9-orange" alt="0.1.0-preview.9" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
@@ -48,8 +48,8 @@ only canonical stores.
 - Uses an authenticated loopback MCP endpoint for Codex and retains a packaged
   stdio launcher only as a compatibility path.
 
-The upstream-compatible source surface contains 57 MCP tools. Its MCP surface
-is 57 tools, 6 resources, and 3 prompts; it also has 134 endpoints on port 3111,
+The upstream-compatible source surface contains 58 MCP tools. Its MCP surface
+is 58 tools, 6 resources, and 3 prompts; it also has 135 endpoints on port 3111,
 12 portable hooks, and 17 skills. The supported Windows profile intentionally
 activates only the four managed hooks listed above.
 
@@ -96,7 +96,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.8` | Public version and source tag |
+| Downstream release | `0.1.0-preview.9` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
@@ -130,7 +130,7 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.8 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.9 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

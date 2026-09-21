@@ -416,8 +416,147 @@ describe("IndexPersistence", () => {
 
     await Promise.all([persistence.save(), persistence.save()]);
 
-    expect(generation).toBe(2);
+    expect(generation).toBe(1);
     expect(maxActiveManifestWrites).toBe(1);
+  });
+
+
+  it("persists intervening changes once for queued strict flushes", async () => {
+    const bm25 = makeBm25("original", "first snapshot");
+    let release!: () => void;
+    let started!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const firstWrite = new Promise<void>(resolve => { started = resolve; });
+    let blocked = false, generation = 0;
+    const guardedKv = { ...kv,
+      set: async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (!blocked && scope.includes(":bm25:gen_burst_1:")) {
+          blocked = true; started(); await barrier;
+        }
+        return kv.set(scope, key, data);
+      },
+    };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, null, {
+      createGeneration: () => "gen_burst_" + (++generation),
+    });
+    const first = persistence.save({ requireSuccess: true });
+    await firstWrite;
+    bm25.add(makeObs({ id: "intervening", title: "intervening change" }));
+    let settled = false;
+    const pending = Promise.all(Array.from({ length: 12 }, () =>
+      persistence.save({ requireSuccess: true }))).then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await Promise.all([first, pending]);
+    expect(generation).toBe(2);
+    const restored = (await persistence.load()).bm25!;
+    expect(restored.search("intervening")[0]?.obsId).toBe("intervening");
+    expect(restored.size).toBe(2);
+    await persistence.save({ requireSuccess: true });
+    expect(generation).toBe(2);
+  });
+
+  it("detects vector-only changes including a retained embedding buffer", async () => {
+    const bm25 = makeBm25("original", "unchanged text");
+    const vector = new VectorIndex(), embedding = new Float32Array([1, 0]);
+    vector.add("vector-only", "ses_1", embedding);
+    const guardedKv = { ...kv, set: vi.fn(kv.set) };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, vector);
+    await persistence.save({ requireSuccess: true });
+    guardedKv.set.mockClear();
+    embedding[0] = 0; embedding[1] = 1;
+    await persistence.save({ requireSuccess: true });
+    const writes = guardedKv.set.mock.calls;
+    expect(writes.some(([scope, key]) => scope === BM25_SCOPE && key === BM25_MANIFEST_KEY)).toBe(false);
+    expect(writes.some(([scope, key]) => scope === BM25_SCOPE && key === VECTOR_MANIFEST_KEY)).toBe(true);
+    expect((await persistence.load()).vector!.search(new Float32Array([0, 1]))[0]?.score).toBe(1);
+    guardedKv.set.mockClear();
+    await persistence.save({ requireSuccess: true });
+    expect(guardedKv.set).not.toHaveBeenCalled();
+  });
+
+  it("retries vector failure without rewriting committed BM25", async () => {
+    const bm25 = makeBm25("original", "durable text"), vector = makeVector();
+    let failVector = true;
+    const guardedKv = { ...kv,
+      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (failVector && scope === BM25_SCOPE && key === VECTOR_MANIFEST_KEY) throw new Error("vector save failed");
+        return kv.set(scope, key, data);
+      }),
+    };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, vector);
+    await expect(persistence.save({ requireSuccess: true })).rejects.toThrow("vector save failed");
+    const committed = await getBm25Manifest(kv);
+    guardedKv.set.mockClear(); failVector = false;
+    await persistence.save({ requireSuccess: true });
+    expect(await getBm25Manifest(kv)).toEqual(committed);
+    expect(guardedKv.set.mock.calls.some(([scope, key]) => scope === BM25_SCOPE && key === BM25_MANIFEST_KEY)).toBe(false);
+    expect((await persistence.load()).vector?.size).toBe(1);
+  });
+
+  it("audits sequential old-shard cleanup once with all deletion outcomes", async () => {
+    const bm25 = makeBm25("original", "old snapshot ".repeat(20));
+    let generation = 0, failedPath = "", active = 0, maxActive = 0;
+    const guardedKv = { ...kv,
+      delete: async (scope: string, key: string): Promise<void> => {
+        active++; maxActive = Math.max(maxActive, active);
+        try {
+          await Promise.resolve();
+          if (scope + "/" + key === failedPath) throw new Error("retained old shard");
+          await kv.delete(scope, key);
+        } finally { active--; }
+      },
+    };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, null, {
+      shardChars: 80, createGeneration: () => "gen_cleanup_" + (++generation),
+    });
+    await persistence.save({ requireSuccess: true });
+    const old = await getBm25Manifest(kv);
+    expect(old.shards.length).toBeGreaterThan(2);
+    failedPath = old.shards[1].scope + "/" + old.shards[1].key;
+    bm25.add(makeObs({ id: "new", title: "latest snapshot" }));
+    await persistence.save({ requireSuccess: true });
+    const audits = (await kv.list<any>("mem:audit")).filter(row => row.details.reason === "previous_generation_cleanup");
+    expect(audits).toHaveLength(1);
+    expect(audits[0].targetIds).toEqual(old.shards.map(row => row.scope + "/" + row.key));
+    expect(audits[0].details.result).toBe("partial_failure");
+    expect(audits[0].details.results).toHaveLength(old.shards.length);
+    expect(audits[0].details.results.filter((row: any) => row.result === "failed")).toEqual([
+      { scope: old.shards[1].scope, key: old.shards[1].key, result: "failed", error: "retained old shard" },
+    ]);
+    for (const shard of old.shards) {
+      const value = await kv.get(shard.scope, shard.key);
+      if (shard.scope + "/" + shard.key === failedPath) expect(value).not.toBeNull();
+      else expect(value).toBeNull();
+    }
+    expect(maxActive).toBe(1);
+    expect((await persistence.load()).bm25?.search("latest")[0]?.obsId).toBe("new");
+  });
+
+
+  it("republishes unchanged content after its persisted manifest is reset", async () => {
+    const bm25 = makeBm25("original", "restorable text");
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    await persistence.save({ requireSuccess: true });
+    const old = await getBm25Manifest(kv);
+    await kv.delete(BM25_SCOPE, BM25_MANIFEST_KEY);
+    for (const shard of old.shards) await kv.delete(shard.scope, shard.key);
+    await persistence.save({ requireSuccess: true });
+    expect((await persistence.load()).bm25?.search("restorable")[0]?.obsId).toBe("original");
+    expect((await getBm25Manifest(kv)).generation).not.toBe(old.generation);
+  });
+
+  it("performs the first requested save after loading in a new persistence instance", async () => {
+    const bm25 = makeBm25("original", "restart evidence");
+    const first = new IndexPersistence(kv as never, bm25, null);
+    await first.save({ requireSuccess: true });
+    const old = await getBm25Manifest(kv);
+    const loaded = (await first.load()).bm25!;
+    const restarted = new IndexPersistence(kv as never, loaded, null);
+    await restarted.save({ requireSuccess: true });
+    expect((await getBm25Manifest(kv)).generation).not.toBe(old.generation);
+    expect((await restarted.load()).bm25?.serialize()).toBe(loaded.serialize());
   });
 
   it("falls back to the default shard size for fractional values below one", async () => {
@@ -826,6 +965,18 @@ describe("IndexPersistence", () => {
     const persistence = new IndexPersistence(failingKv as never, bm25, null);
 
     await expect(persistence.save()).resolves.toBeUndefined();
+  });
+
+  it("reports required save failure without poisoning the queue or changing best-effort callers", async () => {
+    const originalSet = kv.set.bind(kv);
+    kv.set = vi.fn(async () => { throw new Error("injected storage outage"); }) as typeof kv.set;
+    const bm25 = makeBm25("required-save", "persisted evidence");
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    await expect(persistence.save({ requireSuccess: true })).rejects.toThrow("injected storage outage");
+    await expect(persistence.save()).resolves.toBeUndefined();
+    kv.set = originalSet;
+    await expect(persistence.save({ requireSuccess: true })).resolves.toBeUndefined();
+    expect((await persistence.load()).bm25?.search("evidence")[0]?.obsId).toBe("required-save");
   });
 
   // #797: first run after upgrading to 0.9.25 crashed with

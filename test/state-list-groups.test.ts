@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { StateKV } from "../src/state/kv.js";
 describe("official state scope enumeration", () => {
+  it.each([undefined, null, false, 0, "", { id: "present" }])("normalizes missing SDK values while preserving stored values: %j", async value => {
+    const trigger = vi.fn().mockResolvedValue(value);
+    expect(await new StateKV({ trigger } as never).get("mem:config", "key")).toEqual(value ?? null);
+  });
   it("forwards the official input and preserves exact scope strings", async () => {
     const trigger = vi.fn().mockResolvedValue({ groups: ["mem:obs:legacy", "mem:enriched:orphan", "mem:obs:legacy"] });
     expect(await new StateKV({ trigger } as never).listGroups()).toEqual(["mem:obs:legacy", "mem:enriched:orphan"]);

@@ -4,6 +4,7 @@ import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { recordAudit } from "./audit.js";
+import { legacyMeshArchiveError } from "./archive-transfer.js";
 import type {
   MeshPeer,
   Memory,
@@ -124,7 +125,7 @@ async function lwwMergeGraphNodes(
     if (!item.id || typeof item.id !== "string") continue;
     const ts = graphNodeTs(item);
     if (!ts || Number.isNaN(new Date(ts).getTime())) continue;
-    const wrote = await withKeyedLock(`mem:gnode:${item.id}`, async () => {
+    const wrote = await withKeyedLock("mem:graph-write", async () => {
       const existing = await kv.get<GraphNode>(KV.graphNodes, item.id);
       if (!existing) {
         await kv.set(KV.graphNodes, item.id, item);
@@ -151,7 +152,7 @@ async function lwwMergeGraphEdges(
     if (!item.id || typeof item.id !== "string") continue;
     const timestamp = graphEdgeTs(item);
     if (!timestamp || Number.isNaN(new Date(timestamp).getTime())) continue;
-    const wrote = await withKeyedLock(`mem:gedge:${item.id}`, async () => {
+    const wrote = await withKeyedLock("mem:graph-write", async () => {
       const existing = await kv.get<GraphEdge>(KV.graphEdges, item.id);
       if (!existing || new Date(timestamp) > new Date(graphEdgeTs(existing))) {
         await kv.set(KV.graphEdges, item.id, item);
@@ -234,6 +235,8 @@ export function registerMeshFunction(
       }
 
       const direction = data.direction || "both";
+      const archiveError = await legacyMeshArchiveError(kv);
+      if (archiveError) return { success: false, error: archiveError };
       let peers: MeshPeer[];
 
       if (data.peerId) {
@@ -298,8 +301,9 @@ export function registerMeshFunction(
                 redirect: "error",
               });
               if (response.ok) {
-                const body = (await response.json()) as { accepted: number };
-                result.pushed = body.accepted || 0;
+                const body = (await response.json()) as { accepted: number; success?: boolean; error?: string };
+                if (body.success === false) result.errors.push(`push rejected: ${body.error || "peer refused the payload"}`);
+                else result.pushed = body.accepted || 0;
               } else {
                 result.errors.push(`push failed: HTTP ${response.status}`);
               }
@@ -365,6 +369,8 @@ export function registerMeshFunction(
       if (!data || typeof data !== "object") {
         return { success: false, error: "payload required" };
       }
+      const archiveError = await legacyMeshArchiveError(kv, data);
+      if (archiveError) return { success: false, error: archiveError };
       kv.assertRecoveryImportAllowed(data);
       let accepted = 0;
 
@@ -490,6 +496,8 @@ async function applySyncData(
   data: MeshSyncPayload,
   scopes: string[],
 ): Promise<number> {
+  const archiveError = await legacyMeshArchiveError(kv, data);
+  if (archiveError) throw new Error(archiveError);
   kv.assertRecoveryImportAllowed(data);
   let applied = 0;
 

@@ -538,7 +538,8 @@ function Test-RuntimeResponsive {
                 $reader = [System.IO.StreamReader]::new($response.GetResponseStream())
                 $body = $reader.ReadToEnd() | ConvertFrom-Json
                 if ($path.EndsWith('/livez')) {
-                    if ($body.status -cne 'ok' -or $body.service -cne 'agentmemory') { return $false }
+                    if ($body.status -cne 'ok' -or $body.service -cne 'agentmemory' -or
+                        ($body.PSObject.Properties.Name -contains 'writeRecoveryRequired' -and $body.writeRecoveryRequired -eq $true)) { return $false }
                 }
                 elseif ($body.resource -cne 'http://127.0.0.1:3114/mcp') { return $false }
             }

@@ -1,4 +1,7 @@
 import { attachRuntimeDiagnostics } from "./telemetry/runtime-diagnostics.js";
+import { registerArchiveFunctions } from "./functions/archive-tools.js";
+import { startCodexSourceScheduler } from "./functions/codex-source-backlog.js";
+import { resumeGraphWritePlan } from "./state/graph-write-plan.js";
 import { registerWorker, TriggerAction } from "iii-sdk";
 import {
   hydrateProcessEnvFromFile,
@@ -254,8 +257,14 @@ async function main() {
   });
   writeWorkerPidfile();
 
-  const kv = new StateKV(sdk);
+  const stateDurability = getEnvVar("AGENTMEMORY_STATE_DURABILITY");
+  if (stateDurability !== undefined && stateDurability !== "file-flush-v1") {
+    throw new Error("Unsupported AGENTMEMORY_STATE_DURABILITY mode");
+  }
+  const kv = new StateKV(sdk, { requireDurability: stateDurability === "file-flush-v1" });
+  await kv.flush();
   await kv.initializeObservationRecovery();
+  await resumeGraphWritePlan(kv);
   const secret = getEnvVar("AGENTMEMORY_SECRET");
   const metricsStore = new MetricsStore(kv);
   const dedupMap = new DedupMap();
@@ -371,6 +380,7 @@ async function main() {
   registerFacetsFunction(sdk, kv);
   registerVerifyFunction(sdk, kv);
   registerLessonsFunctions(sdk, kv);
+  registerArchiveFunctions(sdk, kv);
   registerObsidianExportFunction(sdk, kv);
   registerReflectFunctions(sdk, kv, provider);
   registerWorkingMemoryFunctions(sdk, kv, config.tokenBudget);
@@ -397,7 +407,8 @@ async function main() {
 
   const snapshotConfig = loadSnapshotConfig();
   if (snapshotConfig.enabled) {
-    registerSnapshotFunction(sdk, kv, snapshotConfig.dir);
+    registerSnapshotFunction(sdk, kv, snapshotConfig.dir,
+      () => semanticGraphBacklogScheduler?.wake());
     // The boot line promised "every <interval>s" but nothing ever fired
     // mem::snapshot-create. Drive it on a periodic timer (unref'd so it
     // never keeps the process alive), mirroring the auto-forget timer.
@@ -430,13 +441,15 @@ async function main() {
     graphWeight,
   );
 
-  const hybridRanker = (query: string, limit: number) =>
-    hybridSearch.search(query, limit);
+  const hybridRanker = (query: string, limit: number, selection?: import("./functions/search-candidates.js").SearchCandidateSelection) =>
+    hybridSearch.search(query, limit, selection);
   registerSmartSearchFunction(sdk, kv, hybridRanker);
   setHybridRanker(hybridRanker);
   registerRecentSearchesSweepFunction(sdk, kv);
 
-  registerApiTriggers(sdk, kv, readContext, secret, metricsStore, provider);
+  let nativeSourceScheduler: ReturnType<typeof startCodexSourceScheduler> | null = null;
+  registerApiTriggers(sdk, kv, readContext, secret, metricsStore, provider, () => semanticGraphBacklogScheduler?.wake(),
+    process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? () => nativeSourceScheduler?.status() ?? { status: "starting" } : undefined);
   registerEventTriggers(sdk, kv, readContext);
   registerMcpEndpoints(sdk, kv, secret);
 
@@ -585,7 +598,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 134 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 135 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,
@@ -600,6 +613,7 @@ async function main() {
     config.restPort,
   );
 
+  nativeSourceScheduler = process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? startCodexSourceScheduler(sdk) : null;
   const autoForgetIntervalMs = parseInt(process.env.AUTO_FORGET_INTERVAL_MS || "3600000", 10);
   const consolidationIntervalMs = parseInt(process.env.CONSOLIDATION_INTERVAL_MS || "7200000", 10);
 
@@ -684,6 +698,7 @@ async function main() {
 
   const shutdown = async () => {
     console.log(`\n[agentmemory] Shutting down...`);
+    await nativeSourceScheduler?.stop();
     await semanticGraphBacklogScheduler?.stop();
     healthMonitor.stop();
     dedupMap.stop();

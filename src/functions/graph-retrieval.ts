@@ -4,8 +4,30 @@ import type {
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
+import { readArchiveVisibility } from "./archive.js";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+
+interface TraversalGraph {
+  nodeIndex: Map<string, GraphNode>;
+  adjacency: Map<string, Array<{ neighborId: string; edge: GraphEdge }>>;
+}
+
+function prepareTraversal(nodes: GraphNode[], edges: GraphEdge[]): TraversalGraph {
+  const nodeIndex = new Map(nodes.map(node => [node.id, node]));
+  const adjacency: TraversalGraph["adjacency"] = new Map();
+  for (const edge of edges) {
+    const a = edge.sourceNodeId;
+    const b = edge.targetNodeId;
+    if (!adjacency.has(a)) adjacency.set(a, []);
+    if (!adjacency.has(b)) adjacency.set(b, []);
+    adjacency.get(a)!.push({ neighborId: b, edge });
+    adjacency.get(b)!.push({ neighborId: a, edge });
+  }
+  return { nodeIndex, adjacency };
+}
 
 export interface GraphRetrievalResult {
+  sourceSessionIds?: string[];
   obsId: string;
   sessionId: string;
   score: number;
@@ -45,9 +67,11 @@ export class GraphRetrieval {
     entityNames: string[],
     maxDepth = 2,
     maxResults = 20,
+    project?: string,
   ): Promise<GraphRetrievalResult[]> {
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
+    const archived = await readArchiveVisibility(this.kv);
+    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
+    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) && e.isLatest !== false && !e.reviewRetirement?.active && (!project || e.project === project));
 
     const matchingNodes = allNodes.filter((n) => {
       const nameLower = n.name.toLowerCase();
@@ -62,12 +86,17 @@ export class GraphRetrieval {
 
     const results: GraphRetrievalResult[] = [];
     const visitedObs = new Set<string>();
+    const graph = prepareTraversal(allNodes, allEdges);
+    let lastYield = performance.now();
 
     for (const startNode of matchingNodes) {
+      if (performance.now() - lastYield >= 8) {
+        await yieldToEventLoop();
+        lastYield = performance.now();
+      }
       const paths = this.dijkstraTraversal(
         startNode,
-        allNodes,
-        allEdges,
+        graph,
         maxDepth,
       );
 
@@ -92,6 +121,7 @@ export class GraphRetrieval {
             sessionId: "",
             score,
             graphContext: buildGraphContext(path),
+            ...(lastNode.sourceSessionIds ? { sourceSessionIds: lastNode.sourceSessionIds } : {}),
             pathLength,
           });
         }
@@ -105,6 +135,7 @@ export class GraphRetrieval {
           sessionId: "",
           score: 1.0,
           graphContext: `[${startNode.type}] ${startNode.name}`,
+          ...(startNode.sourceSessionIds ? { sourceSessionIds: startNode.sourceSessionIds } : {}),
           pathLength: 0,
         });
       }
@@ -118,9 +149,11 @@ export class GraphRetrieval {
     obsIds: string[],
     maxDepth = 1,
     maxResults = 10,
+    project?: string,
   ): Promise<GraphRetrievalResult[]> {
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
+    const archived = await readArchiveVisibility(this.kv);
+    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
+    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) && e.isLatest !== false && !e.reviewRetirement?.active && (!project || e.project === project));
 
     const linkedNodes = allNodes.filter((n) =>
       n.sourceObservationIds.some((id) => obsIds.includes(id)),
@@ -128,9 +161,15 @@ export class GraphRetrieval {
 
     const results: GraphRetrievalResult[] = [];
     const visitedObs = new Set<string>(obsIds);
+    const graph = prepareTraversal(allNodes, allEdges);
+    let lastYield = performance.now();
 
     for (const node of linkedNodes) {
-      const paths = this.dijkstraTraversal(node, allNodes, allEdges, maxDepth);
+      if (performance.now() - lastYield >= 8) {
+        await yieldToEventLoop();
+        lastYield = performance.now();
+      }
+      const paths = this.dijkstraTraversal(node, graph, maxDepth);
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
         for (const obsId of lastNode.sourceObservationIds) {
@@ -144,7 +183,8 @@ export class GraphRetrieval {
             obsId,
             sessionId: "",
             score,
-            graphContext: buildGraphContext(path),
+          graphContext: buildGraphContext(path),
+          ...(lastNode.sourceSessionIds ? { sourceSessionIds: lastNode.sourceSessionIds } : {}),
             pathLength,
           });
         }
@@ -163,8 +203,10 @@ export class GraphRetrieval {
     currentState: GraphEdge[];
     history: GraphEdge[];
   }> {
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
+    const archived = await readArchiveVisibility(this.kv);
+    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }));
+    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) &&
+      !archived({ kind: "graph_node", id: e.sourceNodeId }) && !archived({ kind: "graph_node", id: e.targetNodeId }));
 
     const entity = allNodes.find(
       (n) => n.name.toLowerCase() === entityName.toLowerCase(),
@@ -233,30 +275,16 @@ export class GraphRetrieval {
   // (cheaper edges = stronger relationships) returns the
   // highest-weighted path to each reachable node within maxDepth. Also
   // tightens the perf profile:
-  //   - Adjacency built once in O(V+E) (previous BFS re-filtered
+  //   - Adjacency shared across all seeds in this request in O(V+E) (previous BFS re-filtered
   //     allEdges per visited node, O(V·E) overall).
   //   - Min-heap dequeue is O(log V) per pop (previous queue.shift()
   //     was O(n) — the dominant cost on graphs above ~200 nodes per
   //     the contributor's benchmark in #328).
   private dijkstraTraversal(
     startNode: GraphNode,
-    allNodes: GraphNode[],
-    allEdges: GraphEdge[],
+    { nodeIndex, adjacency }: TraversalGraph,
     maxDepth: number,
   ): Array<Array<{ node: GraphNode; edge?: GraphEdge }>> {
-    const nodeIndex = new Map<string, GraphNode>();
-    for (const n of allNodes) nodeIndex.set(n.id, n);
-
-    const adjacency = new Map<string, Array<{ neighborId: string; edge: GraphEdge }>>();
-    for (const edge of allEdges) {
-      const a = edge.sourceNodeId;
-      const b = edge.targetNodeId;
-      if (!adjacency.has(a)) adjacency.set(a, []);
-      if (!adjacency.has(b)) adjacency.set(b, []);
-      adjacency.get(a)!.push({ neighborId: b, edge });
-      adjacency.get(b)!.push({ neighborId: a, edge });
-    }
-
     const dist = new Map<string, number>();
     const pathTo = new Map<string, Array<{ node: GraphNode; edge?: GraphEdge }>>();
     dist.set(startNode.id, 0);

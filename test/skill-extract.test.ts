@@ -161,16 +161,16 @@ describe("skill-extract", () => {
   });
 
   it("skill-list returns sorted by strength", async () => {
-    mockKv.list.mockResolvedValue([
+    mockKv.list.mockImplementation(async (scope: string) => scope === "mem:procedural" ? [
       { id: "s1", name: "Low", strength: 0.3 },
       { id: "s2", name: "High", strength: 0.9 },
-    ]);
+    ] : []);
     const result = await handlers["mem::skill-list"]({});
     expect(result.skills[0].name).toBe("High");
   });
 
   it("skill-match finds relevant skills", async () => {
-    mockKv.list.mockResolvedValue([
+    mockKv.list.mockImplementation(async (scope: string) => scope === "mem:procedural" ? [
       {
         id: "s1",
         name: "Fix JWT Auth",
@@ -187,7 +187,7 @@ describe("skill-extract", () => {
         steps: ["build image", "push"],
         strength: 0.7,
       },
-    ]);
+    ] : []);
 
     const result = await handlers["mem::skill-match"]({
       query: "JWT authentication token expired",

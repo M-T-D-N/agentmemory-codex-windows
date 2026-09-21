@@ -1,3 +1,63 @@
+export interface ArchiveTarget {
+  kind: "memory" | "semantic" | "procedural" | "lesson" | "observation" | "session" | "graph_node" | "graph_edge";
+  id: string;
+  sessionId?: string;
+}
+
+export interface ArchiveState {
+  importPendingDigest?: string;
+  version: 1;
+  id: string;
+  target: ArchiveTarget;
+  project: string;
+  state: "archived" | "restored";
+  revision: number;
+  changedAt: string;
+  reason: string;
+  auditId: string;
+  targetDigest: string;
+}
+
+export interface GraphWritePlan {
+  version: 1 | 2;
+  id: string;
+  createdAt: string;
+  sources: Array<{ sessionId: string; project: string; observationId: string; sessionDigest: string; observationDigest: string }>;
+  writes: Array<{ scope: string; key: string; before: string } & ({ value: unknown; delete?: never } | { delete: true; value?: never })>;
+}
+
+export interface GraphObservationResult {
+  version: 1;
+  id: string;
+  sessionId: string;
+  project: string;
+  inputDigest: string;
+  graphEpoch: string;
+  completedAt: string;
+  analyzer: string;
+  outcome: "extracted" | "excluded";
+  importedGraphVerified?: boolean;
+}
+
+export interface CodexSourceHold {
+  sessionId: string;
+  turnId: string;
+  itemId: string;
+  ordinal: number;
+  byteOffset: number;
+  recordDigest: string;
+  textDigest: string;
+  completionOrdinal: number;
+  completionByteOffset: number;
+  completionDigest: string;
+  reason: "unmatched_user_display";
+}
+
+export interface CodexUnresolvedCapture {
+  observationId: string;
+  fingerprint: string;
+}
+
 export interface Session {
   id: string;
   project: string;
@@ -13,10 +73,35 @@ export interface Session {
   commitShas?: string[];
   agentId?: string;
   updatedAt?: string;
+  codexAgentReconciliation?: {
+    version: 1;
+    state: "pending" | "complete";
+    agentId: string;
+    source: import("./functions/codex-source-identity.js").CodexSourceIdentity;
+    startedAt: string;
+    updatedAt: string;
+    auditId: string;
+  };
   captureExcluded?: boolean;
   captureExclusionReason?: string | null;
   codexCaptureTurnId?: string | null;
+  codexNativeCapture?: {
+    version: 1 | 2;
+    sourceHolds?: CodexSourceHold[];
+    source: import("./functions/codex-source-identity.js").CodexSourceIdentity;
+    captureCwd?: string;
+    status: "pending" | "caught_up" | "caught_up_with_holds" | "unknown" | "reconcile_required";
+    cursor?: import("./replay/codex-window.js").CodexSourceCursor;
+    initializedAt: string;
+    checkedAt?: string;
+    issue?: string;
+    capturedAfter?: string;
+    indexPending?: boolean;
+    snapshotBytes?: number;
+    unresolvedCaptures?: CodexUnresolvedCapture[];
+  };
   semanticGraphThroughObservationId?: string;
+  semanticGraphCompletionVersion?: 1;
   semanticGraphAnalyzer?: string;
   semanticGraphStatus?: "pending" | "complete" | "deferred" | "rejected";
   semanticGraphLastAttemptAt?: string;
@@ -36,6 +121,18 @@ export interface CommitLink {
   files?: string[];
   sessionIds: string[];
   linkedAt: string;
+}
+
+export interface CodexCaptureExclusion {
+  version: 1;
+  id: string;
+  sessionId: string;
+  project: string;
+  forgottenAt: string;
+  observationId?: string;
+  match: { kind: "session" } | { kind: "source"; sourceKey: string }
+    | { kind: "legacy"; messageKind: "user" | "assistant_final"; timestamp: string; textDigest: string }
+    | { kind: "unresolved" };
 }
 
 // Immutable write-time provenance: which trust boundary the content
@@ -93,6 +190,19 @@ export interface CompressedObservation {
   origin?: Origin;
   sourceObservationIds?: string[];
   project?: string;
+  codexSource?: {
+    version: 1;
+    key: string;
+    nativeMessageId: string | null;
+    kind: "user" | "assistant_final";
+    timestamp: string;
+    ordinal: number;
+    byteOffset: number;
+    textDigest: string;
+    legacyExcludedReason?: "assistant_without_normal_user";
+    retainedSourcePath?: string;
+    duplicateOfObservationId?: string;
+  };
   emptyDeletion?: {
     state: "deleted" | "restored";
     version: number;
@@ -260,7 +370,7 @@ export interface HealthSnapshot {
     rss: number;
     external: number;
   };
-  cpu: { userMicros: number; systemMicros: number; percent: number };
+  cpu: { userMicros: number; systemMicros: number; percent: number; corePercent?: number; availableParallelism?: number };
   eventLoopLagMs: number;
   uptimeSeconds: number;
   kvConnectivity?: { status: string; latencyMs?: number; error?: string };
@@ -362,10 +472,13 @@ export interface ExportPagination {
 }
 
 export interface ExportData {
-  version: "0.3.0" | "0.4.0" | "0.5.0" | "0.6.0" | "0.6.1" | "0.7.0" | "0.7.2" | "0.7.3" | "0.7.4" | "0.7.5" | "0.7.6" | "0.7.7" | "0.7.9" | "0.8.0" | "0.8.1" | "0.8.2" | "0.8.3" | "0.8.4" | "0.8.5" | "0.8.6" | "0.8.7" | "0.8.8" | "0.8.9" | "0.8.10" | "0.8.11" | "0.8.12" | "0.8.13" | "0.9.0" | "0.9.1" | "0.9.2" | "0.9.3" | "0.9.4" | "0.9.5" | "0.9.6" | "0.9.7" | "0.9.8" | "0.9.9" | "0.9.10" | "0.9.11" | "0.9.12" | "0.9.13" | "0.9.14" | "0.9.15" | "0.9.16" | "0.9.17" | "0.9.18" | "0.9.19" | "0.9.20" | "0.9.21" | "0.9.22" | "0.9.23" | "0.9.24" | "0.9.25" | "0.9.26" | "0.9.27" | "0.9.28" | "0.9.29";
+  archiveStates?: ArchiveState[];
+  version: typeof import("./version.js").ARCHIVE_LIFECYCLE_EXPORT_VERSION | "0.3.0" | "0.4.0" | "0.5.0" | "0.6.0" | "0.6.1" | "0.7.0" | "0.7.2" | "0.7.3" | "0.7.4" | "0.7.5" | "0.7.6" | "0.7.7" | "0.7.9" | "0.8.0" | "0.8.1" | "0.8.2" | "0.8.3" | "0.8.4" | "0.8.5" | "0.8.6" | "0.8.7" | "0.8.8" | "0.8.9" | "0.8.10" | "0.8.11" | "0.8.12" | "0.8.13" | "0.9.0" | "0.9.1" | "0.9.2" | "0.9.3" | "0.9.4" | "0.9.5" | "0.9.6" | "0.9.7" | "0.9.8" | "0.9.9" | "0.9.10" | "0.9.11" | "0.9.12" | "0.9.13" | "0.9.14" | "0.9.15" | "0.9.16" | "0.9.17" | "0.9.18" | "0.9.19" | "0.9.20" | "0.9.21" | "0.9.22" | "0.9.23" | "0.9.24" | "0.9.25" | "0.9.26" | "0.9.27" | "0.9.28" | "0.9.29" | "0.9.29-codex-lifecycle-1";
   exportedAt: string;
   sessions: Session[];
   observations: Record<string, CompressedObservation[]>;
+  codexCaptureExclusions?: CodexCaptureExclusion[];
+  graphObservationResults?: Record<string, GraphObservationResult[]>;
   memories: Memory[];
   summaries: SessionSummary[];
   profiles?: ProjectProfile[];
@@ -647,6 +760,9 @@ export interface AuditEntry {
   id: string;
   timestamp: string;
   operation:
+    | "archive"
+    | "archive_restore"
+    | "session_agent_reconcile"
     | "observe"
     | "compress"
     | "remember"

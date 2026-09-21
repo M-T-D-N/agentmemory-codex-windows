@@ -46,6 +46,40 @@ describe("SearchIndex", () => {
     expect(index.search("database")).toEqual([]);
   });
 
+  it("keeps scores stable when the same canonical observations are indexed again", () => {
+    const observations = [makeObs(), makeObs({ id: "obs_2", narrative: "auth ".repeat(40) })];
+    for (const observation of observations) index.add(observation);
+    const before = index.search("auth");
+    for (let retry = 0; retry < 4; retry++) for (const observation of observations) index.add(observation);
+    expect(index.size).toBe(2);
+    expect(index.search("auth")).toEqual(before);
+  });
+
+
+  it("preserves snapshot and tie order for an unchanged reindexed subset", () => {
+    const observations = [makeObs(), makeObs({ id: "obs_2" }), makeObs({ id: "obs_3" })];
+    for (const observation of observations) index.add(observation);
+    const snapshot = index.serialize(), ranking = index.search("auth");
+    index.add({ ...observations[0], timestamp: "2026-09-16T00:00:00Z", importance: 9 });
+    expect(index.serialize()).toBe(snapshot);
+    expect(index.search("auth")).toEqual(ranking);
+    index.add({ ...observations[0], sessionId: "changed-owner" });
+    expect(index.search("auth").find(row => row.obsId === "obs_1")?.sessionId).toBe("changed-owner");
+    expect(index.serialize()).not.toBe(snapshot);
+  });
+
+  it("replaces postings and session ownership when an indexed record changes", () => {
+    const original = makeObs({ title: "uniquestale", narrative: "uniquestale", subtitle: "", concepts: [], facts: [], files: [] });
+    index.add(original);
+    index.add({ ...original, sessionId: "new-session", title: "uniquecurrent", narrative: "uniquecurrent" });
+    expect(index.size).toBe(1);
+    expect(index.search("uniquestale")).toEqual([]);
+    expect(index.search("uniquecurrent")).toMatchObject([{ obsId: original.id, sessionId: "new-session" }]);
+    index.remove(original.id);
+    expect(index.size).toBe(0);
+    expect(index.search("uniquecurrent")).toEqual([]);
+  });
+
   it("scores exact matches higher than prefix matches", () => {
     index.add(
       makeObs({

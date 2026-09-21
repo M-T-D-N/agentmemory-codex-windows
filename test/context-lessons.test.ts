@@ -132,6 +132,9 @@ describe("mem::context — lessons auto-injection (#457)", () => {
     };
     await kv.set(KV.sessions, baseSession.id, baseSession);
     await kv.set(KV.observations(baseSession.id), visibleObservation.id, visibleObservation);
+    // Old session-end calls created these before completeExistingSession was introduced.
+    const orphan = { endedAt: "2026-08-01T00:00:00Z", status: "completed" };
+    await kv.set(KV.sessions, "legacy-end-only", orphan);
     await kv.set(KV.sessions, "ses_internal", {
       ...baseSession,
       id: "ses_internal",
@@ -153,6 +156,7 @@ describe("mem::context — lessons auto-injection (#457)", () => {
 
     expect(result.context).toContain("visible-context-marker");
     expect(result.context).not.toContain("internal-context-marker");
+    expect(await kv.get(KV.sessions, "legacy-end-only")).toEqual(orphan);
   });
 
   it("ranks project-scoped lessons above global lessons", async () => {

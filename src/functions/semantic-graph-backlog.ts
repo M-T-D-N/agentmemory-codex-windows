@@ -22,6 +22,7 @@ import { logger } from "../logger.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
+import { graphObservationComplete, readGraphCompletionContext, type GraphCompletionContext } from "./graph-observation-result.js";
 import {
   isExcludedCodexAmbientSession,
   sanitizeCodexAmbientObservation,
@@ -307,10 +308,18 @@ export function selectSemanticGraphBatch(
   rawObservations: CompressedObservation[],
   batchSize = Math.max(1, getGraphBatchSize()),
   inputTokenBudget?: number,
+  completion?: GraphCompletionContext,
 ): SemanticGraphBatch | null {
   const rawOrdered = rawObservations.filter((observation) => observation.sessionId === session.id && observation.title);
   const observations = orderedSessionObservations(session.id, rawObservations);
   if (observations.length === 0) return null;
+  if (session.semanticGraphCompletionVersion === 1) {
+    const pending = observations.filter(observation => !graphObservationComplete(session, observation, completion));
+    if (!pending.length) return null;
+    const batch = boundedBatch(pending, 0, pending.length, batchSize, inputTokenBudget);
+    return { observations: batch.observations, cursorMode: "forward", semanticHasMore: batch.end < pending.length,
+      semanticBootstrapDone: true, estimatedInputTokens: batch.estimatedInputTokens, ...(inputTokenBudget ? { inputTokenBudget } : {}) };
+  }
 
   const bootstrapTarget = Math.min(
     observations.length,
@@ -382,9 +391,11 @@ export function selectSemanticGraphBatch(
 export function semanticGraphCursorsAtEnd(
   session: Session,
   rawObservations: CompressedObservation[],
+  completion?: GraphCompletionContext,
 ): boolean {
   const observations = orderedSessionObservations(session.id, rawObservations);
   if (observations.length === 0) return true;
+  if (session.semanticGraphCompletionVersion === 1) return observations.every(observation => graphObservationComplete(session, observation, completion));
   if (
     cursorStart(observations, session.semanticGraphThroughObservationId)
     !== observations.length
@@ -406,13 +417,14 @@ async function normalizeCompletedSession(
   kv: StateKV,
   sessionId: string,
 ): Promise<boolean> {
-  return withKeyedLock(`obs:${sessionId}`, async () => {
+  return withKeyedLock("mem:graph-write", () => withKeyedLock(`mem:session-lifecycle:${sessionId}`, async () => {
     const session = await kv.get<Session>(KV.sessions, sessionId);
-    if (!session || session.status !== "completed") return false;
+    if (!session || session.status !== "completed" && session.semanticGraphCompletionVersion !== 1) return false;
     const observations = await kv.list<CompressedObservation>(
       KV.observations(sessionId),
     );
-    if (!semanticGraphCursorsAtEnd(session, observations)) return false;
+    if (!semanticGraphCursorsAtEnd(session, observations, await readGraphCompletionContext(kv, session))) return false;
+    if (session.semanticGraphStatus === "complete" && !session.semanticGraphBootstrapSkipped) return false;
     const updates: Array<{ type: "set"; path: string; value: unknown }> = [
       { type: "set", path: "semanticGraphStatus", value: "complete" },
       { type: "set", path: "semanticGraphLastError", value: "" },
@@ -426,7 +438,7 @@ async function normalizeCompletedSession(
     }
     await kv.update(KV.sessions, sessionId, updates);
     return true;
-  });
+  }));
 }
 
 function attemptTime(session: Session): number {
@@ -465,6 +477,7 @@ export function registerSemanticGraphBacklogFunction(
       !isBlockedAtCurrentOutputBudget(session)
       && (
         session.semanticGraphStatus !== "complete"
+        || session.semanticGraphCompletionVersion === 1
         || Number(session.semanticGraphBootstrapSkipped ?? 0) > 0
       ),
     );
@@ -511,6 +524,7 @@ export function registerSemanticGraphBacklogFunction(
           observations,
           retrySingle ? 1 : batchSize,
           inputTokenBudget,
+          await readGraphCompletionContext(kv, session),
         );
         if (!batch) {
           if (!request.checkOnly && await normalizeCompletedSession(kv, session.id)) {

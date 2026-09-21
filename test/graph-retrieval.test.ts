@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GraphRetrieval } from "../src/functions/graph-retrieval.js";
 import type { GraphNode, GraphEdge } from "../src/types.js";
 
@@ -71,6 +71,40 @@ function makeEdge(
 }
 
 describe("GraphRetrieval", () => {
+  it.each(["entities", "chunks"])("shares adjacency across %s seeds without losing recall or blocking other work", async kind => {
+    const nodes = Array.from({ length: 80 }, (_, i) => makeNode(`seed_${i}`, `Topic ${i}`, "concept", [`source_${i}`]));
+    const target = makeNode("target", "Related", "concept", ["related"]);
+    let edgeReads = 0;
+    const edges = nodes.map((node, i) => ({
+      ...makeEdge(`edge_${i}`, node.id, target.id),
+      get sourceNodeId() { edgeReads++; return node.id; },
+    }));
+    const retrieval = new GraphRetrieval(mockKV([...nodes, target], edges) as never);
+    let backgroundRan = false;
+    const pending = setImmediate(() => { backgroundRan = true; });
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now += 10);
+    try {
+      const results = kind === "entities"
+        ? await retrieval.searchByEntities(["Topic"], 1, 100)
+        : await retrieval.expandFromChunks(nodes.map(node => node.sourceObservationIds[0]), 1, 100);
+      expect(backgroundRan).toBe(true);
+      expect(edgeReads).toBe(edges.length);
+      expect(new Set(results.map(row => row.obsId))).toEqual(new Set(kind === "entities" ? [...nodes.map(node => node.sourceObservationIds[0]), "related"] : ["related"]));
+      expect(results.find(row => row.obsId === "related")?.pathLength).toBe(2);
+    } finally { clock.mockRestore(); clearImmediate(pending); }
+  });
+
+  it.each(["superseded", "retired"])("does not traverse a %s relationship in current recall", async kind => {
+    const nodes = [makeNode("start", "Entry", "concept", ["seed"]), makeNode("end", "Old", "concept", ["old-observation"])];
+    const edge = makeEdge("edge", "start", "end");
+    if (kind === "superseded") edge.isLatest = false;
+    else edge.reviewRetirement = { active: true, reason: "replaced", sourceObservationIds: ["seed"], sourceSessionIds: [], updatedAt: edge.createdAt };
+    const retrieval = new GraphRetrieval(mockKV(nodes, [edge]) as never);
+    expect((await retrieval.searchByEntities(["Entry"])).map(row => row.obsId)).toEqual(["seed"]);
+    expect(await retrieval.expandFromChunks(["seed"])).toEqual([]);
+  });
+
   it("finds entities by name", async () => {
     const nodes = [
       makeNode("n1", "React", "library", ["obs_1"]),

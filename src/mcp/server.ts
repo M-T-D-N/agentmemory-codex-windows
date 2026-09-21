@@ -2,6 +2,8 @@ import type { ISdk, ApiRequest } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { parseSessionQuery, selectSessionPage } from "../functions/session-query.js";
+import { readArchiveVisibility } from "../functions/archive.js";
+import { parseArchiveToolInput } from "../functions/archive-tools.js";
 import type {
   SessionSummary,
   Memory,
@@ -61,6 +63,24 @@ function parseTrackAccess(
     response: {
       status_code: 400,
       body: { error: "trackAccess must be a boolean" },
+    },
+  };
+}
+
+function parseAgentId(
+  value: unknown,
+):
+  | { valid: true; value: string | undefined }
+  | { valid: false; response: McpResponse } {
+  if (value === undefined) return { valid: true, value: undefined };
+  if (typeof value === "string" && value.trim() && value.length <= 512) {
+    return { valid: true, value: value.trim() };
+  }
+  return {
+    valid: false,
+    response: {
+      status_code: 400,
+      body: { error: "agentId must be a non-empty string of at most 512 characters" },
     },
   };
 }
@@ -200,20 +220,14 @@ export function registerMcpEndpoints(
             }
             const trackAccess = parseTrackAccess(args.trackAccess);
             if (!trackAccess.valid) return trackAccess.response;
-            // #817: forward agentId so mem::search applies the same
-            // isolation filter smart-search uses. Default behavior is
-            // unchanged (no agentId → falls back to env AGENT_ID when
-            // AGENTMEMORY_AGENT_SCOPE=isolated; "*" wildcard bypasses).
-            const recallAgentId =
-              typeof args.agentId === "string" && args.agentId.trim().length > 0
-                ? (args.agentId as string).trim()
-                : undefined;
+            const agentId = parseAgentId(args.agentId);
+            if (!agentId.valid) return agentId.response;
             const result = await sdk.trigger({ function_id: "mem::search", payload: {
               query: args.query,
               limit: typeof args.limit === "number" ? args.limit : 10,
               format,
               token_budget: tokenBudget,
-              agentId: recallAgentId,
+              agentId: agentId.value,
               project,
               trackAccess: trackAccess.value,
             } });
@@ -366,7 +380,14 @@ export function registerMcpEndpoints(
           case "memory_sessions": {
             const query = parseSessionQuery(args);
             if ("error" in query) return mcpToolResult(query, true);
-            return mcpToolResult(selectSessionPage(await kv.list<Session>(KV.sessions), query));
+            return mcpToolResult(selectSessionPage(await kv.list<Session>(KV.sessions), query, await readArchiveVisibility(kv)));
+          }
+          case "memory_archive": {
+            let payload;
+            try { payload = parseArchiveToolInput(args); }
+            catch (error) { return mcpToolResult({ error: error instanceof Error ? error.message : "Invalid archive request" }, true); }
+            const result = await sdk.trigger({ function_id: "mem::archive", payload });
+            return mcpToolResult(result, Boolean(result && typeof result === "object" && (result as { success?: boolean }).success === false));
           }
 
           case "memory_smart_search": {
@@ -387,6 +408,8 @@ export function registerMcpEndpoints(
             const limit = Math.max(1, Math.min(100, asNumber(args.limit, 10) ?? 10));
             const trackAccess = parseTrackAccess(args.trackAccess);
             if (!trackAccess.valid) return trackAccess.response;
+            const agentId = parseAgentId(args.agentId);
+            if (!agentId.valid) return agentId.response;
             const result = await sdk.trigger({
               function_id: "mem::smart-search",
               payload: {
@@ -394,6 +417,7 @@ export function registerMcpEndpoints(
                 expandIds,
                 limit,
                 project,
+                agentId: agentId.value,
                 trackAccess: trackAccess.value,
               },
             });
@@ -855,6 +879,7 @@ export function registerMcpEndpoints(
               const result = await sdk.trigger({ function_id: "mem::governance-delete", payload: {
                 memoryIds: ids,
                 reason: args.reason as string,
+                project: args.project,
               } });
               return {
                 status_code: 200,
@@ -1420,6 +1445,7 @@ export function registerMcpEndpoints(
             }
             const lessonDeleteResult = await sdk.trigger({ function_id: "mem::lesson-delete", payload: {
               lessonId: args.lessonId.trim(),
+              project: args.project,
             } });
             return { status_code: 200, body: { content: [{ type: "text", text: JSON.stringify(lessonDeleteResult, null, 2) }] } };
           }

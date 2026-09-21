@@ -59,6 +59,9 @@ function Invoke-FreshInstallation {
     if ($Activate) {
         $owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
         $installed = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+        if ((Get-ManagedDataContractVersion -Manifest $installed) -ne $targetDataContract) {
+            throw 'Prepared installation data contract does not match the activation release.'
+        }
         if ([string]$installed.installation_status -ne 'prepared' -or [string]$installed.owner_sid -ne $sid -or
             [string]$installed.install_root -ne $root -or [string]$owner.install_nonce -ne [string]$installed.install_nonce -or
             [string]$installed.release_manifest_sha256 -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseManifestPath).Hash) {
@@ -146,6 +149,7 @@ function Invoke-FreshInstallation {
             product = [string]$releaseManifest.product; product_id = [string]$releaseManifest.product_id
             downstream_version = [string]$releaseManifest.downstream_version; agentmemory_version = [string]$releaseManifest.agentmemory_version
             release_revision = [string]$releaseManifest.release_revision; package_relative_path = [string]$releaseManifest.package_relative_path
+            data_contract_version = $targetDataContract
             node_path = $node; release_manifest_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseManifestPath).Hash
             source_hashes = $hashes; security = @{} }
         Write-Utf8NoBom $installManifestPath ($installed | ConvertTo-Json -Depth 12)

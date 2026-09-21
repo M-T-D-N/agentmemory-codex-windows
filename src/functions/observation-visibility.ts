@@ -7,8 +7,10 @@ export function isCodexApprovalReviewText(value: unknown): boolean {
 }
 
 export function isCodexInternalAmbientText(value: unknown): boolean {
-  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (!text) return false;
+  const original = typeof value === "string" ? value : "";
+  const text = stripCodexAmbientUiBlocks(original).trim().toLowerCase();
+  if (!text) return original.trim().length > 0;
+  if (CODEX_AMBIENT_UI_PREFIX.test(text)) return true;
   const structuredHostContext = [
     "<environment_context",
     "<codex_internal_context",
@@ -68,6 +70,10 @@ const AGENTMEMORY_AMBIENT_BLOCK =
 const CODEX_AMBIENT_UI_PREFIX =
   /^\s*<([a-z][a-z0-9-]*)\b(?=[^>]*\bsource=(["'])ambient-ui-state\2)[^>]*>/i;
 
+export function stripCodexAmbientUiBlocks(value: string): string {
+  return value.replace(CODEX_AMBIENT_UI_BLOCK, "").replace(AGENTMEMORY_AMBIENT_BLOCK, "");
+}
+
 export function sanitizeCodexAmbientObservation<
   T extends CompressedObservation,
 >(observation: T | null | undefined): T | null {
@@ -76,9 +82,7 @@ export function sanitizeCodexAmbientObservation<
     return observation ?? null;
   }
   if (isCodexInternalAmbientText(observation.narrative)) return null;
-  const narrative = observation.narrative
-    .replace(CODEX_AMBIENT_UI_BLOCK, "")
-    .replace(AGENTMEMORY_AMBIENT_BLOCK, "");
+  const narrative = stripCodexAmbientUiBlocks(observation.narrative);
   if (
     narrative === observation.narrative &&
     CODEX_AMBIENT_UI_PREFIX.test(observation.narrative)

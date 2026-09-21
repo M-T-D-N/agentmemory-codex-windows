@@ -8,14 +8,19 @@ vi.mock("../src/logger.js", () => ({
 import { registerExportImportFunction } from "../src/functions/export-import.js";
 import { inObservationRecovery, withObservationWrite } from "../src/state/observation-write.js";
 import { selectSemanticGraphBatch } from "../src/functions/semantic-graph-backlog.js";
-import { VERSION } from "../src/version.js";
+import { VERSION, CODEX_LIFECYCLE_EXPORT_VERSION } from "../src/version.js";
+import { codexTextDigest } from "../src/replay/codex-match.js";
+import { codexExclusionId } from "../src/functions/codex-capture-exclusion.js";
 import { getSearchIndex } from "../src/functions/search.js";
+import { KV } from "../src/state/schema.js";
+import { graphObservationComplete, graphObservationDigest, readGraphCompletionContext } from "../src/functions/graph-observation-result.js";
 import type {
   Session,
   CompressedObservation,
   Memory,
   SessionSummary,
   ExportData,
+  GraphNode,
 } from "../src/types.js";
 
 function mockKV() {
@@ -114,6 +119,106 @@ describe("Export/Import Functions", () => {
   });
 
   afterEach(() => vi.unstubAllEnvs());
+
+  async function graphExport() {
+    await kv.set(KV.sessions, testSession.id, { ...testSession, semanticGraphCompletionVersion: 1, semanticGraphStatus: "complete" });
+    await kv.set(KV.graphObservationResults(testSession.id), testObs.id, {
+      version: 1, id: testObs.id, sessionId: testSession.id, project: testSession.project,
+      inputDigest: graphObservationDigest(testObs), graphEpoch: "", completedAt: "2026-09-13T00:00:00Z", analyzer: "fixture", outcome: "extracted",
+    });
+    return await sdk.trigger("mem::export", {}) as ExportData;
+  }
+
+  it.each([KV.observations(testSession.id), KV.graphNodes, KV.accessLog])("fails export on collection read failure: %s", async scope => {
+    const list = kv.list;
+    kv.list = async name => { if (name === scope) throw Error("store unavailable"); return list(name); };
+    await expect(sdk.trigger("mem::export", {})).rejects.toThrow("store unavailable");
+  });
+
+  it("exports only while source writers and graph recovery are quiescent", async () => {
+    await withObservationWrite(async () => {
+      await expect(sdk.trigger("mem::export", {})).rejects.toThrow("writers are active");
+    });
+    await kv.set(KV.graphWritePlan, "current", { pending: true });
+    await expect(sdk.trigger("mem::export", {})).rejects.toThrow("Graph recovery must finish");
+    await expect(sdk.trigger("mem::import", { strategy: "replace", exportData: {} })).rejects.toThrow("Graph recovery must finish");
+    expect(await kv.get(KV.sessions, testSession.id)).toEqual(testSession);
+  });
+
+  it("round-trips a completed zero-node analysis with its source and graph", async () => {
+    const exported = await graphExport();
+    expect(exported.version).toBe(CODEX_LIFECYCLE_EXPORT_VERSION);
+    expect(exported.graphNodes).toEqual([]);
+    expect(exported.graphEdges).toEqual([]);
+    expect(exported.sessions[0].semanticGraphStatus).toBe("pending");
+    expect(await kv.get(KV.sessions, testSession.id)).toMatchObject({ semanticGraphStatus: "complete" });
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    expect(await freshSdk.trigger("mem::import", { exportData: exported })).toMatchObject({ success: true });
+    const session = (await freshKv.get<Session>(KV.sessions, testSession.id))!;
+    const observation = (await freshKv.get<CompressedObservation>(KV.observations(testSession.id), testObs.id))!;
+    expect(graphObservationComplete(session, observation, await readGraphCompletionContext(freshKv as never, session))).toBe(true);
+  });
+
+  it("preserves stale completion as unverified even when a fresh target has the old epoch", async () => {
+    await graphExport();
+    await kv.set(KV.graphSnapshot, "current", { resetAt: "2026-09-13T01:00:00Z" });
+    const exported = await sdk.trigger("mem::export", {}) as ExportData;
+    expect(exported.graphObservationResults![testSession.id][0]).toMatchObject({ graphEpoch: "", importedGraphVerified: false });
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    await freshSdk.trigger("mem::import", { exportData: exported });
+    const session = (await freshKv.get<Session>(KV.sessions, testSession.id))!;
+    expect(graphObservationComplete(session, testObs, await readGraphCompletionContext(freshKv as never, session))).toBe(false);
+  });
+
+  it("keeps pre-reset graph rows hidden when restored into a fresh target", async () => {
+    const old: GraphNode = { id: "old", type: "decision", name: "Earlier decision", project: testSession.project,
+      properties: {}, sourceObservationIds: [testObs.id], sourceSessionIds: [testSession.id], createdAt: "2026-09-12T00:00:00Z" };
+    const live: GraphNode = { ...old, id: "live", name: "Current decision", createdAt: "2026-09-13T02:00:00Z" };
+    await kv.set(KV.graphNodes, old.id, old); await kv.set(KV.graphNodes, live.id, live);
+    await kv.set(KV.graphEdges, "old-edge", { id: "old-edge", type: "related_to", sourceNodeId: old.id, targetNodeId: old.id,
+      sourceObservationIds: [testObs.id], sourceSessionIds: [testSession.id], weight: 1, createdAt: old.createdAt });
+    await kv.set(KV.graphSnapshot, "current", { resetAt: "2026-09-13T01:00:00Z" });
+    const exported = await sdk.trigger("mem::export", {}) as ExportData;
+    expect(exported.graphNodes!.find(row => row.id === old.id)).toEqual({ ...old, stale: true });
+    expect(exported.graphEdges![0].stale).toBe(true);
+    expect(await kv.get(KV.graphNodes, old.id)).toEqual(old);
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    expect(await freshSdk.trigger("mem::import", { exportData: exported })).toMatchObject({ success: true });
+    expect(await freshKv.get(KV.graphSnapshot, "current")).toMatchObject({ stats: { totalNodes: 1, totalEdges: 0 } });
+    expect(await freshKv.get(KV.graphNodes, old.id)).toMatchObject({ stale: true, sourceObservationIds: [testObs.id], sourceSessionIds: [testSession.id] });
+    expect(await freshKv.get(KV.graphNodes, live.id)).toEqual(live);
+  });
+
+  it.each(["missing-graph", "changed-input", "changed-target-epoch", "skip"])("does not certify transferred completion for %s", async variant => {
+    const exported = await graphExport();
+    if (variant === "missing-graph") delete exported.graphEdges;
+    if (variant === "changed-input") exported.observations = { [testSession.id]: [{ ...testObs, narrative: "Different evidence" }] };
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    if (variant === "changed-target-epoch") await freshKv.set(KV.graphSnapshot, "current", { resetAt: "2026-09-13T02:00:00Z" });
+    await freshSdk.trigger("mem::import", { exportData: exported, strategy: variant === "skip" ? "skip" : "merge" });
+    const session = (await freshKv.get<Session>(KV.sessions, testSession.id))!;
+    expect(graphObservationComplete(session, exported.observations[testSession.id][0], await readGraphCompletionContext(freshKv as never, session))).toBe(false);
+    expect(await freshKv.get(KV.graphObservationResults(testSession.id), testObs.id)).toMatchObject({ analyzer: "fixture", importedGraphVerified: false });
+  });
+
+  it("invalidates existing completion before an interrupted graph-only import", async () => {
+    await graphExport();
+    const set = kv.set;
+    kv.set = async (scope, key, value) => { if (scope === KV.graphNodes) throw Error("graph write interrupted"); return set(scope, key, value); };
+    await expect(sdk.trigger("mem::import", { exportData: { version: VERSION, sessions: [], observations: {}, memories: [], summaries: [],
+      graphNodes: [{ id: "changed-node", type: "decision", name: "Changed" }] } })).rejects.toThrow("graph write interrupted");
+    const session = (await kv.get<Session>(KV.sessions, testSession.id))!;
+    expect(graphObservationComplete(session, testObs, await readGraphCompletionContext(kv as never, session))).toBe(false);
+  });
+
+  it("rejects mismatched result provenance before changing canonical records", async () => {
+    const exported = await graphExport();
+    exported.graphObservationResults![testSession.id][0].project = "different-project";
+    const set = vi.spyOn(kv, "set");
+    await expect(sdk.trigger("mem::import", { strategy: "replace", exportData: exported })).rejects.toThrow("Invalid graph observation completion");
+    expect(set).not.toHaveBeenCalled();
+    expect(await kv.get(KV.observations(testSession.id), testObs.id)).toEqual(testObs);
+  });
 
   it("export produces valid ExportData structure", async () => {
     const result = (await sdk.trigger("mem::export", {})) as ExportData;
@@ -412,6 +517,127 @@ describe("Export/Import Functions", () => {
     )) as ExportData;
     expect(reExported.sessions.length).toBe(exported.sessions.length);
     expect(reExported.memories.length).toBe(exported.memories.length);
+  });
+
+  it("round-trips forgotten source identity without a surviving session and never erases it with replace", async () => {
+    const exclusion = { version: 1, id: codexExclusionId("forgotten-session"), sessionId: "forgotten-session", project: "p",
+      forgottenAt: "2026-09-13T00:00:00Z", match: { kind: "session" } };
+    await kv.set("mem:codex:capture-exclusions", exclusion.id, exclusion);
+    const exported = await sdk.trigger("mem::export", {}) as ExportData;
+    expect(exported.version).toBe(CODEX_LIFECYCLE_EXPORT_VERSION);
+    expect(exported.codexCaptureExclusions).toEqual([exclusion]);
+    const freshSdk = mockSdk(); const freshKv = mockKV();
+    registerExportImportFunction(freshSdk as never, freshKv as never);
+    expect(await freshSdk.trigger("mem::import", { exportData: exported })).toMatchObject({ success: true });
+    expect(await freshKv.get("mem:codex:capture-exclusions", exclusion.id)).toEqual(exclusion);
+    expect(await freshSdk.trigger("mem::import", { strategy: "replace", exportData: {
+      version: VERSION, sessions: [], observations: {}, memories: [], summaries: [],
+    } })).toMatchObject({ success: true });
+    expect(await freshKv.get("mem:codex:capture-exclusions", exclusion.id)).toEqual(exclusion);
+    await expect(freshSdk.trigger("mem::import", { exportData: { version: VERSION,
+      sessions: [{ ...testSession, id: "forgotten-session", project: "p" }], observations: {}, memories: [], summaries: [],
+    } })).rejects.toThrow("restore forgotten Codex capture");
+    expect(await freshKv.get("mem:sessions", "forgotten-session")).toBeNull();
+  });
+
+  it("does not export a successful backup when the source exclusions could not be read", async () => {
+    const list = kv.list;
+    kv.list = async scope => { if (scope === "mem:codex:capture-exclusions") throw Error("exclusion read failed"); return list(scope); };
+    await expect(sdk.trigger("mem::export", {})).rejects.toThrow("exclusion read failed");
+  });
+
+  it("refuses a contradictory export from an interrupted or concurrent forget", async () => {
+    await kv.set("mem:codex:capture-exclusions", codexExclusionId(testSession.id), {
+      version: 1, id: codexExclusionId(testSession.id), sessionId: testSession.id, project: testSession.project,
+      forgottenAt: "2026-09-13T00:00:00Z", match: { kind: "session" },
+    });
+    await expect(sdk.trigger("mem::export", {})).rejects.toThrow("restore forgotten Codex capture");
+  });
+
+  it("exports native source provenance in the lifecycle format and never trusts a restored host cursor", async () => {
+    const native = { ...testSession, codexNativeCapture: { version: 1, status: "caught_up", initializedAt: "2026-09-13T00:00:00Z",
+      source: { sessionId: testSession.id, cwd: testSession.cwd, createdAt: testSession.startedAt, source: "cli", relativePath: "sessions/rollout-a.jsonl" },
+      cursor: { foreignHostState: true }, indexPending: false } };
+    await kv.set("mem:sessions", testSession.id, native);
+    const retained = { ...testObs, codexSource: { version: 1 as const, key: codexTextDigest("prior-key"), nativeMessageId: "prior-message",
+      kind: "user" as const, timestamp: testObs.timestamp, ordinal: 3, byteOffset: 500, textDigest: codexTextDigest(testObs.narrative),
+      retainedSourcePath: "archived_sessions/rollout-prior.jsonl" } };
+    await kv.set(KV.observations(testSession.id), testObs.id, retained);
+    const alias = { ...retained, id: retained.id + "-copy", codexSource: { ...retained.codexSource, duplicateOfObservationId: retained.id } };
+    await kv.set(KV.observations(testSession.id), alias.id, alias);
+    const exported = await sdk.trigger("mem::export", {}) as ExportData;
+    expect(exported.observations[testSession.id]).toEqual([retained, alias]);
+    expect(exported.version).toBe(CODEX_LIFECYCLE_EXPORT_VERSION);
+    expect(exported.sessions[0]!.codexNativeCapture).toMatchObject({ status: "reconcile_required", indexPending: true });
+    expect(exported.sessions[0]!.codexNativeCapture).not.toHaveProperty("cursor");
+    expect(await kv.get("mem:sessions", testSession.id)).toEqual(native);
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    const untrusted = { ...exported, sessions: [native] };
+    expect(await freshSdk.trigger("mem::import", { exportData: untrusted })).toMatchObject({ success: true });
+    expect(await freshKv.get(KV.observations(testSession.id), testObs.id)).toMatchObject(retained);
+    expect(await freshKv.get(KV.observations(testSession.id), alias.id)).toMatchObject(alias);
+    const restored = await freshKv.get<Session>("mem:sessions", testSession.id);
+    expect(restored!.codexNativeCapture).not.toHaveProperty("cursor");
+    expect(restored!.codexNativeCapture).toMatchObject({ status: "reconcile_required", indexPending: true });
+    expect(await freshSdk.trigger("mem::import", { exportData: { ...untrusted, version: VERSION } })).toMatchObject({ success: false });
+  });
+
+  it("preserves unresolved legacy rows across export/import while requiring fresh source reconciliation", async () => {
+    const legacy = { ...testObs, title: "prompt_submit", type: "conversation" as const, agentId: "codex-global",
+      origin: { channel: "import" as const, capturedAt: testObs.timestamp } };
+    await kv.set(KV.observations(testSession.id), legacy.id, legacy);
+    const native = { ...testSession, codexNativeCapture: { version: 1, status: "caught_up", initializedAt: "2026-09-13T00:00:00Z",
+      source: { sessionId: testSession.id, cwd: testSession.cwd, createdAt: testSession.startedAt, source: "cli", relativePath: "sessions/rollout-a.jsonl" },
+      cursor: { foreignHostState: true }, unresolvedCaptures: [{ observationId: testObs.id, fingerprint: "a".repeat(64) }] } };
+    await kv.set("mem:sessions", testSession.id, native);
+    const exported = await sdk.trigger("mem::export", {}) as ExportData;
+    expect(exported.observations[testSession.id]).toEqual([legacy]);
+    expect(exported.sessions[0]!.codexNativeCapture).toMatchObject({ status: "reconcile_required" });
+    expect(exported.sessions[0]!.codexNativeCapture).not.toHaveProperty("unresolvedCaptures");
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    expect(await freshSdk.trigger("mem::import", { exportData: { ...exported, sessions: [native] } })).toMatchObject({ success: true });
+    expect(await freshKv.get(KV.observations(testSession.id), testObs.id)).toEqual(legacy);
+    expect(await freshKv.get<Session>(KV.sessions, testSession.id)).toHaveProperty("codexNativeCapture.status", "reconcile_required");
+    expect((await freshKv.get<Session>(KV.sessions, testSession.id))!.codexNativeCapture).not.toHaveProperty("unresolvedCaptures");
+  });
+  it("invalidates a native cursor after observations-only import and rejects invalid source paths before writing", async () => {
+    const native = { ...testSession, codexNativeCapture: { version: 1, status: "caught_up", initializedAt: "2026-09-13T00:00:00Z",
+      source: { sessionId: testSession.id, cwd: testSession.cwd, createdAt: testSession.startedAt, source: "cli", relativePath: "sessions/rollout-a.jsonl" },
+      cursor: { foreignHostState: true } } };
+    await kv.set("mem:sessions", testSession.id, native);
+    expect(await sdk.trigger("mem::import", { exportData: { version: VERSION, sessions: [], memories: [], summaries: [],
+      observations: { [testSession.id]: [{ ...testObs, id: "manual-new" }] } } })).toMatchObject({ success: true });
+    const restored = await kv.get<Session>("mem:sessions", testSession.id);
+    expect(restored!.codexNativeCapture).not.toHaveProperty("cursor");
+    expect(restored!.codexNativeCapture!.status).toBe("reconcile_required");
+    const invalid = { ...native, codexNativeCapture: { ...native.codexNativeCapture, source: { ...native.codexNativeCapture.source, relativePath: "../escape.jsonl" } } };
+    await expect(sdk.trigger("mem::import", { strategy: "replace", exportData: { version: CODEX_LIFECYCLE_EXPORT_VERSION,
+      sessions: [invalid], observations: {}, memories: [], summaries: [] } })).rejects.toThrow("Invalid native capture");
+    expect(await kv.get("mem:sessions", testSession.id)).toEqual(restored);
+    expect(await kv.get("mem:obs:ses_1", "manual-new")).not.toBeNull();
+  });
+
+  it("round-trips a resumed task after whole-session forget without restoring earlier content or summary", async () => {
+    const cutoff = "2026-09-13T00:00:00Z";
+    const exclusion = { version: 1, id: codexExclusionId(testSession.id), sessionId: testSession.id, project: testSession.project,
+      forgottenAt: cutoff, match: { kind: "session" } };
+    await kv.set("mem:codex:capture-exclusions", exclusion.id, exclusion);
+    await kv.delete("mem:obs:ses_1", testObs.id); await kv.delete("mem:summaries", testSession.id);
+    await kv.set("mem:sessions", testSession.id, { ...testSession, codexNativeCapture: {
+      version: 1, status: "pending", initializedAt: "2026-09-13T00:00:02Z", capturedAfter: cutoff,
+      source: { sessionId: testSession.id, cwd: testSession.cwd, createdAt: testSession.startedAt, source: "cli", relativePath: "sessions/rollout-a.jsonl" },
+    } });
+    await kv.set("mem:obs:ses_1", "after-forget", { ...testObs, id: "after-forget", timestamp: "2026-09-13T00:00:01Z", narrative: "new work after forget" });
+    const exported = await sdk.trigger("mem::export", {}) as ExportData;
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    expect(await freshSdk.trigger("mem::import", { exportData: exported })).toMatchObject({ success: true });
+    expect(await freshKv.get("mem:obs:ses_1", "after-forget")).toMatchObject({ narrative: "new work after forget" });
+    expect(await freshKv.get("mem:obs:ses_1", testObs.id)).toBeNull();
+    await expect(freshSdk.trigger("mem::import", { exportData: { ...exported, observations: { ses_1: [testObs] } } })).rejects.toThrow("restore forgotten Codex capture");
+    await expect(freshSdk.trigger("mem::import", { exportData: { ...exported, summaries: [testSummary] } })).rejects.toThrow("restore forgotten Codex capture");
+    await expect(freshSdk.trigger("mem::import", { exportData: { ...exported,
+      sessions: [{ ...exported.sessions[0], firstPrompt: "old forgotten prompt" }] } })).rejects.toThrow("restore forgotten Codex capture");
+    expect(await freshKv.get("mem:obs:ses_1", "after-forget")).not.toBeNull();
   });
 
   it("import rejects unsupported version", async () => {

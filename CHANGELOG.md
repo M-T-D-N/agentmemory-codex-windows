@@ -4,6 +4,158 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## 0.1.0-preview.9 — release candidate
+
+- Separate the engine's caller metadata from archive business inputs so real
+  inspect, candidate, list, archive and restore requests reach their handlers.
+  Public REST/MCP requests still reject unknown fields and caller-supplied
+  metadata; exact-project ownership and preview evidence remain required.
+
+- Rebuild large graph search indexes through bounded pages from the managed
+  StateModule, preserving canonical nodes, relationships and source provenance.
+  Missing page support, oversized records, inconsistent inventory and interrupted
+  writes fail explicitly; a partial derived index cannot claim exact completion.
+  Portable engines retain their whole-response safety limit.
+
+- Measure managed Windows health CPU usage against available processor capacity,
+  retaining the original core-equivalent measurement in the response. A busy
+  core alone no longer rejects startup or MCP readiness on a multicore host;
+  event-loop, connection and sustained capacity thresholds remain enforced.
+
+- Resume unfinished native capture sweeps through bounded serial batches instead
+  of waiting one minute for every eight sessions. Stable source ordering prevents
+  hook checks from postponing a partially read conversation. Progressing large
+  sources continue through the existing canonical cursors, while incomplete tails
+  and failures return to ordinary polling. Health distinguishes a completed sweep
+  from individual batch activity; no separate queue or Qwen launcher is added.
+
+- An explicit, version-checked source review can preserve an unmatched user
+  display item as a source hold while collecting later genuine primary messages.
+  The held item's source and completion fingerprints remain visible; it never
+  becomes a fabricated observation. Future unknown items still block capture.
+  Held sessions use capture/cursor version 2, which older readers reject, and
+  transfer preserves the hold while requiring local source reconciliation.
+
+- Explicit native initialization can retain unresolved legacy captures without
+  blocking confirmed source messages. Existing contents and IDs remain intact,
+  health reports unresolved counts, and ambiguous individual forget stays blocked.
+
+- Reconcile supported normal Codex history from the native thread index and
+  message identities. Bounded discovery and incremental capture recover missed
+  hooks while preserving distinct repeated messages, excluded host/subagent
+  traffic, proven ownership, and supported fork/continuation boundaries. Ambiguous,
+  missing or unsupported sources remain explicit instead of claiming completion.
+  Preserve native source identity across proven in-thread cwd changes. Complete
+  source history can verify an existing canonical cwd without moving its project,
+  observations or graph provenance. Existing captures omitted from a later native
+  source generation can retain an exact earlier source path after same-session,
+  full-content and unique-correspondence checks; current replay boundaries and
+  existing IDs stay intact. Initialization, restart, source relocation,
+  ownership reconciliation and transfer retain the same binding checks.
+
+- Preserve user requests following complete marked browser/UI context blocks.
+  Native replay, session visibility and first-prompt summaries now agree on the
+  remaining user text; internal-only and incomplete host payloads stay excluded.
+
+- Explicit full-inventory reconciliation can link multiple proven captures of
+  one native message while preserving every observation ID and full source body.
+  Linked duplicates remain compatible with archive/restore and future capture;
+  partial forget refuses to leave a surviving copy or an orphaned source link.
+  Managed data contract 3 prevents an older runtime from ignoring these links.
+
+- Recover interrupted raw captures and verified legacy text transformations in
+  place, preserving observation IDs, image data, provenance and index retry.
+  Exact native evidence can restore a truncated synthetic answer, a missing
+  terminal LF or image-wrapper serialization. Legacy prompts that differ only
+  by stripped ASCII boundary whitespace, including exact 400-character synthetic
+  truncation, can be restored from a unique nearby native source. Internal
+  whitespace, competing messages and protected records are not normalized. Existing final answers excluded
+  from normal capture can retain their source provenance without collecting new
+  internal responses. Preview and inspection preserve ambiguous and protected
+  records as unresolved instead of guessing their source.
+  Restore legacy timestamps that lost their UTC designation and fractional
+  seconds only when native calendar fields, the complete body and unique source
+  correspondence prove the original instant.
+  Reconcile historical recovery records whose content-part assembly added
+  image or blank-part separators only when their deterministic observation ID,
+  exact source turn/time and complete stored-body digest prove the old encoding.
+  Adopt delayed final-response captures when the exact turn and complete answer
+  prove a unique native source, preserving the original collection time. Restore
+  user prompts truncated by the upstream 400-character synthetic compressor only
+  when its complete encoding, original type/confidence and unique source agree.
+  Preserve already deleted, content-free legacy observation rows as lifecycle
+  metadata instead of treating them as uncaptured conversations. Surviving
+  content, restored rows and source-bound protected rows remain blocked.
+  Reconcile historical user imports identified by a displayed message item only
+  after complete native history proves its unique primary message, matching
+  turn and full unchanged body. Preserve the original observation and collection
+  time, and report the adoption separately without collecting display duplicates.
+
+- Track graph completion per source observation, including valid zero-node
+  results and older gaps. Recover interrupted canonical graph assignments and
+  deletion through the existing StateModule store and writer coordination; do
+  not substitute a second graph database or advance failed work as complete.
+
+- Require the pinned downstream iii-engine 0.11.2 durability patch for managed
+  writes. Confirm file persistence before recording completion and fence writes
+  after uncertain outcomes. The patch and build identity are shipped with the
+  engine's Elastic License 2.0; this is not an official upstream engine binary
+  or a guarantee against every storage-device or power failure.
+
+- Add reversible, exact-project archive inspection and lifecycle operations in
+  the canonical store. Preserve original IDs, relationships and provenance,
+  apply shared visibility across ordinary readers and backup/restore, and keep
+  explicit forget separate. Retention/TTL candidates are read-only previews;
+  this release does not activate automatic archiving. Legacy mesh exchange that
+  cannot preserve archive state fails explicitly rather than re-exposing it.
+
+- Preserve capture exclusions, archive state and graph completion provenance
+  through supported export/import and snapshots. Managed data contract 2 rejects
+  unsafe downgrade and prevents automatic predecessor restart after candidate
+  startup or contract transition failure. A compatible data backup is required
+  for a deliberate downgrade; the installer's code/config backup is insufficient.
+
+- Apply canonical project/agent scope before search candidate limits, preserve
+  durable-memory ownership and compact/expanded lookup, and retain bounded reads.
+  Hidden Codex windows no longer imply desktop exit or stop normal capture.
+
+- Search the current project before automatic cross-project recall, preserve
+  source IDs/timestamps and deduplicate scoped results. Short follow-ups can
+  reuse a recent topic from the same source session within the existing lookup
+  budget. Candidate searches use the existing non-reinforcing
+  access option so unused results do not affect retention. Local read failures
+  do not broaden scope, and fallback queries share the existing retrieval deadline.
+
+- Keep failed native-capture index saves pending for retry, and make repeated
+  indexing of the same observation preserve document lengths and search terms.
+  Repair legacy relative working directories only when the exact native source
+  and thread index agree. Existing protected empty observations remain untouched
+  when their ownership is already correct; incomplete legacy session metadata
+  no longer interrupts otherwise valid context reads.
+
+- Avoid rewriting an already committed BM25/vector snapshot for unchanged or
+  overlapping flush requests. Native capture still requires successful storage,
+  failed saves remain retryable, and intervening changes are persisted in order.
+  Reindexing unchanged observations preserves snapshot and search tie order.
+  Previous-shard cleanup stays sequential with one audit containing every target
+  and deletion outcome; persisted formats and canonical data are unchanged.
+
+- Reuse graph traversal adjacency across matching entities and yield between
+  traversals to reduce blocking during broad recall, while preserving candidate
+  scope, ordering and provenance. Treat incomplete graph snapshots as degraded
+  results. Label recalled decision excerpts with their source time and require
+  verification before treating historical claims as current facts.
+
+- Surface managed native-reconciliation and known graph-extraction problems in
+  the existing health/liveness diagnostics and Codex hook warnings. Retain
+  discovery issues across partial passes, distinguish ordinary Qwen yield from
+  extraction errors, and keep capture failures visible without blocking the
+  user's Codex work. A recent successful batch never claims whole-corpus or
+  graph completion. Repeated unchanged diagnostic warnings are suppressed within
+  the worker lifetime; status/issue-count changes can notify again. Ordinary
+  health checks do not consume notifications, and no second queue or data store
+  is created. A notification attempt does not prove human receipt.
+
 ## 0.1.0-preview.8 — 2026-09-12
 
 - Preserve forward and bootstrap-backfill progress when explicitly extracting

@@ -18,11 +18,9 @@ import {
   renderPinnedContext,
 } from "./slots.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
-import {
-  isExcludedCodexAmbientSession,
-  sanitizeCodexAmbientObservation,
-} from "./observation-visibility.js";
+import { isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation } from "./observation-visibility.js";
 import { estimateTextTokens } from "../token-estimate.js";
+import { readArchiveVisibility } from "./archive.js";
 
 function escapeXmlAttr(s: string): string {
   return s
@@ -55,6 +53,7 @@ export function registerContextFunction(
   const readContext: ContextReader = async (data) => {
       const budget = data.budget || tokenBudget;
       const blocks: ContextBlock[] = [];
+      const archived = await readArchiveVisibility(kv);
 
       // Cross-agent isolation for the injected-context path. Mirrors the
       // filter mem::search / mem::smart-search already apply so /context
@@ -143,7 +142,7 @@ export function registerContextFunction(
       // 10 to keep the block bounded since the outer token-budget loop
       // below will drop the whole block if it doesn't fit. #457.
       const relevantLessons = lessons
-        .filter((l) => !l.deleted && (!l.project || l.project === data.project))
+        .filter((l) => !l.deleted && !archived({ kind: "lesson", id: l.id }) && (!l.project || l.project === data.project))
         .sort((a, b) => {
           const scoreA = (a.project === data.project ? 1.5 : 1) * a.confidence;
           const scoreB = (b.project === data.project ? 1.5 : 1) * b.confidence;
@@ -176,22 +175,18 @@ export function registerContextFunction(
 
       const allSessions = await kv.list<Session>(KV.sessions);
       const sessions = allSessions
-        .filter(
-          (s) =>
-            !isExcludedCodexAmbientSession(s) &&
-            s.project === data.project &&
-            s.id !== data.sessionId &&
-            (filterAgentId === undefined || s.agentId === filterAgentId),
-        )
-        .sort(
-          (a, b) =>
-            new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
-        )
+        .filter(s => s && typeof s.id === "string" && !!s.id.trim()
+          && typeof s.project === "string" && !!s.project.trim())
+        .filter(s => !isExcludedCodexAmbientSession(s)
+          && s.project === data.project && s.id !== data.sessionId
+          && (filterAgentId === undefined || s.agentId === filterAgentId)
+          && !archived({ kind: "session", id: s.id }))
+        .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
         .slice(0, 10);
 
       const summariesPerSession = await Promise.all(
         sessions.map((s) =>
-          kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
+          archived.hasArchivedObservations(s.id) ? Promise.resolve(null) : kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
         ),
       );
 
@@ -226,7 +221,7 @@ export function registerContextFunction(
           .map((observation) => sanitizeCodexAmbientObservation(observation))
           .filter(
             (observation): observation is CompressedObservation =>
-              observation !== null && !!observation.title && observation.importance >= 5,
+              observation !== null && !archived({ kind: "observation", id: observation.id, sessionId: sessions[i].id }) && !!observation.title && observation.importance >= 5,
           );
 
         if (important.length > 0) {

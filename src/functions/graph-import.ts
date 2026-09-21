@@ -6,6 +6,7 @@ import type { GraphEdge, GraphEdgeType, GraphNode, GraphNodeType } from "../type
 import { generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { persistGraphDelta } from "./graph.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
 import { recordAudit } from "./audit.js";
 import { logger } from "../logger.js";
 
@@ -220,12 +221,12 @@ export function registerGraphImportFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         const parsed = parseGraphifyGraph(await readFile(path, "utf-8"));
-        const { newNodeCount, newEdgeCount } = await persistGraphDelta(
+        const { newNodeCount, newEdgeCount } = await withKeyedLock("mem:graph-write", () => persistGraphDelta(
           kv,
           parsed.nodes,
           parsed.edges,
           [],
-        );
+        ));
 
         await recordAudit(kv, "import", "mem::graph::import-graphify", [], {
           path,

@@ -1,0 +1,806 @@
+diff --git a/engine/src/builtins/kv.rs b/engine/src/builtins/kv.rs
+index 637eec3ca08373a6983505b05816839a40ea2e43..7359aa3620d6e71d3a7600f694417c367cdc8a77 100644
+--- a/engine/src/builtins/kv.rs
++++ b/engine/src/builtins/kv.rs
+@@ -7,7 +7,7 @@
+ use std::{
+     collections::HashMap,
+     ffi::OsStr,
+-    io::ErrorKind,
++    io::{ErrorKind, Write},
+     path::{Path, PathBuf},
+     sync::Arc,
+ };
+@@ -21,10 +21,67 @@ use iii_sdk::{
+ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
++use tokio::io::AsyncWriteExt;
+ use tokio::sync::RwLock;
+ 
++use crate::workers::state::structs::{
++    STATE_LIST_PAGE_MAX_JSON_BYTES, StateListPageEntry, StateListPageInput, StateListPageResult,
++};
++
+ const KEY_FILE_EXTENSION: &str = "bin";
+ 
++#[derive(Serialize)]
++struct BorrowedStateListPageEntry<'a> {
++    key: &'a str,
++    value: &'a Value,
++}
++
++#[derive(Serialize)]
++struct BorrowedStateListPageResult<'a> {
++    entries: &'a [StateListPageEntry],
++    total: usize,
++    next_offset: Option<usize>,
++}
++
++struct JsonByteCounter {
++    limit: usize,
++    bytes: usize,
++    exceeded: bool,
++}
++
++impl Write for JsonByteCounter {
++    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
++        if buffer.len() > self.limit.saturating_sub(self.bytes) {
++            self.exceeded = true;
++            return Err(std::io::Error::new(
++                ErrorKind::InvalidData,
++                "serialized JSON exceeds the byte limit",
++            ));
++        }
++
++        self.bytes += buffer.len();
++        Ok(buffer.len())
++    }
++
++    fn flush(&mut self) -> std::io::Result<()> {
++        Ok(())
++    }
++}
++
++fn measure_json_bytes<T: Serialize>(value: &T, limit: usize) -> anyhow::Result<Option<usize>> {
++    let mut counter = JsonByteCounter {
++        limit,
++        bytes: 0,
++        exceeded: false,
++    };
++
++    match serde_json::to_writer(&mut counter, value) {
++        Ok(()) => Ok(Some(counter.bytes)),
++        Err(_) if counter.exceeded => Ok(None),
++        Err(error) => Err(error.into()),
++    }
++}
++
+ #[derive(Archive, RkyvSerialize, RkyvDeserialize)]
+ struct KeyStorage(String);
+ 
+@@ -154,7 +211,10 @@ async fn persist_index_to_disk(
+     let json = serde_json::to_string(value)?;
+     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&KeyStorage(json))?;
+ 
+-    tokio::fs::write(&temp_path, bytes).await?;
++    let mut file = tokio::fs::File::create(&temp_path).await?;
++    file.write_all(&bytes).await?;
++    file.sync_all().await?;
++    drop(file);
+     tokio::fs::rename(&temp_path, &path).await?;
+ 
+     Ok(())
+@@ -259,39 +319,44 @@ impl BuiltinKvStore {
+             tokio::time::interval(std::time::Duration::from_millis(polling_interval));
+         loop {
+             interval.tick().await;
+-            let batch = {
+-                let mut dirty = dirty.write().await;
+-                if dirty.is_empty() {
+-                    continue;
+-                }
+-                dirty.drain().collect::<Vec<_>>()
+-            };
++            if let Err(err) = Self::flush_pending(store.clone(), dirty.clone(), dir.clone()).await {
++                tracing::error!(error = ?err, "failed to persist state scopes");
++            }
++        }
++    }
+ 
+-            for (index, op) in batch {
+-                match op {
+-                    DirtyOp::Upsert => {
+-                        let value = {
+-                            let store = store.read().await;
+-                            store.get(&index).cloned()
+-                        };
+-                        if let Some(value) = value
+-                            && let Err(err) = persist_index_to_disk(&dir, &index, &value).await
+-                        {
+-                            tracing::error!(error = ?err, index = %index, "failed to persist index");
+-                            let mut dirty = dirty.write().await;
+-                            dirty.insert(index, DirtyOp::Upsert);
+-                        }
+-                    }
+-                    DirtyOp::Delete => {
+-                        if let Err(err) = delete_index_from_disk(&dir, &index).await {
+-                            tracing::error!(error = ?err, index = %index, "failed to delete index");
+-                            let mut dirty = dirty.write().await;
+-                            dirty.insert(index, DirtyOp::Delete);
+-                        }
++    async fn flush_pending(
++        store: Arc<RwLock<HashMap<String, IndexMap<String, Value>>>>,
++        dirty: Arc<RwLock<HashMap<String, DirtyOp>>>,
++        dir: PathBuf,
++    ) -> anyhow::Result<usize> {
++        // The owned task retains serialization if its RPC caller is cancelled.
++        // Mutations release the store lock before acquiring the dirty lock.
++        tokio::spawn(async move {
++            let mut pending = dirty.write().await;
++            let scopes: Vec<_> = pending.keys().cloned().collect();
++            for index in &scopes {
++                let value = store.read().await.get(index).cloned();
++                match value {
++                    Some(value) if !value.is_empty() => {
++                        persist_index_to_disk(&dir, index, &value).await?
+                     }
++                    _ => delete_index_from_disk(&dir, index).await?,
+                 }
++                // Errors and cancellation must not discard unpersisted dirty scopes.
++                pending.remove(index);
+             }
+-        }
++            Ok(scopes.len())
++        })
++        .await?
++    }
++
++    pub async fn flush(&self) -> anyhow::Result<usize> {
++        let dir = self
++            .file_store_dir
++            .clone()
++            .ok_or_else(|| anyhow::anyhow!("Durability flush requires file_based storage"))?;
++        Self::flush_pending(self.store.clone(), self.dirty.clone(), dir).await
+     }
+ 
+     pub async fn set(&self, index: String, key: String, data: Value) -> SetResult {
+@@ -574,6 +639,95 @@ impl BuiltinKvStore {
+             .map_or(vec![], |topic| topic.values().cloned().collect())
+     }
+ 
++    pub async fn list_page(
++        &self,
++        index: &str,
++        offset: usize,
++        limit: usize,
++    ) -> anyhow::Result<StateListPageResult> {
++        StateListPageInput::validate_limit(limit).map_err(anyhow::Error::msg)?;
++
++        let store = self.store.read().await;
++        let values = store.get(index);
++        let total = values.map_or(0, |values| values.len());
++        if offset > total {
++            anyhow::bail!("state::list_page offset {} exceeds total {}", offset, total);
++        }
++
++        let Some(values) = values else {
++            return Ok(StateListPageResult {
++                entries: Vec::new(),
++                total,
++                next_offset: None,
++            });
++        };
++
++        let mut entries = Vec::with_capacity(limit.min(total - offset));
++        let mut serialized_entries_bytes = 0usize;
++
++        for entry_offset in offset..total {
++            if entries.len() == limit {
++                break;
++            }
++
++            let (key, value) = values
++                .get_index(entry_offset)
++                .expect("entry offset is within the IndexMap length");
++            let separator_bytes = if entries.is_empty() { 0 } else { 1 };
++            let remaining_bytes = STATE_LIST_PAGE_MAX_JSON_BYTES
++                .saturating_sub(serialized_entries_bytes)
++                .saturating_sub(separator_bytes);
++            let entry_bytes =
++                measure_json_bytes(&BorrowedStateListPageEntry { key, value }, remaining_bytes)?;
++
++            let Some(entry_bytes) = entry_bytes else {
++                if entries.is_empty() {
++                    anyhow::bail!(
++                        "state::list_page entry at offset {} cannot fit within the {}-byte result limit",
++                        entry_offset,
++                        STATE_LIST_PAGE_MAX_JSON_BYTES
++                    );
++                }
++                break;
++            };
++
++            serialized_entries_bytes = serialized_entries_bytes
++                .saturating_add(separator_bytes)
++                .saturating_add(entry_bytes);
++            entries.push(StateListPageEntry {
++                key: key.clone(),
++                value: value.clone(),
++            });
++        }
++
++        loop {
++            let next_offset = offset + entries.len();
++            let next_offset = (next_offset < total).then_some(next_offset);
++            let page = BorrowedStateListPageResult {
++                entries: &entries,
++                total,
++                next_offset,
++            };
++
++            if measure_json_bytes(&page, STATE_LIST_PAGE_MAX_JSON_BYTES)?.is_some() {
++                return Ok(StateListPageResult {
++                    entries,
++                    total,
++                    next_offset,
++                });
++            }
++
++            entries.pop();
++            if entries.is_empty() && offset < total {
++                anyhow::bail!(
++                    "state::list_page entry at offset {} cannot fit within the {}-byte result limit",
++                    offset,
++                    STATE_LIST_PAGE_MAX_JSON_BYTES
++                );
++            }
++        }
++    }
++
+     pub async fn list_groups(&self) -> Vec<String> {
+         let store = self.store.read().await;
+         store.keys().cloned().collect()
+@@ -586,6 +740,142 @@ mod test {
+ 
+     use super::*;
+ 
++    fn flush_store(dir: &Path) -> BuiltinKvStore {
++        let mut store = BuiltinKvStore::new(Some(serde_json::json!({
++            "store_method": "file_based", "file_path": dir, "save_interval_ms": 60_000
++        })));
++        store.handler.take().unwrap().abort();
++        store
++    }
++
++    #[tokio::test]
++    async fn flush_persists_acknowledged_scopes_without_a_save_tick() {
++        let dir = tempfile::tempdir().unwrap();
++        let store = flush_store(dir.path());
++        store
++            .set(
++                "sources".into(),
++                "observation".into(),
++                serde_json::json!({"id": 1}),
++            )
++            .await;
++        store
++            .set(
++                "graph".into(),
++                "node".into(),
++                serde_json::json!({"source": 1}),
++            )
++            .await;
++        assert_eq!(store.flush().await.unwrap(), 2);
++        let restored = load_store_from_dir(dir.path());
++        assert_eq!(
++            restored["sources"]["observation"],
++            serde_json::json!({"id": 1})
++        );
++        assert_eq!(restored["graph"]["node"], serde_json::json!({"source": 1}));
++        assert_eq!(store.flush().await.unwrap(), 0);
++    }
++
++    #[tokio::test]
++    async fn flush_resolves_delete_then_reinsert_from_current_state() {
++        let dir = tempfile::tempdir().unwrap();
++        let store = flush_store(dir.path());
++        store
++            .set("scope".into(), "key".into(), Value::from("old"))
++            .await;
++        store
++            .set("retained".into(), "key".into(), Value::from("keep"))
++            .await;
++        store.flush().await.unwrap();
++        store.delete("scope".into(), "key".into()).await;
++        store
++            .set("scope".into(), "key".into(), Value::from("new"))
++            .await;
++        // Even a late dirty mark from an older delete must not remove newer data.
++        store
++            .dirty
++            .write()
++            .await
++            .insert("scope".into(), DirtyOp::Delete);
++        store.flush().await.unwrap();
++        assert_eq!(
++            load_store_from_dir(dir.path())["scope"]["key"],
++            Value::from("new")
++        );
++        store.delete("scope".into(), "key".into()).await;
++        store.flush().await.unwrap();
++        let restored = load_store_from_dir(dir.path());
++        assert!(!restored.contains_key("scope"));
++        assert_eq!(restored["retained"]["key"], Value::from("keep"));
++    }
++
++    #[tokio::test]
++    async fn flush_reports_disk_failure_and_retains_retry_work() {
++        let dir = tempfile::tempdir().unwrap();
++        let store = flush_store(dir.path());
++        store
++            .set("scope".into(), "key".into(), Value::from("original"))
++            .await;
++        store.flush().await.unwrap();
++        let blocked = dir.path().join("scope.bin.tmp");
++        std::fs::create_dir(&blocked).unwrap();
++        store
++            .set("scope".into(), "key".into(), Value::from("updated"))
++            .await;
++        assert!(store.flush().await.is_err());
++        assert!(store.dirty.read().await.contains_key("scope"));
++        assert_eq!(
++            load_store_from_dir(dir.path())["scope"]["key"],
++            Value::from("original")
++        );
++        std::fs::remove_dir(blocked).unwrap();
++        store.flush().await.unwrap();
++        assert_eq!(
++            load_store_from_dir(dir.path())["scope"]["key"],
++            Value::from("updated")
++        );
++    }
++
++    #[tokio::test]
++    async fn flush_caller_cancellation_does_not_cancel_serialized_persistence() {
++        let dir = tempfile::tempdir().unwrap();
++        let store = flush_store(dir.path());
++        store
++            .set("scope".into(), "key".into(), Value::from(1))
++            .await;
++        let pending = store.dirty.write().await;
++        assert!(
++            tokio::time::timeout(std::time::Duration::from_millis(10), store.flush())
++                .await
++                .is_err()
++        );
++        drop(pending);
++        tokio::time::timeout(std::time::Duration::from_secs(2), async {
++            while !dir.path().join("scope.bin").is_file() {
++                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
++            }
++        })
++        .await
++        .unwrap();
++        assert_eq!(
++            load_store_from_dir(dir.path())["scope"]["key"],
++            Value::from(1)
++        );
++        store
++            .set("scope".into(), "key".into(), Value::from(2))
++            .await;
++        store.flush().await.unwrap();
++        assert_eq!(
++            load_store_from_dir(dir.path())["scope"]["key"],
++            Value::from(2)
++        );
++    }
++
++    #[tokio::test]
++    async fn flush_rejects_in_memory_durability_claim() {
++        assert!(BuiltinKvStore::new(None).flush().await.is_err());
++    }
++
+     fn temp_store_dir() -> PathBuf {
+         let dir = std::env::temp_dir().join(format!("kv_store_{}", uuid::Uuid::new_v4()));
+         std::fs::create_dir_all(&dir).unwrap();
+@@ -1307,6 +1597,114 @@ mod test {
+         assert_eq!(groups, vec!["idx1", "idx2"]);
+     }
+ 
++    #[tokio::test]
++    async fn list_page_preserves_native_keys_and_insertion_order_across_pages() {
++        let store = BuiltinKvStore::new(None);
++        for (key, value) in [
++            ("z-native-key", serde_json::json!({"id": "first-value-id"})),
++            ("a-native-key", serde_json::json!({"id": "second-value-id"})),
++            (
++                "middle-native-key",
++                serde_json::json!({"id": "third-value-id"}),
++            ),
++        ] {
++            store.set("scope".into(), key.into(), value).await;
++        }
++
++        let mut keys = Vec::new();
++        let mut next_offset = Some(0);
++        while let Some(offset) = next_offset {
++            let page = store.list_page("scope", offset, 2).await.unwrap();
++            assert_eq!(page.total, 3);
++            keys.extend(page.entries.into_iter().map(|entry| entry.key));
++            next_offset = page.next_offset;
++        }
++
++        assert_eq!(
++            keys,
++            vec!["z-native-key", "a-native-key", "middle-native-key"]
++        );
++    }
++
++    #[tokio::test]
++    async fn list_page_accounts_for_multibyte_and_escaped_json_at_page_boundaries() {
++        let store = BuiltinKvStore::new(None);
++        let escaped_prefix = "\"".repeat(110_000);
++        let multibyte_value = "雪".repeat(250_000);
++        for suffix in ["first", "second"] {
++            store
++                .set(
++                    "large-scope".into(),
++                    format!("{escaped_prefix}{suffix}"),
++                    Value::String(multibyte_value.clone()),
++                )
++                .await;
++        }
++
++        let first = store.list_page("large-scope", 0, 2).await.unwrap();
++        let first_json = serde_json::to_vec(&first).unwrap();
++        assert_eq!(first.entries.len(), 1);
++        assert_eq!(first.total, 2);
++        assert_eq!(first.next_offset, Some(1));
++        assert!(first_json.len() > 900_000);
++        assert!(first_json.len() <= STATE_LIST_PAGE_MAX_JSON_BYTES);
++
++        let second = store.list_page("large-scope", 1, 2).await.unwrap();
++        let second_json = serde_json::to_vec(&second).unwrap();
++        assert_eq!(second.entries.len(), 1);
++        assert_eq!(second.next_offset, None);
++        assert!(second_json.len() <= STATE_LIST_PAGE_MAX_JSON_BYTES);
++    }
++
++    #[tokio::test]
++    async fn list_page_rejects_oversized_single_entries_and_invalid_offsets() {
++        let store = BuiltinKvStore::new(None);
++        store
++            .set("scope".into(), "only-key".into(), Value::from(1))
++            .await;
++
++        let oversized = "\u{0001}".repeat(180_000);
++        store
++            .set(
++                "oversized-scope".into(),
++                "large-key".into(),
++                Value::String(oversized),
++            )
++            .await;
++        let error = store
++            .list_page("oversized-scope", 0, 128)
++            .await
++            .unwrap_err();
++        assert!(
++            error
++                .to_string()
++                .contains("cannot fit within the 1048576-byte result limit")
++        );
++
++        assert!(store.list_page("scope", 0, 0).await.is_err());
++        assert!(store.list_page("scope", 0, 257).await.is_err());
++        assert!(store.list_page("scope", 2, 1).await.is_err());
++        assert!(store.list_page("missing-scope", 1, 1).await.is_err());
++    }
++
++    #[tokio::test]
++    async fn list_page_returns_empty_terminal_pages_for_missing_scope_and_end_offset() {
++        let store = BuiltinKvStore::new(None);
++        store
++            .set("scope".into(), "key".into(), Value::from(1))
++            .await;
++
++        let missing = store.list_page("missing-scope", 0, 128).await.unwrap();
++        assert!(missing.entries.is_empty());
++        assert_eq!(missing.total, 0);
++        assert_eq!(missing.next_offset, None);
++
++        let end = store.list_page("scope", 1, 128).await.unwrap();
++        assert!(end.entries.is_empty());
++        assert_eq!(end.total, 1);
++        assert_eq!(end.next_offset, None);
++    }
++
+     #[test]
+     fn kv_lock_entry_is_expired() {
+         let entry = KvLockEntry {
+diff --git a/engine/src/workers/state/adapters/kv_store.rs b/engine/src/workers/state/adapters/kv_store.rs
+index 6ade7bb6f3bdb9608b60ec060cc3a24e14baa137..5f77234b5adbf9d1189f88e5f9a6dc5d478d9782 100644
+--- a/engine/src/workers/state/adapters/kv_store.rs
++++ b/engine/src/workers/state/adapters/kv_store.rs
+@@ -17,6 +17,7 @@ use crate::{
+     workers::state::{
+         adapters::StateAdapter,
+         registry::{StateAdapterFuture, StateAdapterRegistration},
++        structs::StateListPageResult,
+     },
+ };
+ 
+@@ -36,6 +37,10 @@ impl BuiltinKvStoreAdapter {
+ 
+ #[async_trait]
+ impl StateAdapter for BuiltinKvStoreAdapter {
++    async fn flush(&self) -> anyhow::Result<usize> {
++        self.storage.flush().await
++    }
++
+     async fn destroy(&self) -> anyhow::Result<()> {
+         Ok(())
+     }
+@@ -74,6 +79,15 @@ impl StateAdapter for BuiltinKvStoreAdapter {
+         Ok(self.storage.list(scope.to_string()).await)
+     }
+ 
++    async fn list_page(
++        &self,
++        scope: &str,
++        offset: usize,
++        limit: usize,
++    ) -> anyhow::Result<StateListPageResult> {
++        self.storage.list_page(scope, offset, limit).await
++    }
++
+     async fn list_groups(&self) -> anyhow::Result<Vec<String>> {
+         Ok(self.storage.list_groups().await)
+     }
+diff --git a/engine/src/workers/state/adapters/mod.rs b/engine/src/workers/state/adapters/mod.rs
+index d12ed5cfea33b7a32de41e7dea980f82a466ec54..dc976fc52b7c5c146751d34cccce2c681c3d3a32 100644
+--- a/engine/src/workers/state/adapters/mod.rs
++++ b/engine/src/workers/state/adapters/mod.rs
+@@ -8,12 +8,16 @@ pub mod bridge;
+ pub mod kv_store;
+ pub mod redis_adapter;
+ 
++use crate::workers::state::structs::StateListPageResult;
+ use async_trait::async_trait;
+ use iii_sdk::{UpdateOp, UpdateResult, types::SetResult};
+ use serde_json::Value;
+ 
+ #[async_trait]
+ pub trait StateAdapter: Send + Sync {
++    async fn flush(&self) -> anyhow::Result<usize> {
++        anyhow::bail!("This state adapter does not support a durability flush")
++    }
+     async fn set(&self, scope: &str, key: &str, value: Value) -> anyhow::Result<SetResult>;
+     async fn get(&self, scope: &str, key: &str) -> anyhow::Result<Option<Value>>;
+     async fn delete(&self, scope: &str, key: &str) -> anyhow::Result<()>;
+@@ -24,6 +28,14 @@ pub trait StateAdapter: Send + Sync {
+         ops: Vec<UpdateOp>,
+     ) -> anyhow::Result<UpdateResult>;
+     async fn list(&self, scope: &str) -> anyhow::Result<Vec<Value>>;
++    async fn list_page(
++        &self,
++        _scope: &str,
++        _offset: usize,
++        _limit: usize,
++    ) -> anyhow::Result<StateListPageResult> {
++        anyhow::bail!("This state adapter does not support bounded list_page")
++    }
+     async fn list_groups(&self) -> anyhow::Result<Vec<String>>;
+     async fn destroy(&self) -> anyhow::Result<()>;
+ }
+diff --git a/engine/src/workers/state/mod.rs b/engine/src/workers/state/mod.rs
+index 5cf26c72f3df1286e5061c8a17a3276d9d8ced17..b18a3e40f8ccc0294cc274b6e498282bf8a2d5fb 100644
+--- a/engine/src/workers/state/mod.rs
++++ b/engine/src/workers/state/mod.rs
+@@ -10,7 +10,7 @@ mod config;
+ mod state;
+ 
+ pub mod registry;
+-mod structs;
++pub(crate) mod structs;
+ mod trigger;
+ 
+ pub use self::state::StateWorker;
+diff --git a/engine/src/workers/state/state.rs b/engine/src/workers/state/state.rs
+index c66bb2d772d44747d0c31800c6de66bf99bb8489..6083dfea81e1e1598bc4157402d4842c63ff5fbb 100644
+--- a/engine/src/workers/state/state.rs
++++ b/engine/src/workers/state/state.rs
+@@ -28,8 +28,8 @@ use crate::{
+             config::StateModuleConfig,
+             structs::{
+                 StateDeleteInput, StateEventData, StateEventType, StateGetGroupInput,
+-                StateGetInput, StateListGroupsInput, StateListGroupsResult, StateSetInput,
+-                StateUpdateInput,
++                StateGetInput, StateListGroupsInput, StateListGroupsResult, StateListPageInput,
++                StateListPageResult, StateSetInput, StateUpdateInput,
+             },
+             trigger::{StateTrigger, StateTriggers, TRIGGER_TYPE},
+         },
+@@ -236,6 +236,23 @@ impl StateWorker {
+ 
+ #[service(name = "state")]
+ impl StateWorker {
++    #[function(
++        id = "state::flush",
++        description = "Persist acknowledged state writes to the configured file store"
++    )]
++    pub async fn flush(&self, _input: Value) -> FunctionResult<Value, ErrorBody> {
++        match self.adapter.flush().await {
++            Ok(scopes) => FunctionResult::Success(serde_json::json!({
++                "durability": "file-flush-v1", "flushedScopes": scopes
++            })),
++            Err(e) => FunctionResult::Failure(ErrorBody {
++                message: format!("Failed to flush state: {}", e),
++                code: "FLUSH_ERROR".to_string(),
++                stacktrace: None,
++            }),
++        }
++    }
++
+     #[function(id = "state::set", description = "Set a value in state")]
+     pub async fn set(&self, input: StateSetInput) -> FunctionResult<SetResult, ErrorBody> {
+         crate::workers::telemetry::collector::track_state_set();
+@@ -380,6 +397,33 @@ impl StateWorker {
+         }
+     }
+ 
++    #[function(id = "state::list_page", description = "Get a bounded page from state")]
++    pub async fn list_page(
++        &self,
++        input: StateListPageInput,
++    ) -> FunctionResult<StateListPageResult, ErrorBody> {
++        if let Err(message) = StateListPageInput::validate_limit(input.limit) {
++            return FunctionResult::Failure(ErrorBody {
++                message: message.to_string(),
++                code: "LIST_PAGE_ERROR".to_string(),
++                stacktrace: None,
++            });
++        }
++
++        match self
++            .adapter
++            .list_page(&input.scope, input.offset, input.limit)
++            .await
++        {
++            Ok(page) => FunctionResult::Success(page),
++            Err(e) => FunctionResult::Failure(ErrorBody {
++                message: format!("Failed to list state page: {}", e),
++                code: "LIST_PAGE_ERROR".to_string(),
++                stacktrace: None,
++            }),
++        }
++    }
++
+     #[function(id = "state::list_groups", description = "List all state groups")]
+     pub async fn list_groups(
+         &self,
+@@ -723,6 +767,49 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test]
++    async fn test_list_page_rejects_invalid_limits() {
++        let (_engine, module) = setup();
++
++        for limit in [0, 257] {
++            let result = module
++                .list_page(StateListPageInput {
++                    scope: "scope".to_string(),
++                    offset: 0,
++                    limit,
++                })
++                .await;
++            match result {
++                FunctionResult::Failure(error) => {
++                    assert_eq!(error.code, "LIST_PAGE_ERROR");
++                    assert!(error.message.contains("limit"));
++                }
++                _ => panic!("expected invalid page limit failure"),
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn test_list_page_fails_when_adapter_does_not_support_paging() {
++        let adapter = Arc::new(FakeStateAdapter::default());
++        let (_engine, module) = setup_with_adapter(adapter);
++
++        let result = module
++            .list_page(StateListPageInput {
++                scope: "scope".to_string(),
++                offset: 0,
++                limit: 1,
++            })
++            .await;
++        match result {
++            FunctionResult::Failure(error) => {
++                assert_eq!(error.code, "LIST_PAGE_ERROR");
++                assert!(error.message.contains("does not support bounded list_page"));
++            }
++            _ => panic!("expected unsupported paging failure"),
++        }
++    }
++
+     #[tokio::test]
+     async fn test_list_groups() {
+         let (_engine, module) = setup();
+diff --git a/engine/src/workers/state/structs.rs b/engine/src/workers/state/structs.rs
+index 3a65ed1227b40217d49b4380067254eb52d39e1d..729573cda05a6f51dca4b4263cc617977c8a7467 100644
+--- a/engine/src/workers/state/structs.rs
++++ b/engine/src/workers/state/structs.rs
+@@ -41,6 +41,48 @@ pub struct StateGetGroupInput {
+     pub scope: String,
+ }
+ 
++pub const STATE_LIST_PAGE_DEFAULT_LIMIT: usize = 128;
++pub const STATE_LIST_PAGE_MAX_LIMIT: usize = 256;
++pub const STATE_LIST_PAGE_MAX_JSON_BYTES: usize = 1_048_576;
++
++fn default_state_list_page_limit() -> usize {
++    STATE_LIST_PAGE_DEFAULT_LIMIT
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
++pub struct StateListPageInput {
++    pub scope: String,
++    #[serde(default)]
++    pub offset: usize,
++    #[serde(default = "default_state_list_page_limit")]
++    pub limit: usize,
++}
++
++impl StateListPageInput {
++    pub fn validate_limit(limit: usize) -> Result<(), &'static str> {
++        if limit == 0 {
++            Err("state::list_page limit must be at least 1")
++        } else if limit > STATE_LIST_PAGE_MAX_LIMIT {
++            Err("state::list_page limit must not exceed 256")
++        } else {
++            Ok(())
++        }
++    }
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
++pub struct StateListPageEntry {
++    pub key: String,
++    pub value: Value,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
++pub struct StateListPageResult {
++    pub entries: Vec<StateListPageEntry>,
++    pub total: usize,
++    pub next_offset: Option<usize>,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+ pub struct StateListGroupsInput {}
+ 
+@@ -129,4 +171,20 @@ mod tests {
+         let _group: StateGetGroupInput = serde_json::from_value(json!({"scope": "s"})).unwrap();
+         let _list: StateListGroupsInput = serde_json::from_value(json!({})).unwrap();
+     }
++
++    #[test]
++    fn state_list_page_input_defaults_offset_and_limit() {
++        let input: StateListPageInput = serde_json::from_value(json!({"scope": "graph"})).unwrap();
++        assert_eq!(input.offset, 0);
++        assert_eq!(input.limit, STATE_LIST_PAGE_DEFAULT_LIMIT);
++
++        let explicit: StateListPageInput = serde_json::from_value(json!({
++            "scope": "graph",
++            "offset": 9,
++            "limit": 17
++        }))
++        .unwrap();
++        assert_eq!(explicit.offset, 9);
++        assert_eq!(explicit.limit, 17);
++    }
+ }

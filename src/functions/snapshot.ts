@@ -1,28 +1,26 @@
-import { registerObservationWriter } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import { execFile } from "node:child_process";
+import { constants as bufferConstants } from "node:buffer";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   SnapshotMeta,
-  Session,
-  Memory,
-  GraphNode,
-  AccessLogExport,
+  ExportData,
 } from "../types.js";
-import { KV, generateId } from "../state/schema.js";
+import { generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
-import { VERSION } from "../version.js";
+import { captureExportData, importExportData } from "./export-import.js";
 import { logger } from "../logger.js";
 
 const COMMIT_HASH_RE = /^[0-9a-f]{7,40}$/i;
+const MAX_SNAPSHOT_BYTES = bufferConstants.MAX_STRING_LENGTH;
 
 const execFileAsync = promisify(execFile);
 
-async function gitExec(dir: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd: dir });
+async function gitExec(dir: string, args: string[], maxBuffer?: number): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, { cwd: dir, ...(maxBuffer === undefined ? {} : { maxBuffer }) });
   return stdout.trim();
 }
 
@@ -41,6 +39,7 @@ export function registerSnapshotFunction(
   sdk: ISdk,
   kv: StateKV,
   snapshotDir: string,
+  onObservationsImported?: () => void,
 ): void {
   // Serialize snapshots: the periodic timer, REST (api::snapshot-create), and
   // MCP can all trigger this concurrently. Two runs writing state.json and
@@ -59,36 +58,13 @@ export function registerSnapshotFunction(
         await ensureGitRepo(snapshotDir);
         const ts = new Date().toISOString();
 
-        const sessions = await kv.list<Session>(KV.sessions);
-        const memories = await kv.list<Memory>(KV.memories);
-        const graphNodes = await kv.list<GraphNode>(KV.graphNodes);
-        const accessLogs = await kv
-          .list<AccessLogExport>(KV.accessLog)
-          .catch(() => [] as AccessLogExport[]);
-
-        const observations: Record<string, unknown[]> = {};
-        for (const session of sessions) {
-          const obs = await kv
-            .list(KV.observations(session.id))
-            .catch(() => []);
-          if (obs.length > 0) {
-            observations[session.id] = obs;
-          }
-        }
-
-        const state = {
-          version: VERSION,
-          timestamp: ts,
-          sessions,
-          memories,
-          graphNodes,
-          observations,
-          accessLogs,
-        };
+        const state = { ...await captureExportData(kv), timestamp: ts };
+        const serialized = JSON.stringify(state, null, 2);
+        if (Buffer.byteLength(serialized, "utf-8") > MAX_SNAPSHOT_BYTES) throw Error("Snapshot exceeds the supported JSON byte limit");
 
         writeFileSync(
           join(snapshotDir, "state.json"),
-          JSON.stringify(state, null, 2),
+          serialized,
           "utf-8",
         );
 
@@ -114,13 +90,13 @@ export function registerSnapshotFunction(
           createdAt: ts,
           message,
           stats: {
-            sessions: sessions.length,
-            observations: Object.values(observations).reduce(
+            sessions: state.sessions.length,
+            observations: Object.values(state.observations).reduce(
               (sum, arr) => sum + arr.length,
               0,
             ),
-            memories: memories.length,
-            graphNodes: graphNodes.length,
+            memories: state.memories.length,
+            graphNodes: state.graphNodes?.length ?? 0,
           },
         };
 
@@ -166,7 +142,7 @@ export function registerSnapshotFunction(
     }
   });
 
-  registerObservationWriter(sdk, "mem::snapshot-restore",
+  sdk.registerFunction("mem::snapshot-restore",
     async (data: { commitHash: string } | undefined) => {
       if (!data || typeof data.commitHash !== "string" || !data.commitHash.trim()) {
         return { success: false, error: "commitHash is required" };
@@ -176,50 +152,18 @@ export function registerSnapshotFunction(
       }
 
       try {
-        const content = await gitExec(snapshotDir, ["show", `${data.commitHash}:state.json`]);
-        const state = JSON.parse(content) as {
-          sessions?: Array<{ id: string } & Record<string, unknown>>;
-          memories?: Array<{ id: string } & Record<string, unknown>>;
-          graphNodes?: Array<{ id: string } & Record<string, unknown>>;
-          observations?: Record<
-            string,
-            Array<{ id: string } & Record<string, unknown>>
-          >;
-          accessLogs?: AccessLogExport[];
-        };
-
-        kv.assertRecoveryImportAllowed(state);
-
-        if (state.sessions) {
-          for (const session of state.sessions) {
-            await kv.set(KV.sessions, session.id, session);
-          }
+        const object = `${data.commitHash}:state.json`;
+        const sizeText = await gitExec(snapshotDir, ["cat-file", "-s", object]);
+        const size = Number(sizeText);
+        if (!/^\d+$/.test(sizeText) || !Number.isSafeInteger(size) || size < 1 || size > MAX_SNAPSHOT_BYTES) {
+          throw Error("Snapshot size is invalid or exceeds the supported JSON byte limit");
         }
-        if (state.memories) {
-          for (const memory of state.memories) {
-            await kv.set(KV.memories, memory.id, memory);
-          }
-        }
-        if (state.graphNodes) {
-          for (const node of state.graphNodes) {
-            await kv.set(KV.graphNodes, node.id, node);
-          }
-          if (state.graphNodes.length > 0) {
-            await kv.delete(KV.graphQueryManifest, "current");
-          }
-        }
-        if (state.observations) {
-          for (const [sessionId, obs] of Object.entries(state.observations)) {
-            for (const o of obs) {
-              await kv.set(KV.observations(sessionId), o.id, o);
-            }
-          }
-        }
-        if (state.accessLogs) {
-          for (const log of state.accessLogs) {
-            await kv.set(KV.accessLog, log.memoryId, log);
-          }
-        }
+        const content = await gitExec(snapshotDir, ["show", object], size + 1);
+        const state = JSON.parse(content) as Partial<ExportData>;
+        const result = await importExportData(kv, { strategy: "merge", exportData: {
+          sessions: [], memories: [], summaries: [], observations: {}, ...state,
+        } as ExportData }, onObservationsImported);
+        if (!result.success) return result;
 
         await recordAudit(kv, "import", "mem::snapshot-restore", [], {
           commitHash: data.commitHash,

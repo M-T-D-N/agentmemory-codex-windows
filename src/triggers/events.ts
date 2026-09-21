@@ -1,4 +1,5 @@
 import { TriggerAction, type ISdk } from "iii-sdk";
+import { readGraphCompletionContext } from "../functions/graph-observation-result.js";
 import type { CompressedObservation, HookPayload, Session } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -129,6 +130,8 @@ export function registerEventTriggers(
     // extraction is enabled, send only the unprocessed tail from the exact
     // official session so a per-turn Stop never replays the whole session.
     try {
+      const candidateSession = await kv.get<Session>(KV.sessions, data.sessionId);
+      const completion = candidateSession ? await readGraphCompletionContext(kv, candidateSession) : undefined;
       const graphDispatch = await withKeyedLock(
         sessionLifecycleLockKey(data.sessionId),
         async () => {
@@ -142,7 +145,7 @@ export function registerEventTriggers(
           let semanticBatch: ReturnType<typeof selectSemanticGraphBatch> = null;
           if (isGraphExtractionEnabled()) {
             const batchSize = Math.max(1, getGraphBatchSize());
-            semanticBatch = selectSemanticGraphBatch(session, compressed, batchSize);
+            semanticBatch = selectSemanticGraphBatch(session, compressed, batchSize, undefined, completion);
             selected = semanticBatch?.observations ?? [];
             if (selected.length > 0) {
               await kv.update(KV.sessions, data.sessionId, [

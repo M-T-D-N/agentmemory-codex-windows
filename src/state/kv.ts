@@ -1,6 +1,7 @@
 import type { ISdk } from 'iii-sdk'
 import { KV, OBSERVATION_REFERENCE_ROW_SCOPES } from './schema.js'
 import { inObservationRecovery, withObservationWrite } from './observation-write.js'
+import { hasActiveGraphWritePlan, permitsGraphPlanAccess, validateGraphWritePlan, waitForGraphWritePlan } from './graph-write-plan.js'
 
 type Row = Record<string, any>
 const OBS = 'mem:obs:'
@@ -11,11 +12,51 @@ export function isDeletedObservation(row: unknown): boolean {
   return !!row && typeof row === 'object' && (row as Row).emptyDeletion?.state === 'deleted'
 }
 
+export interface StatePage<T> {
+  entries: Array<{ key: string; value: T }>
+  total: number
+  next_offset: number | null
+}
+
 export class StateKV {
   private recoveryRows = new Map<string, Row>()
   private recoveryReady?: Promise<void>
   private recoveryUncertain = false
-  constructor(private sdk: ISdk) {}
+  private graphPlanReady?: Promise<void>
+  private graphPlanPending = false
+  constructor(private sdk: ISdk, private options: { requireDurability?: boolean } = {}) {}
+
+  async flush(): Promise<void> {
+    if (!this.options.requireDurability) return
+    try {
+      const result = await this.sdk.trigger<Record<string, never>, { durability: string; flushedScopes: number }>({ function_id: 'state::flush', payload: {} })
+      if (result?.durability !== 'file-flush-v1' || !Number.isSafeInteger(result.flushedScopes) || result.flushedScopes < 0) {
+        throw new Error('StateModule did not confirm a supported durability flush')
+      }
+    } catch (error) {
+      this.recoveryUncertain = true
+      throw error
+    }
+  }
+
+  requiresWriteRecovery(): boolean {
+    return this.recoveryUncertain || (this.graphPlanPending && !hasActiveGraphWritePlan(this))
+  }
+
+  private async guardGraphAccess(scope: string, key?: string, mutation = false): Promise<void> {
+    this.graphPlanReady ??= (async () => {
+      const pending = await this.get(KV.graphWritePlan, 'current')
+      if (pending) { validateGraphWritePlan(pending); this.graphPlanPending = true }
+    })().catch(error => { this.recoveryUncertain = true; throw error })
+    await this.graphPlanReady
+    if (scope === KV.graphWritePlan && mutation && !permitsGraphPlanAccess(this, scope, key, true)) {
+      throw new Error('Graph write intent requires the official recovery lifecycle')
+    }
+    if (this.graphPlanPending && !permitsGraphPlanAccess(this, scope, key, mutation)) {
+      await waitForGraphWritePlan(this)
+      if (this.graphPlanPending) throw new Error('Graph write recovery is pending; canonical writes and graph reads remain unavailable')
+    }
+  }
 
   async initializeObservationRecovery(): Promise<void> {
     this.recoveryReady ??= (async () => {
@@ -76,6 +117,7 @@ export class StateKV {
 
   private async guardSet(scope: string, key: string, value: unknown): Promise<unknown> {
     await this.initializeObservationRecovery()
+    await this.guardGraphAccess(scope, key, true)
     if (scope.startsWith(OBS)) {
       if (this.recoveryRows.has(key) || (value as Row)?.emptyDeletion !== undefined) {
         throw new Error('Protected observation requires the empty observation lifecycle')
@@ -99,15 +141,19 @@ export class StateKV {
   }
 
   async get<T = unknown>(scope: string, key: string, options?: { includeDeleted?: boolean }): Promise<T | null> {
+    if (scope.startsWith('mem:graph:') && scope !== KV.graphWritePlan) await this.guardGraphAccess(scope, key)
     const row = await this.sdk.trigger<{ scope: string; key: string }, T | null>({ function_id: 'state::get', payload: { scope, key } })
-    return scope.startsWith(OBS) && !options?.includeDeleted && isDeletedObservation(row) ? null : row
+    return scope.startsWith(OBS) && !options?.includeDeleted && isDeletedObservation(row) ? null : row ?? null
   }
 
   private async mutate<T>(functionId: string, payload: { scope: string; [key: string]: unknown }): Promise<T> {
     try {
-      return await this.sdk.trigger<any, T>({ function_id: functionId, payload })
+      if (payload.scope === KV.graphWritePlan && functionId === 'state::delete') await this.flush()
+      const result = await this.sdk.trigger<any, T>({ function_id: functionId, payload })
+      if (payload.scope === KV.graphWritePlan || !permitsGraphPlanAccess(this, payload.scope, payload.key as string, true)) await this.flush()
+      return result
     } catch (error) {
-      if (payload.scope === SESSIONS || payload.scope.startsWith(OBS) || payload.scope.startsWith('mem:enriched:') || referenceScopes.has(payload.scope)) {
+      if (payload.scope === SESSIONS || payload.scope.startsWith(OBS) || payload.scope.startsWith('mem:enriched:') || payload.scope.startsWith('mem:graph:') || referenceScopes.has(payload.scope)) {
         this.recoveryUncertain = true
       }
       throw error
@@ -117,6 +163,7 @@ export class StateKV {
   async set<T = unknown>(scope: string, key: string, value: T): Promise<T> {
     return withObservationWrite(async () => {
       const guarded = await this.guardSet(scope, key, value)
+      if (scope === KV.graphWritePlan) { validateGraphWritePlan(guarded); this.graphPlanPending = true }
       return this.mutate<T>('state::set', { scope, key, value: guarded })
     })
   }
@@ -124,6 +171,8 @@ export class StateKV {
   async update<T = unknown>(scope: string, key: string, ops: Array<{ type: string; path: string; value?: unknown }>): Promise<T> {
     return withObservationWrite(async () => {
       await this.initializeObservationRecovery()
+      await this.guardGraphAccess(scope, key, true)
+      if (scope === KV.graphWritePlan) throw new Error('Graph write intent cannot be patched')
       if (scope.startsWith(OBS) && this.recoveryRows.has(key)) throw new Error('Protected observation cannot be updated')
       if (scope === SESSIONS && this.hasObservationRecovery(key)) {
         if (ops.some(op => op.type !== 'set' || !/^[a-zA-Z][a-zA-Z0-9]*$/.test(op.path))) throw new Error('Protected session supports only top-level set updates')
@@ -146,23 +195,48 @@ export class StateKV {
   async delete(scope: string, key: string): Promise<void> {
     return withObservationWrite(async () => {
       await this.initializeObservationRecovery()
+      await this.guardGraphAccess(scope, key, true)
       if ((scope === SESSIONS && this.hasObservationRecovery(key)) || (scope.startsWith(OBS) && this.hasObservationRecovery(scope.slice(OBS.length)))) {
         throw new Error('Protected session or observation cannot be permanently deleted')
       }
-      return this.mutate<void>('state::delete', { scope, key })
+      await this.mutate<void>('state::delete', { scope, key })
+      if (scope === KV.graphWritePlan) this.graphPlanPending = false
     })
   }
 
   async writeEmptyObservation(row: Row): Promise<void> {
     if (!inObservationRecovery()) throw new Error('Exclusive observation recovery is required')
     await this.initializeObservationRecovery()
+    await this.guardGraphAccess(OBS + row.sessionId, row.id, true)
     try {
-      await this.sdk.trigger({ function_id: 'state::set', payload: { scope: OBS + row.sessionId, key: row.id, value: row } })
+      await this.mutate('state::set', { scope: OBS + row.sessionId, key: row.id, value: row })
       this.recoveryRows.set(row.id, row)
     } catch (error) {
       this.recoveryUncertain = true
       throw error
     }
+  }
+
+  // Managed releases pin an engine with both durable flush and bounded reads.
+  get usesManagedState(): boolean { return this.options.requireDurability === true }
+
+  async listPage<T = unknown>(scope: string, offset = 0, options?: { includeDeleted?: boolean }): Promise<StatePage<T>> {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid state page offset')
+    if (scope.startsWith('mem:graph:') && scope !== KV.graphWritePlan) await this.guardGraphAccess(scope)
+    const page = await this.sdk.trigger<{ scope: string; offset: number; limit: number }, StatePage<T>>({
+      function_id: 'state::list_page', payload: { scope, offset, limit: 128 },
+    })
+    const entries = page?.entries
+    if (!page || !Array.isArray(entries) || entries.length > 128 || !Number.isSafeInteger(page.total) || page.total < offset ||
+        offset + entries.length > page.total || entries.some(entry => !entry || typeof entry.key !== 'string' || !Object.hasOwn(entry, 'value')) ||
+        new Set(entries.map(entry => entry.key)).size !== entries.length ||
+        (page.next_offset === null ? offset + entries.length !== page.total :
+          entries.length === 0 || page.next_offset !== offset + entries.length || page.next_offset >= page.total)) {
+      throw new Error('Invalid state::list_page response')
+    }
+    if (Buffer.byteLength(JSON.stringify(page), 'utf8') > 1_048_576) throw new Error('StateModule page exceeds its byte limit')
+    if (scope.startsWith(OBS) && !options?.includeDeleted) return { ...page, entries: entries.filter(entry => !isDeletedObservation(entry.value)) }
+    return page
   }
 
   async listGroups(): Promise<string[]> {
@@ -172,6 +246,7 @@ export class StateKV {
   }
 
   async list<T = unknown>(scope: string, options?: { includeDeleted?: boolean }): Promise<T[]> {
+    if (scope.startsWith('mem:graph:') && scope !== KV.graphWritePlan) await this.guardGraphAccess(scope)
     const rows = await this.sdk.trigger<{ scope: string }, T[]>({ function_id: 'state::list', payload: { scope } })
     return scope.startsWith(OBS) && !options?.includeDeleted ? rows.filter(row => !isDeletedObservation(row)) : rows
   }

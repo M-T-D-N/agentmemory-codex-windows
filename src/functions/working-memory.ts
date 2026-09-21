@@ -6,6 +6,7 @@ import { recordAudit } from "./audit.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { logger } from "../logger.js";
 import { estimateTextTokens } from "../token-estimate.js";
+import { readArchiveVisibility } from "./archive.js";
 
 const CORE_SCOPE = "mem:core-memory";
 
@@ -97,6 +98,7 @@ export function registerWorkingMemoryFunctions(
   sdk.registerFunction("mem::working-context", 
     async (data: { budget?: number }) => {
       const budget = data.budget || tokenBudget;
+      const archived = await readArchiveVisibility(kv);
       const now = Date.now();
       let usedTokens = 0;
 
@@ -131,7 +133,7 @@ export function registerWorkingMemoryFunctions(
 
       const memories = await kv.list<Memory>(KV.memories);
       const active = memories
-        .filter((m) => m.isLatest !== false)
+        .filter((m) => m.isLatest !== false && !archived({ kind: "memory", id: m.id }))
         .sort((a, b) => {
           const strengthDiff = b.strength - a.strength;
           if (Math.abs(strengthDiff) > 0.2) return strengthDiff;
