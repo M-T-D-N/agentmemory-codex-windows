@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +55,7 @@ function runInstaller(release, root, workspace, extra = []) {
 }
 
 async function fixture(dataContractVersion) {
-  const dir = await mkdtemp(path.join(tmpdir(), 'am-fresh-test-'));
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), 'am-fresh-test-')));
   const release = path.join(dir, 'release'), workspace = path.join(dir, 'workspace'), root = path.join(dir, 'install space');
   await mkdir(path.join(release, 'payload/config'), { recursive: true });
   await mkdir(workspace);
