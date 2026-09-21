@@ -1187,6 +1187,12 @@ existing CPU metric. This prevents normal multicore processing from reporting
 health 503 solely because process CPU time exceeds one wall-clock core; event-loop,
 connection and resource-pressure checks still apply.
 
+Managed memory severity uses `memory.heapSizeLimit`, the configured V8 heap
+capacity, as the denominator for the existing heap-pressure percentages. The
+snapshot preserves `memory.heapUsed`, `memory.heapTotal`, and RSS; portable
+profiles continue to use `heapTotal` as their denominator. The RSS floor remains
+part of memory warning and critical decisions.
+
 #### Existing supervisor
 
 The Windows daemon checks the database-free liveness and MCP metadata routes

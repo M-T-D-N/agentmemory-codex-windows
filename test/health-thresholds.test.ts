@@ -49,6 +49,59 @@ describe("evaluateHealth memory severity", () => {
     expect(alerts.some((a) => a.startsWith("memory_critical_"))).toBe(true);
   });
 
+  it("uses the configured heap capacity when managed metadata is present", () => {
+    const s = snap({
+      memory: {
+        heapUsed: 960 * 1024 * 1024,
+        heapTotal: 980 * 1024 * 1024,
+        heapSizeLimit: 1000 * 1024 * 1024,
+        rss: 1100 * 1024 * 1024,
+        external: 0,
+      },
+    });
+    const { status, alerts } = evaluateHealth(s);
+    expect(status).toBe("critical");
+    expect(alerts.some((a) => a.startsWith("memory_critical_96%_"))).toBe(true);
+  });
+
+  it("does not treat a nearly full committed heap as critical when managed capacity is larger", () => {
+    const s = snap({
+      memory: {
+        heapUsed: 970 * 1024 * 1024,
+        heapTotal: 1000 * 1024 * 1024,
+        heapSizeLimit: 4 * 1024 * 1024 * 1024,
+        rss: 1100 * 1024 * 1024,
+        external: 0,
+      },
+    });
+    const { status, alerts, notes } = evaluateHealth(s);
+    expect(status).toBe("healthy");
+    expect(alerts.some((a) => a.startsWith("memory_critical_"))).toBe(false);
+    expect(alerts.some((a) => a.startsWith("memory_warn_"))).toBe(false);
+    expect(notes.some((note) => note.startsWith("memory_heap_tight_"))).toBe(false);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["zero", 0],
+    ["negative", -1],
+    ["NaN", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+  ])("falls back to heapTotal when the heap capacity is %s", (_label, heapSizeLimit) => {
+    const s = snap({
+      memory: {
+        heapUsed: 970 * 1024 * 1024,
+        heapTotal: 1000 * 1024 * 1024,
+        heapSizeLimit,
+        rss: 1100 * 1024 * 1024,
+        external: 0,
+      },
+    });
+    const { status, alerts } = evaluateHealth(s);
+    expect(status).toBe("critical");
+    expect(alerts.some((a) => a.startsWith("memory_critical_"))).toBe(true);
+  });
+
   it("records heap_tight in the warn band when RSS is below the floor", () => {
     const s = snap({
       memory: {

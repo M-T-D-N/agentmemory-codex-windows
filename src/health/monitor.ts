@@ -1,4 +1,5 @@
 import { availableParallelism } from "node:os";
+import { getHeapStatistics } from "node:v8";
 import type { ISdk } from "iii-sdk";
 import type { HealthSnapshot } from "../types.js";
 import type { StateKV } from "../state/kv.js";
@@ -24,6 +25,9 @@ export function registerHealthMonitor(
 
   async function collectHealth(): Promise<HealthSnapshot> {
     const mem = process.memoryUsage();
+    const heapSizeLimit = kv.usesManagedState
+      ? getHeapStatistics().heap_size_limit
+      : undefined;
     const currentCpu = process.cpuUsage();
     const now = Date.now();
     const uptime = process.uptime();
@@ -74,6 +78,7 @@ export function registerHealthMonitor(
       memory: {
         heapUsed: mem.heapUsed,
         heapTotal: mem.heapTotal,
+        ...(heapSizeLimit === undefined ? {} : { heapSizeLimit }),
         rss: mem.rss,
         external: mem.external,
       },

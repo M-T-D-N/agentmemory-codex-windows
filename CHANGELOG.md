@@ -22,6 +22,10 @@ The upstream AgentMemory release history remains in the
   core alone no longer rejects startup or MCP readiness on a multicore host;
   event-loop, connection and sustained capacity thresholds remain enforced.
 
+- Measure managed Windows memory pressure against the configured V8 heap
+  capacity while preserving the raw `heapUsed`, `heapTotal`, and RSS readings.
+  Portable profiles retain the existing committed-heap denominator.
+
 - Resume unfinished native capture sweeps through bounded serial batches instead
   of waiting one minute for every eight sessions. Stable source ordering prevents
   hook checks from postponing a partially read conversation. Progressing large

@@ -4,6 +4,7 @@ import { evaluateHealth } from "../src/health/thresholds.js";
 import type { HealthSnapshot } from "../src/types.js";
 
 vi.mock("node:os", () => ({ availableParallelism: () => 4 }));
+vi.mock("node:v8", () => ({ getHeapStatistics: () => ({ heap_size_limit: 4096 }) }));
 afterEach(() => vi.restoreAllMocks());
 
 describe("CPU capacity in managed health checks", () => {
@@ -22,6 +23,7 @@ describe("CPU capacity in managed health checks", () => {
     try {
       const snapshot = await collected;
       expect(snapshot.cpu.percent).toBe(managed ? 32.5 : 130);
+      expect(snapshot.memory.heapSizeLimit).toBe(managed ? 4096 : undefined);
       expect(snapshot.cpu.corePercent).toBe(managed ? 130 : undefined);
       expect(snapshot.cpu.availableParallelism).toBe(managed ? 4 : undefined);
       expect(snapshot.alerts.some(alert => alert.startsWith("cpu_critical_"))).toBe(!managed);
