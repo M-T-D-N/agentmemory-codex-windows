@@ -2028,6 +2028,7 @@ export function registerMcpEndpoints(
                 payload: { query: taskDesc, limit: 10 },
               })
               .catch(() => ({ results: [] }));
+            const archived = await readArchiveVisibility(kv);
             const memories = await kv.list<Memory>(KV.memories);
             // #817: also filter the memory list. recall_context's
             // second source is the latest-memory feed, which leaks
@@ -2048,6 +2049,7 @@ export function registerMcpEndpoints(
                 ? []
                 : memories
                     .filter((m) => m.isLatest)
+                    .filter((m) => !archived({ kind: "memory", id: m.id }))
                     .filter(
                       (m) =>
                         activeAgentId === undefined ||

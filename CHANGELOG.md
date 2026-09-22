@@ -4,6 +4,12 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+- Exclude archived memories from the `recall_context` prompt before its
+  bounded latest-memory feed, while preserving live results and fail-closed
+  archive reads.
+
 ## 0.1.0-preview.9 — release candidate
 
 - Separate the engine's caller metadata from archive business inputs so real

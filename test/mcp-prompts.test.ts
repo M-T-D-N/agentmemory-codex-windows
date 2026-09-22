@@ -5,6 +5,8 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerMcpEndpoints } from "../src/mcp/server.js";
+import { changeArchiveState } from "../src/functions/archive.js";
+import { KV } from "../src/state/schema.js";
 import type { Session, SessionSummary, Memory } from "../src/types.js";
 
 function mockKV() {
@@ -122,6 +124,95 @@ describe("MCP Prompts", () => {
     expect(result.body.messages).toHaveLength(1);
     expect(result.body.messages[0].role).toBe("user");
     expect(result.body.messages[0].content.text).toContain("implement auth");
+  });
+
+  it("filters archived memories before the bounded recall_context feed", async () => {
+    sdk.overrideTrigger("mem::search", async () => ({ results: [] }));
+
+    const memories: Memory[] = [
+      {
+        id: "mem_archived",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        type: "pattern",
+        title: "Archived memory",
+        content: "Do not return this archived memory",
+        concepts: [],
+        files: [],
+        sessionIds: [],
+        strength: 5,
+        version: 1,
+        isLatest: true,
+        project: "project-a",
+      },
+      ...Array.from({ length: 5 }, (_, index) => ({
+        id: `mem_live_${index}`,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        type: "pattern" as const,
+        title: `Live memory ${index}`,
+        content: `Live memory content ${index}`,
+        concepts: [],
+        files: [],
+        sessionIds: [],
+        strength: 5,
+        version: 1,
+        isLatest: true,
+        project: "project-a",
+      })),
+    ];
+    for (const memory of memories) await kv.set(KV.memories, memory.id, memory);
+
+    const preview = await changeArchiveState(kv as never, {
+      project: "project-a",
+      target: { kind: "memory", id: "mem_archived" },
+      action: "archive",
+    });
+    await changeArchiveState(kv as never, {
+      project: "project-a",
+      target: { kind: "memory", id: "mem_archived" },
+      action: "archive",
+      dryRun: false,
+      expectedRevision: preview.expectedRevision,
+      expectedDigest: preview.expectedDigest,
+      reason: "Prompt archive visibility regression",
+    });
+
+    const fn = sdk.getFunction("mcp::prompts::get")!;
+    const result = (await fn(
+      makeReq({
+        name: "recall_context",
+        arguments: { task_description: "project memory" },
+      }),
+    )) as {
+      status_code: number;
+      body: { messages: Array<{ content: { text: string } }> };
+    };
+
+    expect(result.status_code).toBe(200);
+    const text = result.body.messages[0].content.text;
+    expect(text).not.toContain("mem_archived");
+    expect(text).not.toContain("Do not return this archived memory");
+    for (const memory of memories.slice(1)) expect(text).toContain(memory.id);
+  });
+
+  it("fails closed when recall_context cannot read archive visibility", async () => {
+    sdk.overrideTrigger("mem::search", async () => ({ results: [] }));
+    const originalList = kv.list;
+    kv.list = async <T>(scope: string) => {
+      if (scope === KV.archiveStates) throw new Error("archive state unavailable");
+      return originalList<T>(scope);
+    };
+
+    const fn = sdk.getFunction("mcp::prompts::get")!;
+    const result = await fn(
+      makeReq({
+        name: "recall_context",
+        arguments: { task_description: "project memory" },
+      }),
+    ) as { status_code: number; body: { error: string } };
+
+    expect(result).toEqual({ status_code: 500, body: { error: "Internal error" } });
   });
 
   it("session_handoff returns session data", async () => {
