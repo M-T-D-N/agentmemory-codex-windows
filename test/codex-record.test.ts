@@ -19,6 +19,31 @@ function harness() {
 }
 
 describe("canonical native Codex conversation records", () => {
+  it("captures a created task's final without promoting its delegation tool output", () => {
+    const parse = harness();
+    parse({ type: "session_meta", payload: { id: "session-a", source: "vscode", thread_source: "agent_created_thread" } });
+    parse(turn);
+    expect(parse({ type: "response_item", payload: { type: "function_call_output", name: "create_thread",
+      namespace: "codex_app", output: "<codex_delegation><input>Do the work</input></codex_delegation>" } }))
+      .toMatchObject({ status: "excluded" });
+    expect(parse(record("assistant", "final-1", "The requested work is complete", "final_answer")))
+      .toMatchObject({ status: "message", message: { kind: "assistant_final" } });
+  });
+  it.each(["user", "subagent", "guardian_review", undefined])("does not authorize a final from thread source %s alone", thread_source => {
+    const parse = harness();
+    parse({ type: "session_meta", payload: { id: "session-a", source: "vscode", thread_source } });
+    parse(turn);
+    expect(parse(record("assistant", "final-1", "Internal result", "final_answer")))
+      .toMatchObject({ status: "excluded", reason: "assistant_without_normal_user" });
+  });
+  it("still excludes internal title turns in a created task", () => {
+    const parse = harness();
+    parse({ type: "session_meta", payload: { id: "session-a", source: "vscode", thread_source: "agent_created_thread" } });
+    parse(turn);
+    parse(record("user", "title-prompt", "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt."));
+    expect(parse(record("assistant", "title-answer", "A short title", "final_answer")))
+      .toMatchObject({ status: "excluded", reason: "assistant_without_normal_user" });
+  });
   it("captures a request and its final after marked browser context without duplicating its display mirror", () => {
     const parse = harness(); parse(turn);
     const body = '\n<in-app-browser-context source="ambient-ui-state">' + "x".repeat(500) + '</in-app-browser-context>\n\n## My request:\nKeep identifiers\n';

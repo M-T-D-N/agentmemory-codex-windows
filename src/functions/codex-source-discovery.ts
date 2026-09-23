@@ -72,7 +72,9 @@ export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCa
     return { status: "reconcile_required" as const, reason: "indexed_source_identity_changed" };
   }
   if (first.issue) return { status: "unknown" as const, reason: first.issue.reason };
-  if (!first.messages.length) return { status: "pending" as const, reason: first.caughtUp ? "no_conversation_messages" : "first_message_not_yet_verified" };
+  if (!first.messages.length && !first.cursor.parser.normalSessionSeen) {
+    return { status: "pending" as const, reason: first.caughtUp ? "no_conversation_messages" : "first_message_not_yet_verified" };
+  }
   const discoveryCwd = existing?.cwd ?? first.source.cwd;
   const directory = await lstat(discoveryCwd).catch(error => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

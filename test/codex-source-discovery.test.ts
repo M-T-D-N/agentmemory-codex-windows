@@ -62,6 +62,26 @@ describe("source discovery without a prior Codex hook", () => {
       .toMatchObject({ inserted: 1, status: "caught_up" });
     expect(await kv.list(KV.observations(candidate.sessionId))).toHaveLength(1);
   });
+  it.each([false, true])("advances a created task past a tool-only first window (existing=%s)", async existing => {
+    candidate.threadSource = "agent_created_thread";
+    const prefix = { type: "response_item", payload: { type: "function_call_output", output: "x".repeat(16 * 1024 * 1024) } };
+    await writeSource([header({ thread_source: "agent_created_thread" }),
+      { type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } }, prefix, assistant]);
+    if (existing) await kv.set(KV.sessions, candidate.sessionId, { id: candidate.sessionId, project: "registered-project",
+      agentId: "codex-main", cwd, startedAt: stamp, updatedAt: stamp, status: "active", observationCount: 0 });
+    expect(await discoverCodexSession(kv as never, candidate, managed()))
+      .toMatchObject({ status: existing ? "initialized" : "created" });
+    const scope = { sessionId: candidate.sessionId, project: "registered-project" };
+    let inserted = 0;
+    for (let i = 0; i < 3; i++) {
+      const result = await captureCodexSourceWindow(kv as never, scope, managed());
+      inserted += result.inserted;
+      if (result.status === "caught_up") break;
+    }
+    expect(inserted).toBe(1);
+    expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations(candidate.sessionId))).toHaveLength(1);
+  });
   it("preserves cursor, observations and graph provenance across archive and restore with an absent worktree", async () => {
     await discoverCodexSession(kv as never, candidate, managed());
     const scope = { sessionId: candidate.sessionId, project: "registered-project" };

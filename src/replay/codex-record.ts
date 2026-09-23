@@ -99,8 +99,15 @@ export function parseCodexRecord(
       !Number.isSafeInteger(context.byteOffset) || context.byteOffset < 0) return unknown("invalid_source_location");
   const row = asRecord(value), payload = asRecord(row?.payload);
   if (!row || !payload) return unknown("invalid_record_envelope");
-  if (row.type === "session_meta") return context.ordinal === 1 && payload.id === context.sessionId
-    ? excluded("verified_session_header") : unknown("unexpected_session_header");
+  if (row.type === "session_meta") {
+    if (context.ordinal !== 1 || payload.id !== context.sessionId) return unknown("unexpected_session_header");
+    // Created tasks receive their initial request as a delegation tool result,
+    // rather than a user message. Keep that payload out of conversation text.
+    if (payload.thread_source === "agent_created_thread" && ["cli", "vscode"].includes(String(payload.source))) {
+      state.normalSessionSeen = true;
+    }
+    return excluded("verified_session_header");
+  }
   if (row.type === "turn_context") {
     if (!identity(payload.turn_id)) return unknown("missing_turn_identity");
     if (state.turnId === null) state.turnId = payload.turn_id;

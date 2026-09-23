@@ -14,6 +14,20 @@ const observation = (id = "legacy-a", timestamp = "2026-09-13T00:00:01Z", narrat
 });
 
 describe("canonical native-to-legacy observation correspondence", () => {
+  it("preserves a reviewed final when its exact native source becomes eligible", () => {
+    const native = { ...message("created-final", "2026-09-13T00:00:00Z", "Verified task result"), kind: "assistant_final" as const };
+    const row = { ...observation("reviewed-final", native.timestamp, native.text), title: "assistant_response", type: "other" as const,
+      codexSource: { version: 1 as const, key: native.key, nativeMessageId: native.nativeMessageId, kind: native.kind,
+        timestamp: native.timestamp, ordinal: native.ordinal, byteOffset: native.byteOffset, textDigest: codexTextDigest(native.text),
+        legacyExcludedReason: "assistant_without_normal_user" as const } };
+    const before = structuredClone(row);
+    expect(matchCodexMessages([native], [row], scope)[0]).toMatchObject({ action: "present", observationId: row.id });
+    expect(row).toEqual(before);
+    for (const changed of [{ ...native, text: native.text + " changed" }, { ...native, nativeMessageId: "other" },
+      { ...native, timestamp: "2026-09-13T00:01:00Z" }, { ...native, kind: "user" as const }]) {
+      expect(matchCodexMessages([changed], [row], scope)[0]?.action).toBe("blocked");
+    }
+  });
   it.each(["\nrequest body\n\n", "request body \n", " \tfirst\n  second\t\r\n", "\n" + "long request ".repeat(60) + "\n"])("reconciles only the complete boundary-stripped prompt or its exact legacy truncation: %j", text => {
     const native = message("boundary-prompt", "2026-09-13T00:00:00Z", text);
     const stripped = text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");

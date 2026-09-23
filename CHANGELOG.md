@@ -6,6 +6,10 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+- Capture final answers from verified agent-created Codex tasks whose initial
+  request arrives as a delegation tool result. Preserve internal-turn exclusion
+  and let these tasks advance beyond a tool-only first discovery window. Keep
+  prior reviewed-final provenance when the same exact source is now eligible.
 - Exclude archived memories from the `recall_context` prompt before its
   bounded latest-memory feed, while preserving live results and fail-closed
   archive reads.

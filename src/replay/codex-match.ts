@@ -245,8 +245,11 @@ function matchSingleCodexMessages(
     if (typeof candidate.narrative !== "string" || (codexTextDigest(candidate.narrative) !== messageDigest(message) && !repair)) { decisions.set(key, blocked("legacy_or_canonical_content_mismatch", candidate)); continue; }
     if (candidate.codexSource) {
       const source = candidate.codexSource;
+      const preservedEligibilityReview = source.legacyExcludedReason === "assistant_without_normal_user" &&
+        message.kind === "assistant_final" && message.legacyExcludedReason === undefined;
       if (source.version !== 1 || source.nativeMessageId !== message.nativeMessageId || source.kind !== message.kind || capturedKind(candidate) !== message.kind ||
-          source.timestamp !== message.timestamp || source.textDigest !== messageDigest(message) || source.legacyExcludedReason !== message.legacyExcludedReason ||
+          source.timestamp !== message.timestamp || source.textDigest !== messageDigest(message) ||
+          (source.legacyExcludedReason !== message.legacyExcludedReason && !preservedEligibilityReview) ||
           (source.retainedSourcePath !== undefined && retainedPath(message) !== undefined && source.retainedSourcePath !== retainedPath(message))) {
         decisions.set(key, blocked("canonical_source_provenance_mismatch", candidate)); continue;
       }
