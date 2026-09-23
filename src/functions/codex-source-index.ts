@@ -1,6 +1,7 @@
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
-import { canonicalCodexCwd, codexSourceRelativePath, rejectLinkedComponents } from "./codex-source-identity.js";
+import { isDeepStrictEqual } from "node:util";
+import { canonicalCodexCwd, codexSourceRelativePath, parseCodexSourceIdentity, rejectLinkedComponents, withReadOnlyCodexPhysicalSource } from "./codex-source-identity.js";
 
 export interface CodexThreadCandidate {
   status: "candidate";
@@ -12,6 +13,7 @@ export interface CodexThreadCandidate {
   createdAt: string;
   updatedAt: string;
   archived: boolean;
+  hasConversationEvidence?: boolean;
 }
 
 export type CodexThreadIndexEntry = CodexThreadCandidate | {
@@ -51,7 +53,30 @@ function classifyThread(row: Record<string, unknown>, sourceRoot: string): Codex
   catch { return unknown("invalid_thread_path"); }
   return { status: "candidate", sessionId, sourcePath, cwd, source: row.source,
     threadSource: row.thread_source as string | null, createdAt: new Date(row.created_at_ms).toISOString(),
-    updatedAt: new Date(row.updated_at_ms).toISOString(), archived: row.archived === 1 };
+    updatedAt: new Date(row.updated_at_ms).toISOString(), archived: row.archived === 1,
+    ...([0, 1].includes(row.has_conversation_evidence as number) ? { hasConversationEvidence: row.has_conversation_evidence === 1 } : {}) };
+}
+
+async function classifyIndexedThread(row: Record<string, unknown>, root: string): Promise<CodexThreadIndexEntry> {
+  const classified = classifyThread(row, root);
+  if (classified.status !== "unknown" || row.source !== "unknown" || row.cwd !== "" || row.thread_source !== null ||
+      ![0, 1].includes(row.archived as number) || !timestamp(row.created_at_ms) || !timestamp(row.updated_at_ms)) return classified;
+  try {
+    const relativePath = codexSourceRelativePath(root, row.rollout_path as string);
+    return await withReadOnlyCodexPhysicalSource(root, relativePath, classified.sessionId, async (source, file, headerBytes) => {
+      const bytes = Buffer.alloc(headerBytes);
+      const { bytesRead } = await file.read(bytes, 0, headerBytes, 0);
+      if (bytesRead !== headerBytes) throw Error("Source metadata changed while reading");
+      const header = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, ""));
+      if (!isDeepStrictEqual(parseCodexSourceIdentity(header, classified.sessionId, relativePath), source)) throw Error("Source metadata changed while reading");
+      const threadSource = header.payload?.thread_source;
+      if (["subagent", "guardian_review"].includes(threadSource)) return { sessionId: source.sessionId, status: "excluded", reason: "internal_thread_source" };
+      if (!["user", "agent_created_thread", "agent_forked_thread"].includes(threadSource)) return classified;
+      return { status: "candidate", sessionId: source.sessionId, sourcePath: source.relativePath,
+        cwd: canonicalCodexCwd(source.cwd), source: source.source, threadSource, createdAt: source.createdAt,
+        updatedAt: new Date(Math.max(Date.parse(source.createdAt), row.updated_at_ms as number)).toISOString(), archived: row.archived === 1 };
+    });
+  } catch { return classified; }
 }
 
 /** A bounded view of Codex's source index; candidates are not ownership or capture authorization. */
@@ -98,13 +123,16 @@ export async function readCodexThreadIndex(sourceRoot: string, input: { afterId?
     const columns = db.prepare("PRAGMA table_info(threads)").all();
     if (!columns.some(column => column.name === "id" && column.type === "TEXT" && column.pk === 1) ||
         columns.some(column => column.name !== "id" && column.pk !== 0)) throw Error("Unsupported Codex thread index identity schema");
-    rows = db.prepare(`SELECT id, rollout_path, cwd, source, thread_source, created_at_ms, updated_at_ms, archived
+    const hasEvidenceColumns = ["has_user_event", "tokens_used", "first_user_message"].every(name => columns.some(column => column.name === name));
+    const evidence = hasEvidenceColumns ? ", CASE WHEN has_user_event = 0 AND tokens_used = 0 AND first_user_message = '' THEN 0 WHEN has_user_event = 1 OR tokens_used > 0 OR length(first_user_message) > 0 THEN 1 ELSE NULL END AS has_conversation_evidence" : "";
+    rows = db.prepare(`SELECT id, rollout_path, cwd, source, thread_source, created_at_ms, updated_at_ms, archived${evidence}
       FROM threads WHERE (? IS NULL OR id = ?) AND (? IS NULL OR id > ?) ORDER BY id LIMIT ?`)
       .all(input.sessionId ?? null, input.sessionId ?? null, input.afterId ?? null, input.afterId ?? null, limit + 1);
   } finally { db.close(); }
   await verifyPath();
   const hasMore = rows.length > limit;
-  const entries = rows.slice(0, limit).map(row => classifyThread(row, root));
+  const entries: CodexThreadIndexEntry[] = [];
+  for (const row of rows.slice(0, limit)) entries.push(await classifyIndexedThread(row, root));
   return { version: 5 as const, checkedAt: new Date().toISOString(), entries,
     nextAfterId: hasMore ? entries.at(-1)!.sessionId : null };
 }

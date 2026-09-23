@@ -6,6 +6,11 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+- Recognize captured Codex working-directory transitions without changing the
+  session's project ownership. Preserve source identity and archive-move checks.
+  Recover placeholder index entries only from verified original headers, and
+  treat missing sources with no conversation evidence as pending creation.
+  Missing used sources and unverified metadata remain visible as issues.
 - Allow a bounded 60-second engine cold start when loading persisted state, and
   keep update readiness within a 150-second overall window. Confirm stopped
   partial starts even when no worker identity was created; never restore files

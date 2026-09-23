@@ -18,12 +18,23 @@ import { initializeCodexSourceCapture } from "./codex-source-capture.js";
 const exact = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
   value.length <= 512 && value.trim() === value && value !== "*";
 
+function matchesIndexedCwd(session: Session, candidate: CodexThreadCandidate, currentCwd = session.codexNativeCapture?.cursor?.parser?.cwd) {
+  const canonical = canonicalCodexCwd(session.cwd!);
+  if (canonical === candidate.cwd) return true;
+  const capture = session.codexNativeCapture;
+  return Boolean(capture && (capture.cursor?.ordinal ?? 0) > 0 &&
+    capture.source.sessionId === session.id && capture.source.source === candidate.source &&
+    canonicalCodexCwd(capture.captureCwd ?? capture.source.cwd) === canonical &&
+    currentCwd === candidate.cwd);
+}
+
 export function existingCodexDiscoveryStatus(session: Session, candidate: CodexThreadCandidate, agentId: string) {
   if (isExcludedCodexAmbientSession(session)) return "excluded" as const;
   if (session.id !== candidate.sessionId || session.agentId !== agentId || !exact(session.project) || typeof session.cwd !== "string") return "reconcile_required" as const;
-  try { if (canonicalCodexCwd(session.cwd) !== candidate.cwd) return "reconcile_required" as const; }
+  try { if (!matchesIndexedCwd(session, candidate)) return "reconcile_required" as const; }
   catch { return "reconcile_required" as const; }
   if (!session.codexNativeCapture) return "inspect" as const;
+  if (session.codexNativeCapture.source?.sessionId !== session.id || session.codexNativeCapture.source?.source !== candidate.source) return "reconcile_required" as const;
   return session.semanticGraphCompletionVersion === 1 &&
     [1, 2].includes(session.codexNativeCapture?.version ?? 0) && session.codexNativeCapture.cursor &&
     ["pending", "caught_up", "caught_up_with_holds", "unknown"].includes(session.codexNativeCapture.status)
@@ -44,7 +55,7 @@ async function relocateCodexSource(kv: StateKV, candidate: CodexThreadCandidate,
       sessionId: session.id, cursor: state.cursor, sourceHolds: state.sourceHolds, maxBytes: 1, maxMessages: 1 });
     if (verified.source.source !== candidate.source ||
         (state.captureCwd !== undefined && typeof state.captureCwd !== "string") ||
-        canonicalCodexCwd(state.captureCwd ?? verified.source.cwd) !== candidate.cwd ||
+        !matchesIndexedCwd(session, candidate, verified.cursor.parser.cwd) ||
         !isDeepStrictEqual({ ...state.source, relativePath: verified.source.relativePath }, verified.source)) {
       return { status: "reconcile_required" as const, reason: "relocated_source_identity_changed" };
     }
@@ -66,8 +77,19 @@ export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCa
     if (status === "relocate") return relocateCodexSource(kv, candidate, managed);
     if (status !== "inspect") return { status };
   }
-  const first = await readCodexWindow({ sourceRoot: managed.sourceRoot, sourcePath: candidate.sourcePath,
-    sessionId: candidate.sessionId, maxBytes: 16 * 1024 * 1024, maxMessages: 1 });
+  let first: Awaited<ReturnType<typeof readCodexWindow>>;
+  try {
+    first = await readCodexWindow({ sourceRoot: managed.sourceRoot, sourcePath: candidate.sourcePath,
+      sessionId: candidate.sessionId, maxBytes: 16 * 1024 * 1024, maxMessages: 1 });
+  } catch (error) {
+    if (!existing && candidate.hasConversationEvidence === false && (error as NodeJS.ErrnoException).code === "ENOENT" &&
+        !(await kv.list(KV.observations(candidate.sessionId), { includeDeleted: true })).length &&
+        !await kv.get(KV.summaries, candidate.sessionId) &&
+        !(await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions)).some(row => row.sessionId === candidate.sessionId)) {
+      return { status: "pending" as const, reason: "source_not_created" };
+    }
+    throw error;
+  }
   if (first.source.source !== candidate.source || (!existing && canonicalCodexCwd(first.source.cwd) !== candidate.cwd)) {
     return { status: "reconcile_required" as const, reason: "indexed_source_identity_changed" };
   }

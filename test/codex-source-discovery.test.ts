@@ -53,6 +53,52 @@ describe("source discovery without a prior Codex hook", () => {
     expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 0, status: "caught_up" });
     expect(await kv.list(KV.observations(candidate.sessionId))).toHaveLength(2);
   });
+  it("accepts a captured cwd transition and its archive move without transferring project ownership", async () => {
+    const nextCwd = join(root, "next-project");
+    await appendFile(join(root, candidate.sourcePath), JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-1", cwd: nextCwd } }) + "\n");
+    await discoverCodexSession(kv as never, candidate, managed());
+    const scope = { sessionId: candidate.sessionId, project: "registered-project" };
+    await captureCodexSourceWindow(kv as never, scope, managed());
+    const before = structuredClone(kv.store);
+    projectForCwd.mockClear();
+    const transitioned = { ...candidate, cwd: canonicalCodexCwd(nextCwd) };
+    expect(await discoverCodexSession(kv as never, transitioned, managed())).toEqual({ status: "managed" });
+    expect(kv.store).toEqual(before);
+    expect(await discoverCodexSession(kv as never, { ...transitioned, cwd: canonicalCodexCwd(join(root, "unproven")) }, managed()))
+      .toEqual({ status: "reconcile_required" });
+    expect(await discoverCodexSession(kv as never, { ...transitioned, source: "cli" }, managed()))
+      .toEqual({ status: "reconcile_required" });
+    expect(await discoverCodexSession(kv as never, transitioned, { ...managed(), agentId: "another-agent" }))
+      .toEqual({ status: "reconcile_required" });
+    await mkdir(join(root, "archived_sessions"));
+    const archived = { ...transitioned, sourcePath: "archived_sessions/rollout-new.jsonl", archived: true };
+    await rename(join(root, candidate.sourcePath), join(root, archived.sourcePath));
+    expect(await discoverCodexSession(kv as never, archived, managed())).toMatchObject({ status: "relocated" });
+    expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.get(KV.sessions, candidate.sessionId)).toMatchObject({ cwd, project: scope.project,
+      codexNativeCapture: { source: { cwd }, cursor: { parser: { cwd: transitioned.cwd } } } });
+    expect(await kv.list(KV.observations(candidate.sessionId))).toHaveLength(2);
+    expect(projectForCwd).not.toHaveBeenCalled();
+  });
+  it("keeps an unused missing source pending and discovers it when the original appears", async () => {
+    await rm(join(root, candidate.sourcePath));
+    candidate.hasConversationEvidence = false;
+    expect(await discoverCodexSession(kv as never, candidate, managed())).toEqual({ status: "pending", reason: "source_not_created" });
+    expect(await kv.list(KV.sessions)).toEqual([]);
+    await writeSource([header(), { type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } }, user, assistant]);
+    expect(await discoverCodexSession(kv as never, candidate, managed())).toMatchObject({ status: "created" });
+    expect(await captureCodexSourceWindow(kv as never, { sessionId: candidate.sessionId, project: "registered-project" }, managed()))
+      .toMatchObject({ inserted: 2, status: "caught_up" });
+  });
+  it.each(["used", "unknown", "observation", "summary", "forget", "session"])("does not suppress a missing source with %s evidence", async kind => {
+    await rm(join(root, candidate.sourcePath));
+    if (kind !== "unknown") candidate.hasConversationEvidence = kind === "used";
+    if (kind === "observation") await kv.set(KV.observations(candidate.sessionId), "old", { id: "old" });
+    if (kind === "summary") await kv.set(KV.summaries, candidate.sessionId, { sessionId: candidate.sessionId });
+    if (kind === "forget") await kv.set(KV.codexCaptureExclusions, "old", { sessionId: candidate.sessionId });
+    if (kind === "session") await kv.set(KV.sessions, candidate.sessionId, { id: candidate.sessionId, cwd, project: "registered-project", agentId: "codex-main" });
+    await expect(discoverCodexSession(kv as never, candidate, managed())).rejects.toThrow(/ENOENT/);
+  });
   it("preserves inherited conversation eligibility when creating a fork's zero-position cursor", async () => {
     await writeSource([header({ session_id: candidate.sessionId, history_mode: "paginated", forked_from_id: "parent-task",
       forked_from_ordinal_exclusive: 10, history_base: { thread_id: "parent-task", end_ordinal_exclusive: 10, end_byte_offset: 1000 } }),

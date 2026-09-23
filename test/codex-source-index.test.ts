@@ -58,6 +58,58 @@ describe.skipIf(!sqlite)("read-only Codex source index adapter", () => {
     expect((await readCodexSourceIdentity(root, sourcePath, "s1")).sessionId).toBe("s1");
     expect(await readFile(path)).toEqual(before);
   });
+  it("recovers an exact placeholder from its original header without writing the index", async () => {
+    const { root, path } = await fixture([{ source: "unknown", cwd: "", thread_source: null, created_at_ms: 2000, updated_at_ms: 1999, archived: 1 }]);
+    await mkdir(join(root, "sessions"));
+    await writeFile(join(root, "sessions/rollout-original_0.jsonl"), JSON.stringify({ type: "session_meta", payload: {
+      id: "s0", session_id: "s0", source: "vscode", cwd: root, timestamp: "1970-01-01T00:00:01.000Z",
+      thread_source: "agent_created_thread", base_instructions: "x".repeat(32 * 1024),
+    } }) + "\n");
+    const before = await readFile(path);
+    const page = await readCodexThreadIndex(root);
+    expect(page.entries).toEqual([{ status: "candidate", sessionId: "s0", sourcePath: "sessions/rollout-original_0.jsonl",
+      cwd: process.platform === "win32" ? root.toLowerCase() : root, source: "vscode", threadSource: "agent_created_thread",
+      createdAt: "1970-01-01T00:00:01.000Z", updatedAt: "1970-01-01T00:00:01.999Z", archived: true }]);
+    expect(JSON.stringify(page)).not.toContain("PRIVATE");
+    expect(await readFile(path)).toEqual(before);
+  });
+  it.each([
+    [{}, { id: "other" }, "unknown"],
+    [{}, { source: "future-client" }, "unknown"],
+    [{}, { thread_source: "future-task" }, "unknown"],
+    [{}, { thread_source: undefined }, "unknown"],
+    [{}, { thread_source: "subagent" }, "excluded"],
+    [{}, { thread_source: "guardian_review" }, "excluded"],
+    [{ source: "future-client" }, {}, "unknown"],
+    [{ cwd: "contradictory" }, {}, "unknown"],
+    [{ thread_source: "future-task" }, {}, "unknown"],
+  ])("keeps placeholder recovery bounded to verified supported source metadata (%j, %j)", async (index, header, status) => {
+    const { root } = await fixture([{ source: "unknown", cwd: "", thread_source: null, ...index }]);
+    await mkdir(join(root, "sessions"));
+    await writeFile(join(root, "sessions/rollout-original_0.jsonl"), JSON.stringify({ type: "session_meta", payload: {
+      id: "s0", source: "vscode", cwd: root, timestamp: "1970-01-01T00:00:01.000Z", thread_source: "user", ...header,
+    } }) + "\n");
+    expect((await readCodexThreadIndex(root)).entries[0].status).toBe(status);
+  });
+  it("keeps a placeholder with no readable source unknown", async () => {
+    const { root } = await fixture([{ source: "unknown", cwd: "", thread_source: null }]);
+    expect((await readCodexThreadIndex(root)).entries[0]).toMatchObject({ status: "unknown" });
+  });
+  it("returns only a conservative conversation-evidence flag from optional index columns", async () => {
+    const { root, path } = await fixture(Array.from({ length: 5 }, () => ({})));
+    const db = new sqlite!.DatabaseSync(path);
+    try {
+      db.exec("ALTER TABLE threads ADD COLUMN has_user_event INTEGER; ALTER TABLE threads ADD COLUMN tokens_used INTEGER; ALTER TABLE threads ADD COLUMN first_user_message TEXT");
+      const update = db.prepare("UPDATE threads SET has_user_event = ?, tokens_used = ?, first_user_message = ? WHERE id = ?");
+      update.run(0, 0, "", "s0");
+      update.run(1, 0, "", "s1");
+      update.run(0, 10, "", "s2");
+      update.run(0, 0, "PRIVATE USER INPUT", "s3");
+    } finally { db.close(); }
+    const page = await readCodexThreadIndex(root);
+    expect(page.entries.map(row => (row as { hasConversationEvidence?: boolean }).hasConversationEvidence)).toEqual([false, true, true, true, undefined]);
+    expect(JSON.stringify(page)).not.toContain("PRIVATE");
+  });
   it("paginates by exact ID with a bounded next-page cursor", async () => {
     const { root } = await fixture([{ id: "z" }, { id: "a" }, { id: "m" }]);
     const first = await readCodexThreadIndex(root, { limit: 2 });
