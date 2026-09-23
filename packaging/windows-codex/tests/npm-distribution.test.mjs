@@ -389,6 +389,54 @@ test('ZIP extraction includes hidden entries and rejects traversal without desti
 });
 
 
+test('cutover confirms partial starts with absent worker identities and rejects live or untracked runs', { skip: !windows }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'am-partial-start-'));
+  try {
+    await mkdir(path.join(dir, 'data')); await mkdir(path.join(dir, 'scripts'));
+    await writeFile(path.join(dir, 'scripts/agentmemory-stop.ps1'), "param($Root,$TimeoutSeconds)\nthrow 'partial start stop failed'\n");
+    const harness = path.join(dir, 'partial-stop.ps1');
+    await writeFile(harness, `param($Source,$Root)
+$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if ($errors.Count) {throw 'Installer parse failed'}
+$function=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Stop-OwnedRuntimeForCutover'},$true)
+Invoke-Expression $function.Extent.Text
+function Import-Module {param($Name,$ErrorAction)}
+function Stop-ScheduledTask {param($TaskPath,$TaskName,$ErrorAction)}
+function Get-Process {param($Id,$ErrorAction) if ($script:live) {return [pscustomobject]@{Id=$Id}}}
+function Start-Sleep {param($Milliseconds) throw 'recorded process still live'}
+$registrations=@([pscustomobject]@{Name='task-registration.json';TaskName='fixture';TaskPath='\\'})
+$state=Join-Path $Root 'data/runtime-state.json'
+$script:live=$false
+foreach ($json in @('{"daemon":{"pid":41},"engine":{"pid":42},"worker":null}','{"daemon":{"pid":41},"engine":{"pid":42}}')) {
+  Set-Content -LiteralPath $state -Value $json
+  Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations
+}
+$script:live=$true
+$rejected=$false
+try {Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations} catch {
+  if ($_.Exception.Message -notmatch 'recorded process still live') {throw}; $rejected=$true
+}
+if (!$rejected) {throw 'Live recorded process accepted'}
+$script:live=$false
+foreach ($json in @('{"daemon":null,"engine":null,"worker":null}','{"daemon":{"pid":41},"engine":{}}')) {
+  Set-Content -LiteralPath $state -Value $json
+  $rejected=$false
+  try {Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations} catch {
+    if ($_.Exception.Message -notmatch 'partial start stop failed') {throw}; $rejected=$true
+  }
+  if (!$rejected) {throw 'Untracked run accepted'}
+}
+'PARTIAL_START_STOP_OK'
+`);
+    const result=spawnSync(ps,powershellArgs(harness,{Source:path.join(packaging,'Install-WindowsCodex.ps1'),Root:dir}),
+      {encoding:'utf8',timeout:30_000,windowsHide:true,env:powershellEnvironment()});
+    assert.equal(result.status,0,result.stdout+result.stderr);
+    assert.match(result.stdout,/PARTIAL_START_STOP_OK/);
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
+
 test('runtime recovery tolerates transient failures and retains owned-stop guards', { skip: !windows }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'am-health-test-'));
   try {

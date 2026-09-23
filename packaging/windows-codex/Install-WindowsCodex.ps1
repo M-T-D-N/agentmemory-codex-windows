@@ -197,11 +197,15 @@ function Stop-OwnedRuntimeForCutover {
         $runtimeStatePath = Join-Path $Root 'data\runtime-state.json'
         if (-not (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf)) { throw $stopFailure }
         $runtimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
-        $ownedPids = @(
-            [int]$runtimeState.daemon.pid,
-            [int]$runtimeState.engine.pid,
-            [int]$runtimeState.worker.pid
-        ) | Where-Object { $_ -gt 0 } | Sort-Object -Unique
+        # A failed start can have an engine but no worker yet. Preserve the
+        # stop confirmation without dereferencing a missing child identity.
+        $ownedPids = @(@(foreach ($role in @('daemon', 'engine', 'worker')) {
+            $property = $runtimeState.PSObject.Properties[$role]
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            $pidProperty = $property.Value.PSObject.Properties['pid']
+            if ($null -eq $pidProperty -or [int]$pidProperty.Value -le 0) { throw $stopFailure }
+            [int]$pidProperty.Value
+        }) | Sort-Object -Unique)
         if ($ownedPids.Count -eq 0) { throw $stopFailure }
 
         # Stop-ScheduledTask closes the registered hidden launcher's Job Object.
@@ -558,7 +562,9 @@ try {
     # writes active state only after authenticated loopback health succeeds.
     # The installer may run under an elevated/sandbox token that cannot decrypt
     # that CurrentUser secret, so consume the daemon's fresh readiness result.
-    $deadline = [DateTime]::UtcNow.AddSeconds(75)
+    # Covers bounded engine cold-start (60s), worker readiness (30s), and task
+    # dispatch/cleanup overhead without accepting a partially started runtime.
+    $deadline = [DateTime]::UtcNow.AddSeconds(150)
     $healthy = $false
     do {
         Start-Sleep -Milliseconds 500

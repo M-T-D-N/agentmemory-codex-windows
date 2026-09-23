@@ -727,7 +727,8 @@ try {
     $engine = $engineStart.Process
     $engineLaunch = $engineStart.Launch
     $engineIdentity = $engineStart.Identity
-    Wait-Condition -Condition { -not $engine.HasExited -and (Test-EngineReady -EnginePid $engine.Id) } -TimeoutSeconds 20 -FailureMessage 'The iii engine did not become loopback-ready.'
+    # Loading a large persisted state can exceed 20 seconds on a cold start.
+    Wait-Condition -Condition { -not $engine.HasExited -and (Test-EngineReady -EnginePid $engine.Id) } -TimeoutSeconds 60 -FailureMessage 'The iii engine did not become loopback-ready.'
 
     $previousDiagnosticsFile = [Environment]::GetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_FILE', 'Process')
     $previousDiagnosticsRun = [Environment]::GetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_RUN_ID', 'Process')

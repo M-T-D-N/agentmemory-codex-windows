@@ -6,6 +6,10 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+- Allow a bounded 60-second engine cold start when loading persisted state, and
+  keep update readiness within a 150-second overall window. Confirm stopped
+  partial starts even when no worker identity was created; never restore files
+  while a recorded process remains alive.
 - Capture final answers from verified agent-created Codex tasks whose initial
   request arrives as a delegation tool result. Preserve internal-turn exclusion
   and let these tasks advance beyond a tool-only first discovery window. Keep
