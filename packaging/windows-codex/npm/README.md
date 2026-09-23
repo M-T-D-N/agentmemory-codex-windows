@@ -10,11 +10,12 @@ desktop. Use the Windows account that will run Codex. npm installation itself
 does not start a service or run lifecycle scripts. Allow several GB of free
 disk space for download, extraction, the installed runtime, and future backups.
 
-After this version is published, run the following in PowerShell (replace the
-example paths with your own). All commands default to dry-run:
+Run the version-pinned GitHub TGZ in PowerShell (replace the example paths with
+your own). This does not depend on a separate npm-registry publication. All
+commands default to dry-run:
 
 ```powershell
-npx --yes agentmemory-codex-windows@0.1.0-preview.8 --fresh --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
+npm exec --yes --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.10/agentmemory-codex-windows-0.1.0-preview.10.tgz" -- agentmemory-codex-windows --fresh --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
 ```
 
 `projects.json` is your existing project registry within the workspace. A minimal
@@ -58,7 +59,7 @@ For an already activated owned installation, omit `--fresh` and
 performs its protected cutover with predecessor backup/rollback. Keep canonical
 data in the same installation root. Do not create another root to update it.
 
-`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.8-win32-x64.zip"`
+`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.10-win32-x64.zip"`
 uses a previously downloaded ZIP, with exactly the same pinned hash check.
 `--help` describes the options without downloading anything.
 

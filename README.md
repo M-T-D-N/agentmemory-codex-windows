@@ -7,7 +7,7 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.9-orange" alt="0.1.0-preview.9" />
+  <img src="https://img.shields.io/badge/release-0.1.0--preview.10-orange" alt="0.1.0-preview.10" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
@@ -96,7 +96,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.9` | Public version and source tag |
+| Downstream release | `0.1.0-preview.10` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
@@ -106,19 +106,20 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 ## Install without building
 
-After the preview.4 npm package and matching GitHub ZIP are published, use the
+Use the preview.10 GitHub release ZIP or its version-pinned TGZ launcher with the
 [pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
 It covers empty-root preparation, separate activation, existing-install updates,
-and offline hash verification. Users need Windows x64, Node.js 24+, and Codex;
+and offline hash verification. The GitHub TGZ can be run with npm without a
+separate npm-registry publication. Users need Windows x64, Node.js 24+, and Codex;
 pnpm, Python, and compilers are only needed by source builders.
 
 ## Source-build requirements
 
 - Windows with PowerShell 5.1 or newer; this preview is qualified on Windows 11
-- Node.js 20 or newer
+- Node.js 24 or newer
 - Python 3 on PATH for the plaintext HTTP regression tests (CI uses Python 3.12)
 - pnpm `11.19.0` through the repository's pinned package-manager declaration
-- The official iii engine `0.11.2` Windows executable whose SHA-256 matches
+- The pinned downstream-patched iii engine `0.11.2` Windows executable whose SHA-256 matches
   [`packaging/windows-codex/config/third-party-inputs.json`](packaging/windows-codex/config/third-party-inputs.json)
 
 The npm launcher uses a prebuilt release ZIP. The binaries are not Authenticode-signed;
@@ -130,7 +131,7 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.9 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.10 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

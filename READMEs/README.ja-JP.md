@@ -7,7 +7,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> `0.1.0-preview.8` です。
+> `0.1.0-preview.10` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -79,7 +79,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.8` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.10` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -90,13 +90,13 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 ## 必要な環境
 
 - PowerShell 5.1 以降を備えた Windows。このプレビューは Windows 11 で検証済み
-- Node.js 20 以降
+- Node.js 24 以降
 - HTTP 回帰テスト用に PATH 上の Python 3（CI は Python 3.12）
 - リポジトリで固定された pnpm `11.19.0`
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
-  の SHA-256 と一致する、公式 iii engine `0.11.2` Windows 実行ファイル
+  の SHA-256 と一致する、ダウンストリーム修正済み iii engine `0.11.2` Windows 実行ファイル
 
-preview.4 の npm パッケージと GitHub ZIP の公開後は、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
+preview.10 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
 ## ソースからビルドする
 
@@ -104,7 +104,7 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.8 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.10 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

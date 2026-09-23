@@ -4,7 +4,7 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
-## Unreleased
+## 0.1.0-preview.10 — 2026-09-23
 
 - Recognize captured Codex working-directory transitions without changing the
   session's project ownership. Preserve source identity and archive-move checks.
@@ -23,7 +23,7 @@ The upstream AgentMemory release history remains in the
   bounded latest-memory feed, while preserving live results and fail-closed
   archive reads.
 
-## 0.1.0-preview.9 — release candidate
+## 0.1.0-preview.9 — 2026-09-21
 
 - Separate the engine's caller metadata from archive business inputs so real
   inspect, candidate, list, archive and restore requests reach their handlers.

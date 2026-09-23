@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.9`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.10`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.9`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.10`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -187,7 +187,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.9 -OutputDirectory D:\staging\npm-preview9
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.10 -OutputDirectory D:\staging\npm-preview10
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -213,8 +213,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.9\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.9 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.10\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.10 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -1276,7 +1276,29 @@ lost during installation. Missing historical observations require the official
 exact-project import lifecycle with original provenance; no alternate queue
 or database is introduced.
 
-### Native reconciliation warnings (unreleased)
+### Native reconciliation warnings
+
+From preview.10, discovery accepts a working-directory transition already
+verified by the native capture cursor when it matches the current index. It
+retains the session's project and original ownership; unrelated paths, owners
+or source kinds are still rejected. Archive/restore moves retain the existing
+file-identity, source-metadata and cursor checks.
+
+A placeholder index row with `source=unknown`, empty `cwd` and null
+`thread_source` can be classified from its exact original header. The adapter
+requires a supported source, matching session identity and supported user task
+kind, keeps the existing bounded header read, and never rewrites the Codex
+index. Missing, contradictory or unsupported source evidence stays unknown.
+An absent source is pending creation only when all optional index usage signals
+are explicitly empty and no canonical session, observation, summary or capture
+exclusion exists. A used source disappearing remains an issue. Pending entries
+are rechecked, without permanent suppressions or fabricated empty memories.
+
+Agent-created tasks can receive their initial request through a delegation
+tool result. Verified task metadata now makes their own final answers eligible
+for capture, even after a large tool-only prefix. Tool output itself is not
+copied into conversation memory, internal tasks remain excluded, and previous
+reviewed-final provenance is retained on an exact correspondence.
 
 Managed native capture publishes a bounded, in-memory diagnostic summary through
 the existing `/agentmemory/livez` and `/agentmemory/health` responses. `nativeCapture`
