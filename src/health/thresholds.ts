@@ -30,6 +30,11 @@ export function evaluateHealth(
   let critical = false;
   let degraded = false;
 
+  if (snapshot.graphQueryIndex && snapshot.graphQueryIndex.status !== "ready") {
+    alerts.push(`graph_query_index_${snapshot.graphQueryIndex.status}`);
+    degraded = true;
+  }
+
   if (
     snapshot.connectionState === "disconnected" ||
     snapshot.connectionState === "failed"

@@ -453,7 +453,7 @@ async function main() {
   registerEventTriggers(sdk, kv, readContext);
   registerMcpEndpoints(sdk, kv, secret);
 
-  const healthMonitor = registerHealthMonitor(sdk, kv);
+  const healthMonitor = registerHealthMonitor(sdk, kv, { maintainGraphQueryIndex: true });
 
   const indexPersistence = new IndexPersistence(kv, bm25Index, vectorIndex);
   // Wire the persistence hook so delete paths can flush BM25/vector

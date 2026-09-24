@@ -378,6 +378,11 @@ export interface HealthSnapshot {
   status: "healthy" | "degraded" | "critical";
   alerts: string[];
   notes?: string[];
+  graphQueryIndex?: {
+    status: "ready" | "unavailable" | "recovering" | "error";
+    lastError?: string;
+    nextRetryAt?: string;
+  };
 }
 
 export interface CircuitBreakerState {
@@ -617,6 +622,8 @@ export interface EdgeContext {
 }
 
 export interface GraphQueryResult {
+  // False means totals describe only a fallback subset; zero is inconclusive.
+  totalsExact?: boolean;
   nodes: GraphNode[];
   edges: GraphEdge[];
   // Optional independent edge page for exact inventory. `edges` remains the

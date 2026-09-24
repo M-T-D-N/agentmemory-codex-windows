@@ -5,7 +5,55 @@ import type { HealthSnapshot } from "../src/types.js";
 
 vi.mock("node:os", () => ({ availableParallelism: () => 4 }));
 vi.mock("node:v8", () => ({ getHeapStatistics: () => ({ heap_size_limit: 4096 }) }));
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
+it("recovers through one registered writer, reports failure, and retries only after backoff", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+  const samples: HealthSnapshot[] = [];
+  let ready = false;
+  let finish!: (result: unknown) => void;
+  const graphSnapshot = { dirty: false, stats: { totalNodes: 1, totalEdges: 0 }, updatedAt: "2026-09-25T00:00:00Z" };
+  const kv = { usesManagedState: true,
+    get: async (scope: string) => scope === "mem:graph:snapshot" ? graphSnapshot
+      : scope === "mem:graph:query-manifest" ? {
+          version: 1, shardCount: 64, totalNodes: 1, totalEdges: 0,
+          updatedAt: graphSnapshot.updatedAt, dirty: !ready,
+        } : null,
+    set: async (_scope: string, key: string, value: unknown) => {
+      if (key === "latest") samples.push(value as HealthSnapshot);
+      return value;
+    },
+  };
+  const repairs = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+  const sdk = { trigger: async (input: { function_id: string; payload: unknown }) => {
+    if (input.function_id === "mem::graph-snapshot-rebuild") {
+      expect(input.payload).toEqual({ onlyIfIndexUnavailable: true });
+      return repairs();
+    }
+    return { workers: [] };
+  } };
+  const drain = () => new Promise<void>(resolve => setImmediate(resolve));
+  const monitor = registerHealthMonitor(sdk as never, kv as never, { maintainGraphQueryIndex: true });
+  try {
+    await drain();
+    expect(repairs).toHaveBeenCalledTimes(1);
+    expect(samples.at(-1)?.graphQueryIndex?.status).toBe("recovering");
+    await vi.advanceTimersByTimeAsync(90_000); await drain();
+    expect(repairs).toHaveBeenCalledTimes(1);
+    finish({ success: false, error: "bounded page unavailable" }); await drain();
+    await vi.advanceTimersByTimeAsync(30_000); await drain();
+    expect(samples.at(-1)?.graphQueryIndex).toMatchObject({ status: "error", lastError: "bounded page unavailable", nextRetryAt: expect.any(String) });
+    expect(samples.at(-1)?.alerts).toContain("graph_query_index_error");
+    await vi.advanceTimersByTimeAsync(240_000); await drain();
+    expect(repairs).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30_000); await drain();
+    expect(repairs).toHaveBeenCalledTimes(2);
+    ready = true; finish({ success: true }); await drain();
+    await vi.advanceTimersByTimeAsync(30_000); await drain();
+    expect(samples.at(-1)?.graphQueryIndex).toEqual({ status: "ready" });
+    expect(samples.at(-1)?.alerts.some(alert => alert.startsWith("graph_query_index_"))).toBe(false);
+  } finally { monitor.stop(); }
+});
 
 describe("CPU capacity in managed health checks", () => {
   it.each([true, false])("reports the actual sample and preserves the portable contract (managed=%s)", async managed => {

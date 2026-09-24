@@ -1180,6 +1180,19 @@ Portable engines retain the previous 25,000-node whole-response ceiling and
 refuse a known oversized snapshot before enumeration. Recovery does not require
 resetting the graph; corpora outside the bounded budget remain an explicit error.
 
+The managed worker checks query-index consistency during its existing 30-second
+health cycle, starting at worker startup. An unavailable index requests one
+`mem::graph-snapshot-rebuild` invocation, which rechecks consistency under the
+graph write lock before rebuilding. A completed failed attempt retries after
+five minutes; a running attempt is never duplicated. `health.graphQueryIndex`
+reports ready, recovering, unavailable or error, with the last failure and next
+retry time when applicable. Recovery uses no Qwen invocation. Other observation
+collection can continue while graph writers wait for the rebuild lock. Portable
+profiles do not enable automatic rebuilds. Query fallback remains bounded and
+returns `totalsExact: false`; zero fallback matches are not proof of no matching
+canonical records. Empty extraction batches and merges outside the top-degree
+snapshot still close their index update, so later exact queries remain usable.
+
 Managed health snapshots expose `cpu.percent` as the process's share of available
 CPU capacity, plus `cpu.corePercent` and `cpu.availableParallelism` for the original
 core-equivalent measurement and denominator. Portable profiles preserve their

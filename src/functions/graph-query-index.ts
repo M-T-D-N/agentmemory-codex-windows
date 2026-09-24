@@ -58,6 +58,28 @@ export interface GraphQueryIndexManifest {
   resetAt?: string;
 }
 
+export function queryIndexMatchesSnapshot(
+  manifest: GraphQueryIndexManifest | null,
+  snapshot: GraphSnapshot,
+): manifest is GraphQueryIndexManifest {
+  return Boolean(
+    manifest && !snapshot.dirty &&
+      manifest.version === GRAPH_QUERY_INDEX_VERSION &&
+      manifest.shardCount === GRAPH_QUERY_INDEX_SHARDS &&
+      !manifest.dirty &&
+      manifest.totalNodes === snapshot.stats.totalNodes &&
+      manifest.totalEdges === snapshot.stats.totalEdges &&
+      manifest.updatedAt === snapshot.updatedAt &&
+      (manifest.resetAt ?? "") === (snapshot.resetAt ?? ""),
+  );
+}
+
+export async function graphQueryIndexAvailable(kv: StateKV): Promise<boolean> {
+  const snapshot = await kv.get<GraphSnapshot>(KV.graphSnapshot, "current");
+  const manifest = await kv.get<GraphQueryIndexManifest>(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY);
+  return snapshot !== null && queryIndexMatchesSnapshot(manifest, snapshot);
+}
+
 export interface GraphQueryInput {
   startNodeId?: string;
   nodeType?: string;
@@ -327,7 +349,8 @@ export function queryGraphFromSnapshotFallback(
   const warning =
     "The exact graph query index is temporarily unavailable. Returned a " +
     "bounded top-degree snapshot without enumerating canonical graph state; " +
-    "filtered totals may therefore be incomplete.";
+    "filtered totals are incomplete. Zero matches in this snapshot do not " +
+    "establish that the graph contains no matching records.";
   const queryTerms = [
     ...(typeof data.query === "string" && data.query.trim()
       ? [data.query.trim()]
@@ -371,6 +394,7 @@ export function queryGraphFromSnapshotFallback(
     return {
       ...paginateGraph(matches, projectEdges, 0, limit, offset),
       fromSnapshot: true,
+      totalsExact: false,
       ...unavailableEdgeInventory,
       warning,
     };
@@ -409,6 +433,7 @@ export function queryGraphFromSnapshotFallback(
         offset,
       ),
       fromSnapshot: true,
+      totalsExact: false,
       ...unavailableEdgeInventory,
       warning,
     };
@@ -417,6 +442,7 @@ export function queryGraphFromSnapshotFallback(
   if (!project && !archived?.hasArchivedGraph) {
     return {
       ...paginateFromSnapshot(snapshot, data.nodeType, limit, offset),
+      totalsExact: false,
       ...unavailableEdgeInventory,
       warning,
     };
@@ -432,6 +458,7 @@ export function queryGraphFromSnapshotFallback(
       offset,
     ),
     fromSnapshot: true,
+    totalsExact: false,
     ...unavailableEdgeInventory,
     warning,
   };

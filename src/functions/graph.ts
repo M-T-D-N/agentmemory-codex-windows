@@ -57,6 +57,8 @@ import {
   paginateFromSnapshot,
   queryGraphFromSnapshotFallback,
   queryGraphFromIndex,
+  queryIndexMatchesSnapshot,
+  graphQueryIndexAvailable,
   queryIndexShardFor,
   queryIndexShardKey,
   readAllGraphQueryDocuments,
@@ -112,22 +114,6 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
       },
     );
   });
-}
-
-function queryIndexMatchesSnapshot(
-  manifest: GraphQueryIndexManifest | null,
-  snapshot: GraphSnapshot,
-): manifest is GraphQueryIndexManifest {
-  return Boolean(
-    manifest &&
-      manifest.version === GRAPH_QUERY_INDEX_VERSION &&
-      manifest.shardCount === GRAPH_QUERY_INDEX_SHARDS &&
-      !manifest.dirty &&
-      manifest.totalNodes === snapshot.stats.totalNodes &&
-      manifest.totalEdges === snapshot.stats.totalEdges &&
-      manifest.updatedAt === snapshot.updatedAt &&
-      (manifest.resetAt ?? "") === (snapshot.resetAt ?? ""),
-  );
 }
 
 async function readGraphQueryIndexManifest(
@@ -3102,18 +3088,14 @@ export async function persistGraphDelta(
     snapshotPushEdgeIfBothInTop(snap, edge);
   }
 
-  if (newNodeCount > 0 || newEdgeCount > 0 || snapMutated) {
+  if (changedNodes.length > 0 || changedEdges.length > 0 || snapMutated) {
     snap.updatedAt = capturedAt;
     snap.dirty = false;
     await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
-    await updateGraphQueryIndexDelta(
-      kv,
-      queryIndexManifest,
-      snap,
-      changedNodes,
-      changedEdges,
-    );
   }
+
+  // Even an empty or fully skipped batch must close the index write state.
+  await updateGraphQueryIndexDelta(kv, queryIndexManifest, snap, changedNodes, changedEdges);
 
   return { newNodeCount, newEdgeCount };
 }
@@ -3602,6 +3584,7 @@ export function registerGraphFunction(
         warning:
           "No graph snapshot or exact query index is available; refusing to " +
           "perform canonical graph enumeration.",
+        totalsExact: false,
       };
     },
   );
@@ -3647,8 +3630,13 @@ export function registerGraphFunction(
   // bounds every page while this lock keeps graph scopes stable across pages.
   // Canonical nodes and edges are never replaced by a derived-index rebuild.
   registerObservationWriter(sdk, "mem::graph-snapshot-rebuild",
-    async (data?: { force?: boolean }) =>
+    async (data?: { force?: boolean; onlyIfIndexUnavailable?: boolean }) =>
       withKeyedLock(GRAPH_WRITE_LOCK, async () => {
+      // Recheck after acquiring the writer lock: an intervening writer or
+      // operator rebuild may already have restored the exact index.
+      if (data?.onlyIfIndexUnavailable === true && await graphQueryIndexAvailable(kv)) {
+        return { success: true, skipped: true };
+      }
       const started = Date.now();
       // #825: pre-flight refusal for legacy corpora. The old guard
       // checked node count AFTER kv.list, but the heartbeat dies at

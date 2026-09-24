@@ -4,6 +4,17 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+- Close graph query index updates for empty extraction batches and merge-only
+  changes outside the top-degree snapshot. Those cases previously left exact
+  graph search unavailable until an explicit rebuild.
+- Managed health checks detect an unavailable graph index and request one
+  bounded, serialized rebuild using the existing recovery operation. Failed
+  attempts remain visible and retry after five minutes. Reads stay bounded,
+  canonical records and archive decisions are preserved, and no model is needed.
+- Mark fallback graph totals as inexact, including empty fallback results.
+
 ## 0.1.0-preview.10 — 2026-09-23
 
 - Recognize captured Codex working-directory transitions without changing the

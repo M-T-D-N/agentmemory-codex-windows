@@ -11,6 +11,7 @@ vi.mock("../src/config.js", async (importOriginal) => {
 
 import {
   inspectGraphSessionReferences,
+  persistGraphDelta,
   registerGraphFunction,
 } from "../src/functions/graph.js";
 import { registerRememberFunction } from "../src/functions/remember.js";
@@ -119,6 +120,47 @@ describe("Graph Functions", () => {
   afterEach(() => {
     if (ORIG_GRAPH_FLAG === undefined) delete process.env["GRAPH_EXTRACTION_ENABLED"];
     else process.env["GRAPH_EXTRACTION_ENABLED"] = ORIG_GRAPH_FLAG;
+  });
+
+  it("keeps an exact index usable after an empty extraction batch", async () => {
+    await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    await persistGraphDelta(kv as never, [], [], []);
+    expect(await kv.get("mem:graph:query-manifest", "current")).toMatchObject({ dirty: false });
+  });
+
+  it("repairs a dirty index under the existing rebuild lock and skips a now-current request", async () => {
+    await sdk.trigger("mem::graph-extract", { observations: [testObs] });
+    await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    const nodes = structuredClone(await kv.list("mem:graph:nodes"));
+    const edges = structuredClone(await kv.list("mem:graph:edges"));
+    const manifest = await kv.get<Record<string, unknown>>("mem:graph:query-manifest", "current");
+    await kv.set("mem:graph:query-manifest", "current", { ...manifest, dirty: true });
+    expect(await sdk.trigger("mem::graph-query", { query: "absent" })).toMatchObject({
+      nodes: [], totalsExact: false, fromSnapshot: true,
+    });
+    expect(await sdk.trigger("mem::graph-snapshot-rebuild", { onlyIfIndexUnavailable: true })).toMatchObject({ success: true });
+    expect(await sdk.trigger("mem::graph-query", { query: "src/index.ts" })).toMatchObject({ fromIndex: true });
+    expect(await kv.list("mem:graph:nodes")).toEqual(nodes);
+    expect(await kv.list("mem:graph:edges")).toEqual(edges);
+    const writes = vi.spyOn(kv, "set");
+    expect(await sdk.trigger("mem::graph-snapshot-rebuild", { onlyIfIndexUnavailable: true })).toEqual({ success: true, skipped: true });
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  it("indexes merge-only changes outside the top-degree snapshot", async () => {
+    const rows: GraphNode[] = Array.from({ length: 501 }, (_, i) => ({
+      id: `merge_${i}`, name: `merge-${i}`, type: "concept", project: "memory",
+      properties: {}, sourceObservationIds: [], createdAt: "2026-01-01T00:00:00Z", stale: false,
+    }));
+    for (const row of rows) await kv.set("mem:graph:nodes", row.id, row);
+    await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    const snapshot = await kv.get<{ topNodes: GraphNode[] }>("mem:graph:snapshot", "current");
+    const omitted = rows.find(row => !snapshot!.topNodes.some(top => top.id === row.id))!;
+    await persistGraphDelta(kv as never, [{ ...omitted, properties: { detail: "merge-only-index-proof" } }], [], [], { project: "memory" });
+    const query = await sdk.trigger("mem::graph-query", { project: "memory", query: "merge-only-index-proof" });
+    expect(query.fromIndex).toBe(true);
+    expect(query.nodes.map((row: GraphNode) => row.id)).toEqual([omitted.id]);
+    expect(await kv.get("mem:graph:query-manifest", "current")).toMatchObject({ dirty: false });
   });
 
   it("graph-extract creates nodes and edges from XML response", async () => {

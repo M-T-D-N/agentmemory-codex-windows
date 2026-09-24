@@ -5,14 +5,21 @@ import type { HealthSnapshot } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { evaluateHealth } from "./thresholds.js";
+import { graphQueryIndexAvailable } from "../functions/graph-query-index.js";
 
 export function registerHealthMonitor(
   sdk: ISdk,
   kv: StateKV,
+  options: { maintainGraphQueryIndex?: boolean } = {},
 ): { stop: () => void } {
   let connectionState = "connected";
   let prevCpuUsage = process.cpuUsage();
   let prevCpuTime = Date.now();
+  let stopped = false;
+  let collecting = false;
+  let graphRecovery: Promise<void> | undefined;
+  let graphRetryAt = 0;
+  let graphRecoveryError: string | undefined;
 
   const eventSdk = sdk as ISdk & {
     on?: (event: string, listener: (state?: unknown) => void) => void;
@@ -72,6 +79,40 @@ export function registerHealthMonitor(
     }
 
     const cpuCapacity = kv.usesManagedState ? availableParallelism() : 1;
+    let graphQueryIndex: HealthSnapshot["graphQueryIndex"];
+    if (options.maintainGraphQueryIndex && kv.usesManagedState) {
+      try {
+        const available = await graphQueryIndexAvailable(kv);
+        if (available && !graphRecovery) {
+          graphRecoveryError = undefined;
+          graphRetryAt = 0;
+        }
+        if (!available && !stopped && !graphRecovery && kvConnectivity.status === "ok" && Date.now() >= graphRetryAt) {
+          // The registered writer rechecks under the graph lock. Keep one
+          // invocation outstanding; a slow rebuild is never a retry signal.
+          graphRecovery = sdk.trigger<unknown, { success: boolean; error?: string }>({
+            function_id: "mem::graph-snapshot-rebuild",
+            payload: { onlyIfIndexUnavailable: true },
+          }).then(result => {
+            if (!result?.success) throw new Error(result?.error ?? "Graph query index recovery failed");
+            graphRecoveryError = undefined;
+          }).catch(error => {
+            graphRecoveryError = error instanceof Error ? error.message : String(error);
+          }).finally(() => {
+            graphRecovery = undefined;
+            graphRetryAt = Date.now() + 300_000;
+          });
+        }
+        graphQueryIndex = {
+          status: graphRecovery ? "recovering" : available ? "ready" : graphRecoveryError ? "error" : "unavailable",
+          ...(graphRecoveryError ? { lastError: graphRecoveryError } : {}),
+          ...(!available && !graphRecovery && graphRetryAt > Date.now()
+            ? { nextRetryAt: new Date(graphRetryAt).toISOString() } : {}),
+        };
+      } catch (error) {
+        graphQueryIndex = { status: "error", lastError: error instanceof Error ? error.message : String(error) };
+      }
+    }
     const snapshot: HealthSnapshot = {
       connectionState,
       workers,
@@ -94,6 +135,7 @@ export function registerHealthMonitor(
       eventLoopLagMs,
       uptimeSeconds: uptime,
       kvConnectivity,
+      ...(graphQueryIndex ? { graphQueryIndex } : {}),
       status: "healthy",
       alerts: [],
     };
@@ -107,14 +149,17 @@ export function registerHealthMonitor(
     return snapshot;
   }
 
-  collectHealth().catch(() => {});
-  const interval = setInterval(() => {
-    collectHealth().catch(() => {});
-  }, 30_000);
+  const collect = () => {
+    if (stopped || collecting) return;
+    collecting = true;
+    void collectHealth().catch(() => {}).finally(() => { collecting = false; });
+  };
+  collect();
+  const interval = setInterval(collect, 30_000);
   interval.unref();
 
   return {
-    stop: () => clearInterval(interval),
+    stop: () => { stopped = true; clearInterval(interval); },
   };
 }
 
