@@ -7,7 +7,7 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.10-orange" alt="0.1.0-preview.10" />
+  <img src="https://img.shields.io/badge/release-0.1.0--preview.11-orange" alt="0.1.0-preview.11" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
@@ -96,7 +96,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.10` | Public version and source tag |
+| Downstream release | `0.1.0-preview.11` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
@@ -106,7 +106,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 ## Install without building
 
-Use the preview.10 GitHub release ZIP or its version-pinned TGZ launcher with the
+Use the preview.11 GitHub release ZIP or its version-pinned TGZ launcher with the
 [pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
 It covers empty-root preparation, separate activation, existing-install updates,
 and offline hash verification. The GitHub TGZ can be run with npm without a
@@ -131,7 +131,7 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.10 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.11 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

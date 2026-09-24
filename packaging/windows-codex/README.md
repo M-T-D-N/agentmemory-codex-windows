@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.10`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.11`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -96,7 +96,7 @@ The current evidence is deliberately narrower than a production guarantee:
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.10`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.11`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -187,7 +187,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.10 -OutputDirectory D:\staging\npm-preview10
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.11 -OutputDirectory D:\staging\npm-preview11
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -213,8 +213,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.10\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.10 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.11\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.11 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -1346,11 +1346,24 @@ retains the session's project and original ownership; unrelated paths, owners
 or source kinds are still rejected. Archive/restore moves retain the existing
 file-identity, source-metadata and cursor checks.
 
-A placeholder index row with `source=unknown`, empty `cwd` and null
-`thread_source` can be classified from its exact original header. The adapter
+A placeholder index row with `source=unknown` and null `thread_source` can be
+classified from its exact original header when `cwd` is empty or matches that
+verified header. The adapter
 requires a supported source, matching session identity and supported user task
 kind, keeps the existing bounded header read, and never rewrites the Codex
 index. Missing, contradictory or unsupported source evidence stays unknown.
+Codex `configuration_update` response items are settings metadata, not user or
+assistant messages. They leave conversation state intact and allow source
+capture to continue; unrecognized response types still stop for review.
+
+Registry v4 supports `nested_ref: {project_id, subpath}` in addition to the
+existing path and relocation reference forms. Exactly one selector is required.
+Nested parents must be registered non-nested projects; parent and child cutover
+states must match, and both paths must identify physical canonical Git roots.
+Entry order does not change ownership. Escaping paths, reparse points, reference
+chains and duplicate canonical roots are rejected. The same resolver serves
+automatic source discovery and the managed prompt/stop hooks.
+
 An absent source is pending creation only when all optional index usage signals
 are explicitly empty and no canonical session, observation, summary or capture
 exclusion exists. A used source disappearing remains an issue. Pending entries

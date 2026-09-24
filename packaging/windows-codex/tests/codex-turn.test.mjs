@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -681,14 +681,15 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
   }
 });
 
-test("native capture keeps recall injection while storage belongs to the source reader", async () => {
+test("registry v4 prompt and stop keep recall injection while storage belongs to the source reader", async () => {
   const temp = mkdtempSync(join(tmpdir(), "agentmemory-native-hook-"));
   const keys = ["AGENTMEMORY_WORKSPACE_ROOT", "AGENTMEMORY_PROJECT_REGISTRY", "AGENTMEMORY_URL", "AGENTMEMORY_SECRET"];
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   const originalFetch = globalThis.fetch; const originalWrite = process.stdout.write;
   const calls = []; const output = [];
   try {
-    const registry = join(temp, "registry.json"); writeFileSync(registry, JSON.stringify({ projects: [] }));
+    const cwd = join(temp, "source-project"); mkdirSync(cwd);
+    const registry = join(temp, "registry.json"); writeFileSync(registry, JSON.stringify({ schema_version: 4, projects: [{ id: "source-project", path: "source-project" }] }));
     process.env.AGENTMEMORY_WORKSPACE_ROOT = temp; process.env.AGENTMEMORY_PROJECT_REGISTRY = registry;
     process.env.AGENTMEMORY_URL = "http://127.0.0.1:9"; process.env.AGENTMEMORY_SECRET = "fixture-only";
     const { handleTurn } = await import(new URL("../hooks/codex-turn.mjs?native-capture-test", import.meta.url).href);
@@ -702,19 +703,24 @@ test("native capture keeps recall injection while storage belongs to the source 
         : String(url).includes("/sessions") ? { sessions: [] } : { nodes: [], edges: [], truncated: false }));
     };
     process.stdout.write = value => { output.push(String(value)); return true; };
-    await handleTurn({ session_id: "native-fixture", turn_id: "turn-a", cwd: temp, prompt: "federated recall" }, "UserPromptSubmit");
+    await handleTurn({ session_id: "native-fixture", turn_id: "turn-a", cwd, prompt: "federated recall" }, "UserPromptSubmit");
     assert.equal(calls.filter(call => call.url.endsWith("/observe")).length, 1);
     assert.deepEqual(calls.find(call => call.url.endsWith("/session/start")).body,
-      { action: "capture-source", project: temp.split(/[\\/]/).at(-1), sessionId: "native-fixture" });
+      { action: "capture-source", project: "source-project", sessionId: "native-fixture" });
     assert.match(JSON.parse(output.join("")).hookSpecificOutput.additionalContext, /agentmemory-recall-context/);
     assert.match(JSON.parse(output.join("")).systemMessage, /전체 대화 원문 대조/);
     calls.length = 0; output.length = 0;
-    await handleTurn({ session_id: "native-fixture", turn_id: "turn-b", cwd: temp, prompt: "진행" }, "UserPromptSubmit");
+    await handleTurn({ session_id: "native-fixture", turn_id: "turn-b", cwd, prompt: "진행" }, "UserPromptSubmit");
     assert.equal(calls.find(call => call.url.endsWith("/observe")).body.data.prompt, "진행");
     assert.equal(calls.find(call => call.url.endsWith("/search")).body.query, "federated recall");
     const injected = JSON.parse(output.join("")).hookSpecificOutput.additionalContext;
     assert.match(injected, /agentmemory-recall-context/);
     assert.ok(injected.length <= 2300);
+    calls.length = 0; output.length = 0;
+    await handleTurn({ session_id: "native-fixture", turn_id: "turn-b", cwd, last_assistant_message: "Verified result" }, "Stop");
+    assert.equal(calls.find(call => call.url.endsWith("/observe")).body.project, "source-project");
+    assert.equal(calls.find(call => call.url.endsWith("/session/start")).body.action, "capture-source");
+    assert.equal(calls.some(call => call.url.endsWith("/search")), false);
   } finally {
     globalThis.fetch = originalFetch; process.stdout.write = originalWrite;
     for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
@@ -1589,6 +1595,7 @@ test("relocation registry v3 resolves exact batch roots and preserves fail-close
       return readProjectRegistry(registryPath, target);
     };
     const resolved = read();
+    assert.deepEqual(read({ ...registry, schema_version: 4 }), resolved);
     assert.equal(projectFor(join(library, "src"), resolved), "library-project");
     assert.equal(projectFor(join(site, "src"), resolved), "site-project");
     assert.equal(resolved.projects.find(p => p.id === "site-project").gitCommonDir, join(site, ".git"));
@@ -1599,7 +1606,7 @@ test("relocation registry v3 resolves exact batch roots and preserves fail-close
       r => { r.projects[0].relocation_ref.batch_id = "missing"; },
       r => { r.projects[1].relocation_ref.subpath = "../escape"; },
       r => { r.projects[1].relocation_ref.subpath = "other-repo"; },
-      r => { r.schema_version = 4; },
+      r => { r.schema_version = 5; },
     ]) { const r = structuredClone(registry); change(r); assert.throws(() => read(r)); }
     for (const change of [
       m => { m.batch_ledger.push(structuredClone(m.batch_ledger[0])); },
@@ -1611,6 +1618,53 @@ test("relocation registry v3 resolves exact batch roots and preserves fail-close
       m => { m.batch_ledger[1].rollback.source_retained_as_rollback_during_soak = false; },
       m => { m.batch_ledger[1].status = "COMPLETE"; },
     ]) { const m = structuredClone(manifest); change(m); assert.throws(() => read(registry, m)); }
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("registry v4 resolves nested repositories in either order and rejects ambiguous ownership", () => {
+  const temp = realpathSync.native(mkdtempSync(join(tmpdir(), "agentmemory-registry-v4-")));
+  try {
+    const parent = join(temp, "projects", "parent"), child = join(parent, "packages", "child");
+    for (const path of [parent, child]) {
+      mkdirSync(path, { recursive: true });
+      const initialized = spawnSync("git", ["init", "--quiet", path], { encoding: "utf8" });
+      assert.equal(initialized.status, 0, initialized.stderr);
+    }
+    const registry = { schema_version: 4, projects: [
+      { id: "child", nested_ref: { project_id: "parent", subpath: "packages/child" } },
+      { id: "parent", path: "old-parent" },
+    ] };
+    const manifest = { schema_version: 1, target_root: temp,
+      namespaces: { control: "control", projects: "projects/{project}" },
+      cutover_state: { control: "target", legacy_control_root: join(temp, "legacy"),
+        registered_projects: { parent: "target", child: "target" } } };
+    const registryPath = join(temp, "registry.json");
+    const read = (r = registry, m = manifest) => {
+      writeFileSync(registryPath, JSON.stringify(r));
+      writeFileSync(join(temp, "workspace-relocation.json"), JSON.stringify(m));
+      return readProjectRegistry(registryPath, temp);
+    };
+    for (const projects of [registry.projects, [...registry.projects].reverse()]) {
+      const resolved = read({ ...registry, projects });
+      assert.equal(projectFor(join(child, "src"), resolved), "child");
+      assert.equal(projectFor(join(parent, "src"), resolved), "parent");
+    }
+    for (const change of [
+      r => { r.schema_version = 3; },
+      r => { r.projects[0].path = "duplicate-selector"; },
+      r => { r.projects[0].nested_ref.project_id = "missing"; },
+      r => { r.projects[0].nested_ref.project_id = "child"; },
+      r => { r.projects[0].nested_ref.subpath = "../escape"; },
+      r => { r.projects[0].nested_ref.subpath = "packages/missing"; },
+      r => { r.projects[0].nested_ref.extra = "unsupported"; },
+      r => { r.projects.push({ id: "duplicate", nested_ref: { project_id: "parent", subpath: "packages/child" } }); },
+      r => { r.projects.push({ id: "chain", nested_ref: { project_id: "child", subpath: "nested" } }); },
+    ]) { const r = structuredClone(registry); change(r); assert.throws(() => read(r)); }
+    const mismatch = structuredClone(manifest); mismatch.cutover_state.registered_projects.child = "source";
+    assert.throws(() => read(registry, mismatch), /state/);
+    const linked = structuredClone(registry); linked.projects[0].nested_ref.subpath = "linked-child";
+    symlinkSync(child, join(parent, "linked-child"), "junction");
+    assert.throws(() => read(linked), /reparse point/);
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
 

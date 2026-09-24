@@ -38,7 +38,7 @@ export type CodexRecordResult =
       legacyUserItem?: { turnId: string; id: string; textDigest: string } }
   | { status: "unknown"; reason: string; state: CodexParseState };
 
-const ignoredResponseTypes = new Set(["reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "web_search_call", "tool_search_call", "tool_search_output", "image_generation_call", "compaction", "agent_message"]);
+const ignoredResponseTypes = new Set(["reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "web_search_call", "tool_search_call", "tool_search_output", "image_generation_call", "compaction", "agent_message", "configuration_update"]);
 const ignoredEvents = new Set(["token_count", "agent_reasoning", "context_compacted", "entered_review_mode", "exited_review_mode", "warning", "error", "session_configured", "thread_settings_applied", "thread_goal_updated"]);
 const ignoredItems = new Set(["FunctionCallOutput", "CommandExecution", "Reasoning", "Extension", "McpToolCall", "DynamicToolCall", "ContextCompaction", "SubAgentActivity", "CollabAgentToolCall", "ImageView", "FileChange", "WebSearch", "HookPrompt"]);
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");

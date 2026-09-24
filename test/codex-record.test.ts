@@ -19,6 +19,19 @@ function harness() {
 }
 
 describe("canonical native Codex conversation records", () => {
+  it("continues through configuration updates without importing settings or losing message identity", () => {
+    const parse = harness(); parse(turn);
+    const user = parse(record("user", "user-1", "Preserve my requirement"));
+    const update = parse({ type: "response_item", timestamp: at,
+      payload: { type: "configuration_update", reasoning: { effort: "xhigh" } } });
+    expect(update).toMatchObject({ status: "excluded", reason: "non_conversation_response", state: user.state });
+    expect(parse(record("assistant", "final-1", "Done", "final_answer")))
+      .toMatchObject({ status: "message", message: { kind: "assistant_final" } });
+    expect(parse({ type: "response_item", payload: { type: "future_unknown_update" } }).status).toBe("unknown");
+    const internal = harness(); internal(turn);
+    internal({ type: "response_item", payload: { type: "configuration_update", reasoning: { effort: "high" } } });
+    expect(internal(record("assistant", "internal", "Settings are not a user request", "final_answer")).status).toBe("excluded");
+  });
   it("captures a created task's final without promoting its delegation tool output", () => {
     const parse = harness();
     parse({ type: "session_meta", payload: { id: "session-a", source: "vscode", thread_source: "agent_created_thread" } });

@@ -4,7 +4,18 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
-## Unreleased
+## 0.1.0-preview.11 — 2026-09-25
+
+- Support project registry v4, including registered nested Git repositories.
+  Resolve parent ownership independently of entry order and reject conflicting
+  cutover states, path traversal, reparse points and noncanonical Git roots.
+  This restores both source discovery and prompt/stop hooks on v4 workspaces.
+- Treat Codex `configuration_update` response items as non-conversation settings
+  so capture continues without importing them as user requirements. Unknown
+  record types still stop the cursor for review.
+- Recover partially populated `source=unknown` index rows only when their
+  nonempty working directory matches the verified original header. Conflicting
+  paths and unsupported identities remain unknown; the Codex index is unchanged.
 
 - Keep a successful current-project recall while also looking for original user
   evidence across historical project scopes. Recent assistant summaries no longer

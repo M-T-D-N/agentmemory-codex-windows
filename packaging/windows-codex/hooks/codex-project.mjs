@@ -87,7 +87,7 @@ function referencedProjectPath(entry, relocation, relativePath) {
 
 function readProjectRegistry(registryPath, workspaceRoot) {
   const parsed = JSON.parse(readFileSync(registryPath, "utf8"));
-  if (!Array.isArray(parsed?.projects) || (parsed.schema_version !== undefined && ![1, 2, 3].includes(parsed.schema_version))) throw new Error(`Invalid project registry: ${registryPath}`);
+  if (!Array.isArray(parsed?.projects) || (parsed.schema_version !== undefined && ![1, 2, 3, 4].includes(parsed.schema_version))) throw new Error(`Invalid project registry: ${registryPath}`);
   let relocation;
   try {
     relocation = JSON.parse(readFileSync(join(dirname(registryPath), "workspace-relocation.json"), "utf8"));
@@ -108,13 +108,17 @@ function readProjectRegistry(registryPath, workspaceRoot) {
     throw new Error("Invalid workspace relocation routing");
   }
   const seenIds = new Set(), seenPaths = new Set();
-  const projects = parsed.projects.map((entry) => {
-    const hasPath = Object.hasOwn(entry || {}, "path"), hasRef = Object.hasOwn(entry || {}, "relocation_ref");
+  for (const entry of parsed.projects) {
+    const hasPath = Object.hasOwn(entry || {}, "path"), hasRef = Object.hasOwn(entry || {}, "relocation_ref"), hasNested = Object.hasOwn(entry || {}, "nested_ref");
     if (typeof entry?.id !== "string" || !/^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(entry.id)
-      || (parsed.schema_version === 3 && !/^[a-z0-9][a-z0-9-]*$/.test(entry.id))
-      || seenIds.has(entry.id) || hasPath === hasRef || (hasPath && !relativePath(entry.path))
-      || (hasRef && parsed.schema_version !== 3)) throw new Error("Invalid project registry entry: " + registryPath);
+      || (parsed.schema_version >= 3 && !/^[a-z0-9][a-z0-9-]*$/.test(entry.id))
+      || seenIds.has(entry.id) || Number(hasPath) + Number(hasRef) + Number(hasNested) !== 1 || (hasPath && !relativePath(entry.path))
+      || (hasRef && ![3, 4].includes(parsed.schema_version))
+      || (hasNested && parsed.schema_version !== 4)) throw new Error("Invalid project registry entry: " + registryPath);
     seenIds.add(entry.id);
+  }
+  const baseProjectPath = (entry) => {
+    const hasRef = Object.hasOwn(entry, "relocation_ref");
     let projectPath = hasRef ? referencedProjectPath(entry, relocation, relativePath) : resolve(workspaceRoot, entry.path);
     if (relocation && !hasRef) {
       const location = relocation.cutover_state.registered_projects?.[entry.id];
@@ -124,6 +128,24 @@ function readProjectRegistry(registryPath, workspaceRoot) {
       projectPath = location === "target"
         ? resolve(relocation.target_root, relocation.namespaces.projects.replaceAll("{project}", entry.id))
         : resolve(relocation.cutover_state.legacy_control_root, entry.path);
+    }
+    return projectPath;
+  };
+  const paths = new Map(parsed.projects.filter(entry => !Object.hasOwn(entry, "nested_ref"))
+    .map(entry => [entry.id, baseProjectPath(entry)]));
+  const projects = parsed.projects.map((entry) => {
+    let projectPath = paths.get(entry.id);
+    if (Object.hasOwn(entry, "nested_ref")) {
+      const ref = entry.nested_ref;
+      if (!ref || typeof ref !== "object" || Array.isArray(ref)
+        || Object.keys(ref).some(key => !["project_id", "subpath"].includes(key))
+        || !paths.has(ref.project_id) || !relativePath(ref.subpath)) throw new Error("Invalid nested_ref: " + entry.id);
+      const parent = paths.get(ref.project_id);
+      if (relocation && relocation.cutover_state.registered_projects?.[entry.id]
+        !== relocation.cutover_state.registered_projects?.[ref.project_id]) throw new Error("Nested project cutover state must match its parent");
+      projectPath = resolve(parent, ref.subpath);
+      if (!pathContains(parent, projectPath) || canonicalPath(parent) === canonicalPath(projectPath)
+        || !physicalGitIdentity(parent) || !physicalGitIdentity(projectPath)) throw new Error("Nested project requires canonical parent and child repositories");
     }
     if (seenPaths.has(canonicalPath(projectPath))) throw new Error("Duplicate project registry path");
     seenPaths.add(canonicalPath(projectPath));

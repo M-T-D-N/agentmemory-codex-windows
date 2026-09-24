@@ -6,7 +6,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
 > [!IMPORTANT]
-> 이 저장소는 독립 Technical Preview `0.1.0-preview.10`입니다.
+> 이 저장소는 독립 Technical Preview `0.1.0-preview.11`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -75,7 +75,7 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.10` | 저장소 공개판과 소스 tag |
+| 공개 다운스트림 버전 | `0.1.0-preview.11` | 저장소 공개판과 소스 tag |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
@@ -85,7 +85,7 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 ## 빌드 없이 설치하기
 
-preview.10 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
+preview.11 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
 [npm/npx 설치 안내](../packaging/windows-codex/npm/README.md)를 사용합니다.
 Windows x64, Node.js 24 이상, Codex가 필요합니다. 빈 설치 폴더의 준비와
 예약 작업·훅 활성화를 별도로 확인하며, 기본 명령은 설치하지 않고 검증만 합니다.
@@ -110,7 +110,7 @@ Windows PowerShell에서 다음과 같이 실행합니다. 출력 폴더는 미�
 됩니다.
 
 ```powershell
-git clone --branch v0.1.0-preview.10 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.11 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

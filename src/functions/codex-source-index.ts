@@ -59,7 +59,7 @@ function classifyThread(row: Record<string, unknown>, sourceRoot: string): Codex
 
 async function classifyIndexedThread(row: Record<string, unknown>, root: string): Promise<CodexThreadIndexEntry> {
   const classified = classifyThread(row, root);
-  if (classified.status !== "unknown" || row.source !== "unknown" || row.cwd !== "" || row.thread_source !== null ||
+  if (classified.status !== "unknown" || row.source !== "unknown" || typeof row.cwd !== "string" || row.thread_source !== null ||
       ![0, 1].includes(row.archived as number) || !timestamp(row.created_at_ms) || !timestamp(row.updated_at_ms)) return classified;
   try {
     const relativePath = codexSourceRelativePath(root, row.rollout_path as string);
@@ -69,6 +69,7 @@ async function classifyIndexedThread(row: Record<string, unknown>, root: string)
       if (bytesRead !== headerBytes) throw Error("Source metadata changed while reading");
       const header = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, ""));
       if (!isDeepStrictEqual(parseCodexSourceIdentity(header, classified.sessionId, relativePath), source)) throw Error("Source metadata changed while reading");
+      if (row.cwd !== "" && canonicalCodexCwd(row.cwd as string) !== canonicalCodexCwd(source.cwd)) return classified;
       const threadSource = header.payload?.thread_source;
       if (["subagent", "guardian_review"].includes(threadSource)) return { sessionId: source.sessionId, status: "excluded", reason: "internal_thread_source" };
       if (!["user", "agent_created_thread", "agent_forked_thread"].includes(threadSource)) return classified;

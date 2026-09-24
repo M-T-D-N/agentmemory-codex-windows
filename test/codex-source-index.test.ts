@@ -95,6 +95,21 @@ describe.skipIf(!sqlite)("read-only Codex source index adapter", () => {
     const { root } = await fixture([{ source: "unknown", cwd: "", thread_source: null }]);
     expect((await readCodexThreadIndex(root)).entries[0]).toMatchObject({ status: "unknown" });
   });
+  it("recovers a partially populated placeholder only when its cwd matches the verified original", async () => {
+    const { root, path } = await fixture([{ source: "unknown", cwd: "", thread_source: null }]);
+    await mkdir(join(root, "sessions"));
+    await writeFile(join(root, "sessions/rollout-original_0.jsonl"), JSON.stringify({ type: "session_meta", payload: {
+      id: "s0", source: "vscode", cwd: root, timestamp: "1970-01-01T00:00:01.000Z", thread_source: "agent_created_thread",
+    } }) + "\n");
+    const db = new sqlite!.DatabaseSync(path);
+    try { db.prepare("UPDATE threads SET cwd = ?").run(root); } finally { db.close(); }
+    const before = await readFile(path);
+    expect((await readCodexThreadIndex(root)).entries[0]).toMatchObject({ status: "candidate", source: "vscode", threadSource: "agent_created_thread" });
+    expect(await readFile(path)).toEqual(before);
+    const mismatch = new sqlite!.DatabaseSync(path);
+    try { mismatch.prepare("UPDATE threads SET cwd = ?").run(join(root, "unrelated")); } finally { mismatch.close(); }
+    expect((await readCodexThreadIndex(root)).entries[0]).toMatchObject({ status: "unknown" });
+  });
   it("returns only a conservative conversation-evidence flag from optional index columns", async () => {
     const { root, path } = await fixture(Array.from({ length: 5 }, () => ({})));
     const db = new sqlite!.DatabaseSync(path);
