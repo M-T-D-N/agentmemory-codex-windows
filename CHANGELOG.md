@@ -11,6 +11,9 @@ The upstream AgentMemory release history remains in the
   suppress that lookup. `memory_recall` and REST search accept `sourceKind` to
   select user or assistant observations before candidate limits, while preserving
   archive visibility and project/agent access boundaries.
+- Use keyword retrieval for automatic recall instead of repeating hybrid graph
+  traversal already covered by graph context. REST `searchMode: "keyword"`
+  retains canonical visibility checks; ordinary searches keep hybrid retrieval.
 - Label automatic excerpts as user or derived evidence with their source dates
   and IDs. Preserve current evidence, prefer newer user corrections among the
   retrieved originals, and state that the current user request wins. The total

@@ -386,6 +386,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       agentId?: string
       trackAccess?: boolean
       sourceKind?: "user" | "assistant"
+      searchMode?: "keyword" | "hybrid"
     }) => {
       const idx = getSearchIndex()
 
@@ -394,6 +395,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         throw new Error('mem::search: query must be a non-empty string')
       }
       const query = data.query.trim()
+      if (data.searchMode !== undefined && !["keyword", "hybrid"].includes(data.searchMode)) {
+        throw new Error('mem::search: searchMode must be keyword or hybrid')
+      }
       if (data.sourceKind !== undefined && !["user", "assistant"].includes(data.sourceKind)) {
         throw new Error('mem::search: sourceKind must be user or assistant')
       }
@@ -489,7 +493,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         score: number
         observation?: CompressedObservation
       }>
-      if (hybridRanker) {
+      if (hybridRanker && data.searchMode !== "keyword") {
         try {
           const hybrid = await hybridRanker(query, fetchLimit, selection)
           results = hybrid.map((r) => ({

@@ -499,6 +499,9 @@ export function registerApiTriggers(
       if (body.sourceKind !== undefined && body.sourceKind !== "user" && body.sourceKind !== "assistant") {
         return { status_code: 400, body: { error: "sourceKind must be user or assistant" } };
       }
+      if (body.searchMode !== undefined && body.searchMode !== "keyword" && body.searchMode !== "hybrid") {
+        return { status_code: 400, body: { error: "searchMode must be keyword or hybrid" } };
+      }
       const queryAgentId =
         typeof (req as { query_params?: Record<string, string> })
           .query_params?.["agentId"] === "string"
@@ -557,6 +560,7 @@ export function registerApiTriggers(
       const payload = {
         query: body.query.trim(),
         sourceKind: body.sourceKind as "user" | "assistant" | undefined,
+        searchMode: body.searchMode as "keyword" | "hybrid" | undefined,
         limit: body.limit as number | undefined,
         project,
         cwd: body.cwd as string | undefined,

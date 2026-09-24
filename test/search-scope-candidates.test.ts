@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { VectorIndex } from "../src/state/vector-index.js";
 import { SearchIndex } from "../src/state/search-index.js";
@@ -47,6 +47,14 @@ describe("scope before retrieval candidate limits", () => {
     registerSearchFunction({ registerFunction(id: string, fn: Function) { handlers.set(id, fn); } } as never, kv as never);
     const input = { query: "Invoice rounding", project: "*", limit: 1, trackAccess: false };
     const search = handlers.get("mem::search")!;
+    const ranker = vi.fn(async () => []);
+    setHybridRanker(ranker);
+    expect((await search({ ...input, sourceKind: "user", searchMode: "keyword" })).results.map((r: any) => r.observation.id)).toEqual(["original"]);
+    expect(ranker).not.toHaveBeenCalled();
+    await search(input);
+    expect(ranker).toHaveBeenCalledOnce();
+    await expect(search({ ...input, searchMode: "invented" })).rejects.toThrow("searchMode");
+    setHybridRanker(null);
     expect((await search(input)).results[0].observation.title).toBe("assistant_response");
     expect((await search({ ...input, sourceKind: "user" })).results.map((r: any) => r.observation.id)).toEqual(["original"]);
     expect((await search({ ...input, sourceKind: "user", project: "other" })).results).toEqual([]);

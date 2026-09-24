@@ -872,8 +872,11 @@ This changes neither stored formats nor the canonical source/graph lifecycle.
 
 The managed user-prompt hook searches the exact current project first, then
 requests original user evidence with `sourceKind: "user"` across `*` within the
-same time budget, even when the local search found a match. This discovers older
-requirements stored before project moves without assigning unrelated records to
+same time budget, even when the local search found a match. It uses REST
+`searchMode: "keyword"`; the separate graph lookup
+already supplies graph context, so automatic recall does not repeat the full
+hybrid graph traversal. Omitted `searchMode` keeps ordinary hybrid search.
+This discovers requirements stored before project moves without assigning unrelated records to
 the current project or hard-coding aliases. A failed local read does not silently
 broaden scope; a failed historical lookup preserves local evidence and marks
 history unavailable. Graph lookup retains its current-project-first fallback,

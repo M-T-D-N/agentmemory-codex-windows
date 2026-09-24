@@ -47,10 +47,11 @@ describe("REST exact-project and provenance boundaries", () => {
   });
 
   it("forwards explicit source-kind selection and rejects an invalid selector before search", async () => {
-    expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", sourceKind: "user" } })).toMatchObject({ status_code: 200 });
-    expect(sdk.downstream.at(-1)).toMatchObject({ functionId: "mem::search", payload: { sourceKind: "user", project: "*" } });
+    expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", sourceKind: "user", searchMode: "keyword" } })).toMatchObject({ status_code: 200 });
+    expect(sdk.downstream.at(-1)).toMatchObject({ functionId: "mem::search", payload: { sourceKind: "user", project: "*", searchMode: "keyword" } });
     const count = sdk.downstream.length;
     expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", sourceKind: "other" } })).toMatchObject({ status_code: 400 });
+    expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", searchMode: "other" } })).toMatchObject({ status_code: 400 });
     expect(sdk.downstream.length).toBe(count);
   });
 

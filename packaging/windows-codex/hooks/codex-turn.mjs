@@ -848,7 +848,7 @@ async function federatedRecallContext(prompt, project) {
   const deadline = Date.now() + 1200;
   try {
     const search = async (scope, timeout, sourceKind) => {
-      const response = await post("/agentmemory/search", { query: prompt, project: scope, format: "full", limit: 12, token_budget: 1200, trackAccess: false,
+      const response = await post("/agentmemory/search", { query: prompt, project: scope, searchMode: "keyword", format: "full", limit: 12, token_budget: 1200, trackAccess: false,
         ...(sourceKind ? { sourceKind } : {}) }, timeout);
       const result = await response.json();
       if (!Array.isArray(result?.results) || result.error || result.success === false) throw Error("Invalid recall response");

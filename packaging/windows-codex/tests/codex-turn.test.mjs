@@ -666,7 +666,7 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
     assert.equal(calls.length, 4);
     const searches = calls.filter((call) => call.url.endsWith("/search"));
     assert.deepEqual(searches.map(call => call.body.project), ["current", "*"]);
-    assert.deepEqual(searches[0].body, { query: "federated recall", project: "current", format: "full", limit: 12, token_budget: 1200, trackAccess: false });
+    assert.deepEqual(searches[0].body, { query: "federated recall", project: "current", searchMode: "keyword", format: "full", limit: 12, token_budget: 1200, trackAccess: false });
     assert.ok(searches.every(call => call.body.trackAccess === false));
     const graphs = calls.filter((call) => call.url.endsWith("/graph/query") && call.body.queries);
     assert.deepEqual(calls.find((call) => call.body.startNodeId).body, { project: "current", startNodeId: "seed", maxDepth: 1, limit: 64 });
@@ -769,6 +769,7 @@ test("automatic recall keeps local evidence and searches user history even after
     const result = await federatedRecallContext("native source", "current");
     assert.deepEqual(calls.map(call => call.project), ["current", "*"]);
     assert.equal(calls[1].sourceKind, "user");
+    assert.ok(calls.every(body => body.searchMode === "keyword"));
     assert.match(result, /\[current\] obs-local @2026-09-14T00:00:00Z/);
     assert.match(result, /Native source capture verified/);
     assert.equal(calls[0].trackAccess, false);
