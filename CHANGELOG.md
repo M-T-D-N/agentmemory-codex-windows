@@ -6,6 +6,11 @@ The upstream AgentMemory release history remains in the
 
 ## 0.1.0-preview.11 — 2026-09-25
 
+- Page large graph write intents instead of sending their combined index shards
+  in one engine frame. Preserve source/precondition checks, durable commit
+  ordering and idempotent recovery across staging, application and cleanup.
+  Managed data contract 4 prevents older runtimes from opening the new intent
+  format; reverting requires a matching pre-upgrade data backup.
 - Use one hook work deadline shared by recall, capture, graph and curation.
   A lightweight graph-statistics read scales the base 12-second prompt budget
   with node-plus-edge count, up to 60 seconds; the registered host timeout is

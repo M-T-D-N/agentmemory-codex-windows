@@ -152,6 +152,29 @@ async function fixture(label: string) {
 }
 
 describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
+  it.each(["preparing", "page", "ready", "assignment", "complete", "cleanup"])("recovers a large paged intent after a physical %s crash", async boundary => {
+    expect(requireDurability).toBe(true);
+    const f = await fixture("paged-intent-" + boundary);
+    try {
+      const kv = await f.connect();
+      const { plan } = await prepareGraphWritePlan(kv, async store => {
+        for (let i = 0; i < 18; i++) await store.set(KV.graphQueryDocuments, String(i), "x".repeat(1024 * 1024));
+        await store.set(KV.graphNodeDegree, "n", 1);
+      });
+      f.arm((id, p) => boundary === "page" ? id === "state::set" && p.scope === KV.graphWritePlan && p.key === "page:0" :
+        boundary === "assignment" ? id === "state::set" && p.scope === KV.graphQueryDocuments :
+        boundary === "cleanup" ? id === "state::delete" && p.scope === KV.graphWritePlan && p.key === "page:0" :
+        id === "state::set" && p.scope === KV.graphWritePlan && p.key === "current" && p.value.phase === boundary);
+      await expect(applyGraphWritePlan(kv, plan)).rejects.toThrow("physical engine crash");
+      const restarted = await f.restart();
+      await resumeGraphWritePlan(restarted);
+      if (await restarted.get(KV.graphNodeDegree, "n") === null) await applyGraphWritePlan(restarted, plan);
+      for (const write of plan.writes) expect(await restarted.get(write.scope, write.key)).toEqual(write.value);
+      expect(await restarted.list(KV.graphWritePlan)).toEqual([]);
+      report.push({ label: f.label, root: f.root, boundary, planBytes: Buffer.byteLength(JSON.stringify(plan)), recovered: true, events: f.events });
+    } finally { await f.close(); }
+  }, 90_000);
+
   it.skipIf(process.env.AGENTMEMORY_TEST_ENGINE_PERFORMANCE !== "true")("measures durable writes with a representative 20 MiB scope", async () => {
     expect(requireDurability).toBe(true);
     const f = await fixture("scope-20MiB");
@@ -181,7 +204,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
   afterAll(async () => {
     if (process.env.AGENTMEMORY_ENGINE_TEST_REPORT) await writeFile(process.env.AGENTMEMORY_ENGINE_TEST_REPORT,
       JSON.stringify({ engineVersion: "0.11.2", engineSha256: expectedHash, nodeVersion: process.version,
-        accepted: report.length === 9, passedCases: report.length, expectedCases: 9, cases: report, runs }, null, 2));
+        accepted: report.length === 15, passedCases: report.length, expectedCases: 15, cases: report, runs }, null, 2));
   });
   it.each(["intent", "node", "completion", "intent-removal"])("recovers graph assignments after %s commit and physical engine exit", async boundary => {
     const f = await fixture("graph-" + boundary);

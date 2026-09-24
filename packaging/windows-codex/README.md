@@ -231,9 +231,9 @@ identity and working directory, restarts the owned tasks, and requires the
 normal status path to become healthy. It never runs a standard reinstall inside
 the live runtime and never migrates or deletes canonical data.
 
-The managed package now declares data contract version 3 for source-linked
-duplicate captures, including their partial-forget protection. It includes the
-version 2 native capture, recoverable graph writes and archive lifecycle state. The release and installed
+The managed package now declares data contract version 4 for paged graph write
+intents. It retains version 3 source-linked duplicate captures and partial-forget
+protection, and version 2 native capture, recoverable graph writes and archive lifecycle state. The release and installed
 manifests retain that contract independently of the upstream compatibility version.
 An absent declaration means legacy contract 1. The current installer rejects a
 target contract below the installed contract before cutover. The managed worker
@@ -1205,6 +1205,17 @@ the barrier before recovery and function registration. Ordinary writes wait for
 flush success. Graph plans flush the intent, assignment batch and intent removal
 in that order. A flush failure fences subsequent writes for recovery. Portable
 hosts retain the default behavior unless they explicitly require this mode.
+
+Graph intents larger than 1 MiB are encoded as checksummed 1 MiB pages in the
+same StateModule scope. The preparing manifest is durable before staging pages;
+pages are flushed before the ready manifest; canonical assignments are flushed
+before the complete manifest. Recovery discards incomplete staging, replays a
+ready plan idempotently after validating all pages, sources and preconditions,
+or finishes cleanup after a completed plan. Missing or changed ready pages block
+graph access rather than permit partial reads. Small version 1/2 intents remain
+readable. Aggregate plan size no longer has to fit a single engine frame; each
+canonical record must still fit the transport limit. This does not make query
+shard reads independent of corpus size or remove per-record memory limits.
 
 The engine patch uses the existing canonical file store and dirty-scope lock,
 waits for file writes/sync/rename, retains unpersisted work on errors, and lets an

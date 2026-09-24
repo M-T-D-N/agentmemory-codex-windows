@@ -26,6 +26,16 @@ export interface GraphWritePlan {
   writes: Array<{ scope: string; key: string; before: string } & ({ value: unknown; delete?: never } | { delete: true; value?: never })>;
 }
 
+export interface GraphWritePlanPages {
+  version: 3;
+  id: string;
+  phase: "preparing" | "ready" | "complete";
+  bytes: number;
+  pages: string[];
+  writes: number;
+  checksum: string;
+}
+
 export interface GraphObservationResult {
   version: 1;
   id: string;

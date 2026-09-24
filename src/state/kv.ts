@@ -1,7 +1,7 @@
 import type { ISdk } from 'iii-sdk'
 import { KV, OBSERVATION_REFERENCE_ROW_SCOPES } from './schema.js'
 import { inObservationRecovery, withObservationWrite } from './observation-write.js'
-import { hasActiveGraphWritePlan, permitsGraphPlanAccess, validateGraphWritePlan, waitForGraphWritePlan } from './graph-write-plan.js'
+import { hasActiveGraphWritePlan, permitsGraphPlanAccess, validateGraphWriteIntent, waitForGraphWritePlan } from './graph-write-plan.js'
 
 type Row = Record<string, any>
 const OBS = 'mem:obs:'
@@ -46,7 +46,7 @@ export class StateKV {
   private async guardGraphAccess(scope: string, key?: string, mutation = false): Promise<void> {
     this.graphPlanReady ??= (async () => {
       const pending = await this.get(KV.graphWritePlan, 'current')
-      if (pending) { validateGraphWritePlan(pending); this.graphPlanPending = true }
+      if (pending) { validateGraphWriteIntent(pending); this.graphPlanPending = true }
     })().catch(error => { this.recoveryUncertain = true; throw error })
     await this.graphPlanReady
     if (scope === KV.graphWritePlan && mutation && !permitsGraphPlanAccess(this, scope, key, true)) {
@@ -148,9 +148,9 @@ export class StateKV {
 
   private async mutate<T>(functionId: string, payload: { scope: string; [key: string]: unknown }): Promise<T> {
     try {
-      if (payload.scope === KV.graphWritePlan && functionId === 'state::delete') await this.flush()
+      if (payload.scope === KV.graphWritePlan && payload.key === 'current' && functionId === 'state::delete') await this.flush()
       const result = await this.sdk.trigger<any, T>({ function_id: functionId, payload })
-      if (payload.scope === KV.graphWritePlan || !permitsGraphPlanAccess(this, payload.scope, payload.key as string, true)) await this.flush()
+      if (payload.scope === KV.graphWritePlan && payload.key === 'current' || !permitsGraphPlanAccess(this, payload.scope, payload.key as string, true)) await this.flush()
       return result
     } catch (error) {
       if (payload.scope === SESSIONS || payload.scope.startsWith(OBS) || payload.scope.startsWith('mem:enriched:') || payload.scope.startsWith('mem:graph:') || referenceScopes.has(payload.scope)) {
@@ -163,7 +163,7 @@ export class StateKV {
   async set<T = unknown>(scope: string, key: string, value: T): Promise<T> {
     return withObservationWrite(async () => {
       const guarded = await this.guardSet(scope, key, value)
-      if (scope === KV.graphWritePlan) { validateGraphWritePlan(guarded); this.graphPlanPending = true }
+      if (scope === KV.graphWritePlan && key === 'current') { validateGraphWriteIntent(guarded); this.graphPlanPending = true }
       return this.mutate<T>('state::set', { scope, key, value: guarded })
     })
   }
@@ -200,7 +200,7 @@ export class StateKV {
         throw new Error('Protected session or observation cannot be permanently deleted')
       }
       await this.mutate<void>('state::delete', { scope, key })
-      if (scope === KV.graphWritePlan) this.graphPlanPending = false
+      if (scope === KV.graphWritePlan && key === 'current') this.graphPlanPending = false
     })
   }
 

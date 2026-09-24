@@ -30,6 +30,25 @@ function fixture() {
 }
 
 describe("StateModule durability boundaries", () => {
+  it.each([1, 2, 3, 4, 5, 6, 7])("recovers paged intents after flush %i fails without exposing partial assignments", async boundary => {
+    const f = fixture(), kv = f.kv();
+    const { plan } = await prepareGraphWritePlan(kv, async store => {
+      await store.set(KV.graphQueryDocuments, "00", "x".repeat(1_100_000));
+      await store.set(KV.graphNodeDegree, "n", 1);
+    });
+    f.failAt(boundary);
+    await expect(applyGraphWritePlan(kv, plan)).rejects.toThrow("disk unavailable");
+    expect(kv.requiresWriteRecovery()).toBe(true);
+    f.crash();
+    const restarted = f.kv();
+    await resumeGraphWritePlan(restarted);
+    if (await restarted.get(KV.graphNodeDegree, "n") === null) await applyGraphWritePlan(restarted, plan);
+    expect(await restarted.get(KV.graphNodeDegree, "n")).toBe(1);
+    expect(await restarted.get(KV.graphQueryDocuments, "00")).toBe(plan.writes[0].value);
+    expect(await restarted.get(KV.graphWritePlan, "current")).toBeNull();
+    expect(await restarted.get(KV.graphWritePlan, "page:0")).toBeNull();
+  });
+
   it("does not acknowledge an ordinary write when disk confirmation fails", async () => {
     const f = fixture(), kv = f.kv(); f.failAt(1);
     await expect(kv.set(KV.config, "key", { value: 1 })).rejects.toThrow("disk unavailable");

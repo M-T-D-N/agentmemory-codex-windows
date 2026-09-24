@@ -10,7 +10,7 @@
     "repositoryName": "agentmemory-codex-windows",
     "supportedHostProfile": "windows-codex",
     "agentmemoryCompatibilityVersion": "0.9.29",
-    "dataContractVersion": 3
+    "dataContractVersion": 4
   },
   "type": "module",
   "main": "dist/index.mjs",

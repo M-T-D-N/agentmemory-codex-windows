@@ -14,7 +14,7 @@ async function fixture() {
   const script = path.join(source, 'packaging/windows-codex/Build-WindowsCodex.ps1');
   await mkdir(path.dirname(script), { recursive: true }); await mkdir(bin);
   await copyFile(builder, script);
-  await writeFile(path.join(source, 'package.json'), JSON.stringify({ version:'0.9.29', agentmemoryDownstream:{version:'0.1.0-preview.10',dataContractVersion:3} }));
+  await writeFile(path.join(source, 'package.json'), JSON.stringify({ version:'0.9.29', agentmemoryDownstream:{version:'0.1.0-preview.10',dataContractVersion:4} }));
   for (const name of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', 'upstream-source.json']) await writeFile(path.join(source, name), '{}');
   await writeFile(path.join(bin, 'git.cmd'), '@echo off\r\nif "%~3"=="rev-parse" goto rev\r\nif "%~3"=="status" goto status\r\nexit /b 4\r\n:rev\r\necho aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\nexit /b 0\r\n:status\r\necho M source.ts\r\nexit /b 0\r\n');
   await writeFile(path.join(bin, 'pnpm.cmd'), '@echo off\r\necho %*>>"%AM_VALIDATION_TRACE%"\r\nif "%AM_VALIDATION_FAIL%"=="1" if "%~2"=="typecheck" exit /b 9\r\nexit /b 0\r\n');

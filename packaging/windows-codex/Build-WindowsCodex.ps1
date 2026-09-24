@@ -77,8 +77,8 @@ if ($iiiHash -ne [string]$thirdParty.iii_engine.sha256) {
 $packageJson = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
 $version = [string]$packageJson.version
 $downstreamVersion = [string]$packageJson.agentmemoryDownstream.version
-if ($packageJson.agentmemoryDownstream.dataContractVersion -ne 3) {
-    throw 'This managed runtime requires data contract version 3.'
+if ($packageJson.agentmemoryDownstream.dataContractVersion -ne 4) {
+    throw 'This managed runtime requires data contract version 4.'
 }
 if ($downstreamVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
     throw 'package.json agentmemoryDownstream.version must be a semantic version.'

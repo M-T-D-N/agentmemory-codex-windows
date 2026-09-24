@@ -9,6 +9,7 @@ import { registerRememberFunction } from "../src/functions/remember.js";
 import type { GraphEdge, GraphNode, GraphSnapshot } from "../src/types.js";
 import { StateKV } from "../src/state/kv.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
+import { SAFE_PAYLOAD_BYTES } from "../src/state/frame-guard.js";
 
 function engine() {
   const backing = mockKV();
@@ -57,6 +58,107 @@ async function prepare(kv: ReturnType<typeof mockKV>) {
 }
 
 describe("materialized graph assignments", () => {
+  it("transports a 20 MiB intent through bounded pages without splitting its canonical commit", async () => {
+    const f = engine(), kv = f.fresh();
+    const trigger = f.sdk.trigger.bind(f.sdk);
+    let largest = 0, pages = 0;
+    vi.spyOn(f.sdk, "trigger").mockImplementation(async request => {
+      const inputBytes = Buffer.byteLength(JSON.stringify(request));
+      expect(inputBytes).toBeLessThan(SAFE_PAYLOAD_BYTES);
+      largest = Math.max(largest, inputBytes);
+      if (request.function_id === "state::set" && request.payload.scope === KV.graphWritePlan && request.payload.key.startsWith("page:")) pages++;
+      const value = await trigger(request);
+      expect(Buffer.byteLength(JSON.stringify(value) ?? "")).toBeLessThan(SAFE_PAYLOAD_BYTES);
+      return value;
+    });
+    const { plan } = await prepareGraphWritePlan(kv, async store => {
+      for (let i = 0; i < 20; i++) await store.set(KV.graphQueryDocuments, String(i), "가😀".repeat(150_000));
+      await store.set(KV.graphSnapshot, "current", { revision: 1 });
+    });
+    expect(Buffer.byteLength(JSON.stringify(plan))).toBeGreaterThan(20 * 1024 * 1024);
+    await applyGraphWritePlan(kv, plan);
+    expect(pages).toBeGreaterThan(20);
+    expect(largest).toBeLessThan(1.5 * 1024 * 1024);
+    expect(await kv.get(KV.graphSnapshot, "current")).toEqual({ revision: 1 });
+    expect(await kv.list(KV.graphWritePlan)).toEqual([]);
+    expect(kv.requiresWriteRecovery()).toBe(false);
+  }, 30_000);
+
+  it("recovers every paged staging, commit, assignment and cleanup interruption", async () => {
+    const baseline = mockKV();
+    const { plan } = await prepareGraphWritePlan(baseline, async store => {
+      await store.set(KV.graphQueryDocuments, "00", "x".repeat(1_100_000));
+      await store.set(KV.graphNodeDegree, "n", 1);
+    });
+    const operations: string[] = [];
+    await applyGraphWritePlan({ ...baseline,
+      async set<T>(scope: string, key: string, value: T) { operations.push(`set:${scope}:${key}`); return baseline.set(scope, key, value); },
+      async delete(scope: string, key: string) { operations.push(`delete:${scope}:${key}`); await baseline.delete(scope, key); },
+    }, plan);
+    for (const after of [false, true]) for (let boundary = 1; boundary <= operations.length; boundary++) {
+      const kv = mockKV(); let count = 0;
+      const run = async <T>(action: () => Promise<T>) => {
+        const fail = ++count === boundary;
+        if (fail && !after) throw Error("interrupted");
+        const result = await action();
+        if (fail) throw Error("lost acknowledgement");
+        return result;
+      };
+      await expect(applyGraphWritePlan({ ...kv,
+        set: <T>(scope: string, key: string, value: T) => run(() => kv.set(scope, key, value)),
+        delete: (scope: string, key: string) => run(() => kv.delete(scope, key)),
+      }, plan)).rejects.toThrow();
+      await resumeGraphWritePlan(kv);
+      // Staging has not committed; the caller can safely prepare or retry the original batch.
+      if (await kv.get(KV.graphNodeDegree, "n") === null) await applyGraphWritePlan(kv, plan);
+      expect(await kv.get(KV.graphNodeDegree, "n")).toBe(1);
+      expect(await kv.get(KV.graphQueryDocuments, "00")).toBe(plan.writes[0].value);
+      expect(await kv.list(KV.graphWritePlan)).toEqual([]);
+    }
+  }, 30_000);
+
+  it.each(["missing", "corrupt"])("fences a committed intent with a %s page before any canonical assignment", async fault => {
+    const f = engine(), kv = f.fresh();
+    const { plan } = await prepareGraphWritePlan(kv, store => store.set(KV.graphQueryDocuments, "00", "x".repeat(1_100_000)));
+    const setter = f.backing.set.bind(f.backing);
+    vi.spyOn(f.backing, "set").mockImplementation(async (scope, key, value) => {
+      await setter(scope, key, value);
+      if (scope === KV.graphWritePlan && key === "current" && (value as any)?.phase === "ready") throw Error("lost acknowledgement");
+      return value;
+    });
+    await expect(applyGraphWritePlan(kv, plan)).rejects.toThrow("lost acknowledgement");
+    if (fault === "missing") await f.backing.delete(KV.graphWritePlan, "page:0");
+    else await setter(KV.graphWritePlan, "page:0", "AAAA");
+    const restarted = f.fresh();
+    await expect(resumeGraphWritePlan(restarted)).rejects.toThrow(/page.*(missing|checksum)/);
+    await expect(restarted.get(KV.graphQueryDocuments, "00")).rejects.toThrow("pending");
+    expect(await f.backing.get(KV.graphQueryDocuments, "00")).toBeNull();
+    expect(await f.backing.get(KV.graphWritePlan, "current")).toMatchObject({ phase: "ready" });
+  });
+
+  it("flushes pages before their ready marker and assignments before the complete marker", async () => {
+    const f = engine(); const events: string[] = [];
+    const trigger = f.sdk.trigger.bind(f.sdk);
+    vi.spyOn(f.sdk, "trigger").mockImplementation(async request => {
+      if (request.function_id === "state::flush") { events.push("flush"); return { durability: "file-flush-v1", flushedScopes: 1 }; }
+      if (request.function_id === "state::set") events.push(request.payload.scope === KV.graphWritePlan ? request.payload.value?.phase ?? request.payload.key : "assignment");
+      return trigger(request);
+    });
+    const kv = new StateKV(f.sdk as never, { requireDurability: true });
+    const { plan } = await prepareGraphWritePlan(kv, store => store.set(KV.graphQueryDocuments, "00", "x".repeat(1_100_000)));
+    await applyGraphWritePlan(kv, plan);
+    const ready = events.indexOf("ready"), complete = events.indexOf("complete");
+    expect(events.slice(ready - 2, ready + 2)).toEqual(["page:1", "flush", "ready", "flush"]);
+    expect(events.slice(complete - 2, complete + 2)).toEqual(["assignment", "flush", "complete", "flush"]);
+    expect(kv.requiresWriteRecovery()).toBe(false);
+  });
+
+  it("rejects an individually oversized assignment before publishing any intent", async () => {
+    const kv = mockKV();
+    await expect(prepareGraphWritePlan(kv, store => store.set(KV.graphQueryDocuments, "00", "x".repeat(SAFE_PAYLOAD_BYTES)))).rejects.toThrow("single graph record");
+    expect(await kv.list(KV.graphWritePlan)).toEqual([]);
+    expect(await kv.get(KV.graphQueryDocuments, "00")).toBeNull();
+  });
   it("reports a write-only failure to the existing liveness supervisor without probing or mutating state", async () => {
     const f = engine(), kv = f.fresh();
     registerApiTriggers(f.sdk as never, kv, async () => ({ context: "", blocks: 0, tokens: 0 }), undefined, undefined, undefined, undefined,

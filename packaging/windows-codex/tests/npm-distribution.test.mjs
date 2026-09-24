@@ -107,7 +107,7 @@ test('managed worker checks data compatibility and failed cutover before importi
     await copyFile(path.join(packaging, 'node/agentmemory-worker.mjs'), worker);
     const marker = path.join(dir, 'imported');
     await writeFile(path.join(dir, 'runtime/package/dist/cli.mjs'), 'import {writeFileSync} from "node:fs"; writeFileSync(process.env.AM_WORKER_TEST_MARKER,"imported"); throw Error("fixture entry reached");');
-    for (const [required, supported, status, allowed] of [[2, 1, 'activated', false], [3, 2, 'activated', false], [3, 3, 'activated', true], [2, 2, 'cutover_failed', false],
+    for (const [required, supported, status, allowed] of [[2, 1, 'activated', false], [3, 2, 'activated', false], [3, 3, 'activated', true], [4, 3, 'activated', false], [4, 4, 'activated', true], [2, 2, 'cutover_failed', false],
       ['2', 2, 'activated', false], [null, 2, 'activated', false], [2, null, 'activated', false],
       [2, 2, 'activated', true], [undefined, undefined, undefined, true]]) {
       await rm(marker, { force: true });

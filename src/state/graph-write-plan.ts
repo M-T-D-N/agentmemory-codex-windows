@@ -1,32 +1,37 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { GraphWritePlan } from "../types.js";
+import type { GraphWritePlan, GraphWritePlanPages } from "../types.js";
 import type { StateKV } from "./kv.js";
 import { KV } from "./schema.js";
 import { checkPayloadFrameSize } from "./frame-guard.js";
 import { withObservationWrite } from "./observation-write.js";
 
-type Store = Pick<StateKV, "get" | "set" | "delete">;
-const applying = new AsyncLocalStorage<{ kv: Store; plan: GraphWritePlan; active: boolean }>();
+type Store = Pick<StateKV, "get" | "set" | "delete"> & Partial<Pick<StateKV, "flush">>;
+type Intent = GraphWritePlan | GraphWritePlanPages;
+const PAGE_BYTES = 1024 * 1024;
+const applying = new AsyncLocalStorage<{ kv: Store; plan: GraphWritePlan | null; pages: number; active: boolean }>();
 const activeApplications = new WeakMap<Store, Promise<void>>();
 export function hasActiveGraphWritePlan(kv: Store): boolean { return activeApplications.has(kv); }
 export async function waitForGraphWritePlan(kv: Store): Promise<void> { await activeApplications.get(kv); }
 export function permitsGraphPlanAccess(kv: Store, scope: string, key?: string, mutation = false): boolean {
   const current = applying.getStore();
-  return Boolean(current?.active && current.kv === kv && (!mutation || scope === KV.graphWritePlan && key === "current" ||
-    current.plan.writes.some(write => write.scope === scope && write.key === key)));
+  const page = typeof key === "string" && /^page:(0|[1-9][0-9]*)$/.test(key) ? Number(key.slice(5)) : -1;
+  return Boolean(current?.active && current.kv === kv && (!mutation || scope === KV.graphWritePlan &&
+    (key === "current" || page >= 0 && page < current.pages) ||
+    current.plan?.writes.some(write => write.scope === scope && write.key === key)));
 }
-async function withPlan<T>(kv: Store, plan: GraphWritePlan, action: () => Promise<T>): Promise<T> {
+async function withPlan<T>(kv: Store, plan: GraphWritePlan | null, action: () => Promise<T>, pages = 0): Promise<T> {
   if (activeApplications.has(kv)) throw Error("Graph write plan application is already active");
   let release!: () => void;
   activeApplications.set(kv, new Promise<void>(resolve => { release = resolve; }));
-  const current = { kv, plan, active: true };
+  const current = { kv, plan, pages, active: true };
   try { return await applying.run(current, () => withObservationWrite(action)); }
   finally { current.active = false; activeApplications.delete(kv); release(); }
 }
 export type GraphPlanStore = Pick<StateKV, "get" | "set">;
 export type GraphPlanOverlay = GraphPlanStore & Pick<StateKV, "delete">;
 const PLAN_KEY = "current";
+const pageKey = (index: number) => `page:${index}`;
 const scopes = new Set<string>([KV.graphNodes, KV.graphEdges, KV.graphSnapshot,
   KV.graphNameIndex, KV.graphEdgeKey, KV.graphNodeDegree, KV.graphQueryDocuments,
   KV.graphQueryAdjacency, KV.graphQueryManifest]);
@@ -90,15 +95,68 @@ export function validateGraphWritePlan(input: unknown): GraphWritePlan {
           !["mem::graph-project-purge", "mem::forget"].includes(String(entry.functionId))) throw Error("Invalid graph cleanup audit assignment");
     }
     if (typeof write.before !== "string" || !/^[a-f0-9]{64}$/.test(write.before)) throw Error("Invalid graph write plan precondition");
+    if (!write.delete) {
+      const oversized = checkPayloadFrameSize({ scope: write.scope, key: write.key, value: write.value }, "a single graph record exceeds the transport limit");
+      if (oversized) throw Error(oversized.error);
+    }
     const key = address(write.scope, write.key);
     if (seen.has(key)) throw Error("Duplicate graph write plan target");
     seen.add(key);
   }
   const normalized = { version: plan.version, createdAt: plan.createdAt, sources: plan.sources, writes: plan.writes };
   if (plan.id !== identity(normalized)) throw Error("Graph write plan checksum mismatch");
-  const oversized = checkPayloadFrameSize(plan, "reduce the graph batch before preparing a write plan");
-  if (oversized) throw Error(oversized.error);
   return { ...normalized, id: plan.id };
+}
+
+const byteDigest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
+function pageManifest(plan: GraphWritePlan, bytes: Buffer): GraphWritePlanPages {
+  const pages: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += PAGE_BYTES) pages.push(byteDigest(bytes.subarray(offset, offset + PAGE_BYTES)));
+  return sealPages({ version: 3, id: plan.id, phase: "preparing", bytes: bytes.length, pages, writes: plan.writes.length });
+}
+function sealPages(body: Omit<GraphWritePlanPages, "checksum">): GraphWritePlanPages {
+  return { ...body, checksum: digest(body) };
+}
+function changePhase(intent: GraphWritePlanPages, phase: GraphWritePlanPages["phase"]): GraphWritePlanPages {
+  const { checksum: _, ...body } = intent;
+  return sealPages({ ...body, phase });
+}
+
+export function validateGraphWriteIntent(input: unknown): Intent {
+  if ((input as Intent)?.version !== 3) return validateGraphWritePlan(input);
+  const record = input as GraphWritePlanPages;
+  if (!hash(record.id) || !["preparing", "ready", "complete"].includes(record.phase) ||
+      !Number.isSafeInteger(record.bytes) || record.bytes <= 0 || !Array.isArray(record.pages) ||
+      record.pages.length !== Math.ceil(record.bytes / PAGE_BYTES) || !record.pages.every(hash) ||
+      !Number.isSafeInteger(record.writes) || record.writes < 1 || record.writes > 20_000) throw Error("Invalid paged graph write intent");
+  const { checksum, ...body } = record;
+  if (checksum !== digest(body)) throw Error("Paged graph write intent checksum mismatch");
+  if (checkPayloadFrameSize(record, "graph write intent manifest exceeds the transport limit")) throw Error("Graph write intent manifest is too large");
+  return record;
+}
+
+async function loadIntent(kv: Store, intent: Intent): Promise<GraphWritePlan> {
+  if (intent.version !== 3) return intent;
+  if (intent.phase !== "ready") throw Error("Graph write pages are not committed");
+  const buffers: Buffer[] = [];
+  for (let i = 0; i < intent.pages.length; i++) {
+    const page = await kv.get<string>(KV.graphWritePlan, pageKey(i));
+    if (typeof page !== "string" || page.length > Math.ceil(PAGE_BYTES / 3) * 4) throw Error("Graph write page is missing or oversized");
+    const bytes = Buffer.from(page, "base64");
+    if (page !== bytes.toString("base64") || bytes.length !== Math.min(PAGE_BYTES, intent.bytes - i * PAGE_BYTES) ||
+        byteDigest(bytes) !== intent.pages[i]) throw Error("Graph write page checksum mismatch");
+    buffers.push(bytes);
+  }
+  const plan = validateGraphWritePlan(JSON.parse(Buffer.concat(buffers).toString("utf8")));
+  if (plan.id !== intent.id || plan.writes.length !== intent.writes) throw Error("Graph write pages do not match their intent");
+  return plan;
+}
+
+async function clearIntent(kv: Store, intent: Intent): Promise<void> {
+  if (intent.version === 3) {
+    for (let i = 0; i < intent.pages.length; i++) await kv.delete(KV.graphWritePlan, pageKey(i));
+  }
+  await kv.delete(KV.graphWritePlan, PLAN_KEY);
 }
 
 // The caller owns the graph write lock throughout planning and application.
@@ -164,31 +222,65 @@ async function applyAssignments(kv: Store, plan: GraphWritePlan): Promise<void> 
       else await kv.set(write.scope, write.key, write.value);
     }
   }
-  await kv.delete(KV.graphWritePlan, PLAN_KEY);
 }
 
 // Lifecycle barriers must prevent other writers while the durable plan is pending.
 // A failed state acknowledgement requires the existing worker recovery procedure.
 export async function applyGraphWritePlan(kv: Store, candidate: GraphWritePlan): Promise<void> {
   const plan = validateGraphWritePlan(candidate);
+  const bytes = Buffer.from(JSON.stringify(plan), "utf8");
+  const staged = bytes.length > PAGE_BYTES ? pageManifest(plan, bytes) : null;
   return withPlan(kv, plan, async () => {
-  const pending = await kv.get<GraphWritePlan>(KV.graphWritePlan, PLAN_KEY);
+  const pending = await kv.get<Intent>(KV.graphWritePlan, PLAN_KEY);
+  let intent: Intent = plan;
   if (pending) {
-    if (validateGraphWritePlan(pending).id !== plan.id) throw Error("Another graph write plan requires recovery");
+    intent = validateGraphWriteIntent(pending);
+    if (intent.id !== plan.id) throw Error("Another graph write plan requires recovery");
+    await loadIntent(kv, intent);
   } else {
     await validateSources(kv, plan);
     for (const write of plan.writes) if (digest(await kv.get(write.scope, write.key)) !== write.before) throw Error("Graph write plan preview is stale");
     if (!plan.writes.length) return;
-    await kv.set(KV.graphWritePlan, PLAN_KEY, plan);
+    if (staged) {
+      await kv.set(KV.graphWritePlan, PLAN_KEY, staged);
+      for (let i = 0; i < staged.pages.length; i++) {
+        await kv.set(KV.graphWritePlan, pageKey(i), bytes.subarray(i * PAGE_BYTES, (i + 1) * PAGE_BYTES).toString("base64"));
+      }
+      // Pages must be durable before their commit point can survive a restart.
+      await kv.flush?.();
+      intent = changePhase(staged, "ready");
+      await kv.set(KV.graphWritePlan, PLAN_KEY, intent);
+    } else await kv.set(KV.graphWritePlan, PLAN_KEY, plan);
   }
   await applyAssignments(kv, plan);
-  });
+  if (intent.version === 3) {
+    // Persist assignments before allowing recovery to discard the redo pages.
+    await kv.flush?.();
+    intent = changePhase(intent, "complete");
+    await kv.set(KV.graphWritePlan, PLAN_KEY, intent);
+  }
+  await clearIntent(kv, intent);
+  }, staged?.pages.length ?? 0);
 }
 
 export async function resumeGraphWritePlan(kv: Store): Promise<{ recovered: boolean; writes: number }> {
   const pending = await kv.get(KV.graphWritePlan, PLAN_KEY);
   if (!pending) return { recovered: false, writes: 0 };
-  const plan = validateGraphWritePlan(pending);
-  await withPlan(kv, plan, () => applyAssignments(kv, plan));
+  let intent = validateGraphWriteIntent(pending);
+  if (intent.version === 3 && intent.phase !== "ready") {
+    const record = intent;
+    await withPlan(kv, null, () => clearIntent(kv, record), record.pages.length);
+    return { recovered: true, writes: record.phase === "complete" ? record.writes : 0 };
+  }
+  const plan = await loadIntent(kv, intent);
+  await withPlan(kv, plan, async () => {
+    await applyAssignments(kv, plan);
+    if (intent.version === 3) {
+      await kv.flush?.();
+      intent = changePhase(intent, "complete");
+      await kv.set(KV.graphWritePlan, PLAN_KEY, intent);
+    }
+    await clearIntent(kv, intent);
+  }, intent.version === 3 ? intent.pages.length : 0);
   return { recovered: true, writes: plan.writes.length };
 }
