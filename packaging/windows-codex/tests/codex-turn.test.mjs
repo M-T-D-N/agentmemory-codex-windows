@@ -704,6 +704,7 @@ test("registry v4 prompt and stop keep recall injection while storage belongs to
     };
     process.stdout.write = value => { output.push(String(value)); return true; };
     await handleTurn({ session_id: "native-fixture", turn_id: "turn-a", cwd, prompt: "federated recall" }, "UserPromptSubmit");
+    assert.ok(calls[0].url.endsWith("/search") && calls[1].url.endsWith("/search"), "Both original searches precede competing graph/backlog requests and storage");
     assert.equal(calls.filter(call => call.url.endsWith("/observe")).length, 1);
     assert.deepEqual(calls.find(call => call.url.endsWith("/session/start")).body,
       { action: "capture-source", project: "source-project", sessionId: "native-fixture" });
@@ -896,7 +897,7 @@ test("empty local search does not start a second full deadline after its retriev
   const originalFetch = globalThis.fetch, originalNow = Date.now;
   let now = 1000; const calls = [];
   Date.now = () => now;
-  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); now += 1201; return new Response(JSON.stringify({ results: [] })); };
+  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); now += 3001; return new Response(JSON.stringify({ results: [] })); };
   try {
     assert.equal(await federatedRecallContext("native capture", "current"), null);
     assert.deepEqual(calls.map(call => call.project), ["current"]);

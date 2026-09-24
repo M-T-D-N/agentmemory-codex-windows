@@ -845,7 +845,7 @@ function formatRecallContext(prompt, project, result) {
 
 async function federatedRecallContext(prompt, project) {
   if (graphTokens(prompt).length === 0) return null;
-  const deadline = Date.now() + 1200;
+  const deadline = Date.now() + 3000;
   try {
     const search = async (scope, timeout, sourceKind) => {
       const response = await post("/agentmemory/search", { query: prompt, project: scope, searchMode: "keyword", format: "full", limit: 12, token_budget: 1200, trackAccess: false,
@@ -854,7 +854,7 @@ async function federatedRecallContext(prompt, project) {
       if (!Array.isArray(result?.results) || result.error || result.success === false) throw Error("Invalid recall response");
       return result;
     };
-    const current = await search(project, 1200);
+    const current = await search(project, 2000);
     const local = current.results.filter(entry => entry.project === project);
     const remaining = deadline - Date.now();
     if (remaining <= 0) return formatRecallContext(prompt, project, { results: local, historyStatus: "unavailable" });
@@ -958,9 +958,11 @@ async function handleTurn(event, eventName) {
   if (!turnId || turnId.length > 512) throw new Error("Hook payload is missing a valid turn_id");
 
   const observedAt = new Date().toISOString();
-  const topicPromise = isPrompt ? retrievalPrompt(text, project, sessionId) : Promise.resolve(text);
-  const graphPromise = isPrompt ? topicPromise.then(topic => graphContext(topic, project)) : Promise.resolve(null);
-  const recallPromise = isPrompt ? topicPromise.then(topic => federatedRecallContext(topic, project)) : Promise.resolve(null);
+  const topic = isPrompt ? await retrievalPrompt(text, project, sessionId) : text;
+  // Prior evidence gets its own bounded read before graph/backlog requests
+  // compete for the same single-worker service and before this input is stored.
+  const recallResult = isPrompt ? await federatedRecallContext(topic, project) : null;
+  const graphPromise = isPrompt ? graphContext(topic, project) : Promise.resolve(null);
   const backlogPromise = isPrompt ? curationBacklogSources(project, String(turnId)) : Promise.resolve([]);
   const observeResponse = await post("/agentmemory/observe", {
     hookType: isPrompt ? "prompt_submit" : "post_tool_use",
@@ -989,7 +991,7 @@ async function handleTurn(event, eventName) {
     if (isPrompt) systemMessage = await nativeSourceWarning();
   }
   if (observeResult?.skipped === true && observeResult?.nativeSourceManaged !== true) {
-    await Promise.all([graphPromise, recallPromise, backlogPromise]);
+    await Promise.all([graphPromise, backlogPromise]);
     return;
   }
   if (!observeResult?.observationId && observeResult?.deduplicated !== true && observeResult?.nativeSourceManaged !== true) {
@@ -997,9 +999,8 @@ async function handleTurn(event, eventName) {
   }
 
   if (isPrompt) {
-    const [graphResult, recallResult, backlog] = await Promise.all([
+    const [graphResult, backlog] = await Promise.all([
       graphPromise,
-      recallPromise,
       backlogPromise,
     ]);
     const sources = [];

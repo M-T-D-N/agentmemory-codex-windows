@@ -28,6 +28,38 @@ async function fixture() {
 }
 
 describe("archive-aware graph query and traversal", () => {
+  it("bounds a high-degree walk before hydration and never labels its inventory complete", async () => {
+    const f = await fixture();
+    for (let i = 0; i < 180; i++) {
+      const id = `leaf-${i}`;
+      await f.kv.set(KV.graphNodes, id, { ...f.originalNodes[0], id, name: id });
+      await f.kv.set(KV.graphEdges, id, { ...f.originalEdges[0], id, sourceNodeId: "a", targetNodeId: id });
+    }
+    await f.sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    const get = vi.spyOn(f.kv, "get");
+    const page = await f.query({ project: "p", startNodeId: "a", maxDepth: 1, limit: 8, edgeLimit: 8 });
+    expect(page).toMatchObject({ truncated: true, totalsExact: false, edgeInventoryExact: false, edgeTruncated: true });
+    expect(page.warning).toMatch(/work limit/);
+    expect(page.nodes).toHaveLength(8);
+    expect(get.mock.calls.filter(([scope]) => scope === KV.graphNodes).length).toBeLessThanOrEqual(64);
+    expect(get.mock.calls.filter(([scope]) => scope === KV.graphEdges).length).toBeLessThanOrEqual(72);
+  });
+  it("bounds dense page edge hydration while keeping exact edge pagination available", async () => {
+    const f = await fixture();
+    for (let i = 0; i < 48; i++) await f.kv.set(KV.graphNodes, `dense-${i}`, { ...f.originalNodes[0], id: `dense-${i}`, name: `Dense ${i}` });
+    for (let i = 0; i < 48; i++) for (let j = i + 1; j < 48; j++) {
+      const id = `dense-${i}-${j}`;
+      await f.kv.set(KV.graphEdges, id, { ...f.originalEdges[0], id, sourceNodeId: `dense-${i}`, targetNodeId: `dense-${j}` });
+    }
+    await f.sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
+    const page = await f.query({ project: "p", query: "Dense", limit: 500, edgeLimit: 1000 });
+    expect(page.edges).toHaveLength(1000);
+    expect(page).toMatchObject({ totalNodes: 48, totalEdges: 1128, truncated: true, edgeInventoryExact: true, edgeTruncated: true });
+    expect(page.warning).toMatch(/response limit/);
+    const next = await f.query({ project: "p", query: "Dense", limit: 1, edgeLimit: 1000, edgeOffset: 1000 });
+    expect(next.edgeInventory).toHaveLength(128);
+    expect(next.edgeTruncated).toBe(false);
+  });
   it("filters before paging, counts and traversal while retaining original graph provenance", async () => {
     const f = await fixture();
     await f.change({ kind: "graph_node", id: "b" });

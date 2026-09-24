@@ -6,6 +6,14 @@ The upstream AgentMemory release history remains in the
 
 ## 0.1.0-preview.11 — 2026-09-25
 
+- Give original-text recall priority before competing graph/curation requests
+  and use a shared three-second retrieval budget, with at most two seconds for
+  the current project. Keep a verified local result if historical lookup times out.
+- Bound indexed graph walks before canonical hydration, including high-degree
+  roots. Partial walks carry explicit incomplete totals/inventory warnings.
+  Dense node pages hydrate at most 1,000 page edges; exact edge inventory
+  pagination remains available for complete enumeration.
+
 - Support project registry v4, including registered nested Git repositories.
   Resolve parent ownership independently of entry order and reject conflicting
   cutover states, path traversal, reparse points and noncanonical Git roots.

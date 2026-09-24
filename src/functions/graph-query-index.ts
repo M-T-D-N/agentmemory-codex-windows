@@ -596,7 +596,11 @@ export async function queryGraphFromIndex(
   const visibleEdge = (edge: GraphQueryEdgeRef) => !archived({ kind: "graph_edge", id: edge.id }) &&
     !archived({ kind: "graph_node", id: edge.sourceNodeId }) && !archived({ kind: "graph_node", id: edge.targetNodeId });
   if (data.startNodeId) {
+    const nodeBudget = Math.min(MAX_GRAPH_QUERY_LIMIT, Math.max(64, offset + limit));
+    const edgeBudget = MAX_GRAPH_EDGE_QUERY_LIMIT;
+    let bounded = false;
     const visited = new Set<string>();
+    const queued = new Set([data.startNodeId]);
     const visitedEdges = new Map<string, GraphQueryEdgeRef>();
     const resultNodes: GraphNode[] = [];
     const queue: Array<{ nodeId: string; depth: number }> = [
@@ -624,16 +628,23 @@ export async function queryGraphFromIndex(
         if (project && ref.project !== undefined && ref.project !== project) {
           continue;
         }
+        if (!visitedEdges.has(ref.id) && visitedEdges.size >= edgeBudget) { bounded = true; continue; }
         visitedEdges.set(ref.id, ref);
         const nextId = ref.sourceNodeId === nodeId
           ? ref.targetNodeId
           : ref.sourceNodeId;
-        if (!visited.has(nextId)) queue.push({ nodeId: nextId, depth: depth + 1 });
+        if (depth < maxDepth && !queued.has(nextId)) {
+          if (queued.size >= nodeBudget) { bounded = true; continue; }
+          queued.add(nextId);
+          queue.push({ nodeId: nextId, depth: depth + 1 });
+        }
       }
     }
+    const resultIds = new Set(resultNodes.map(node => node.id));
+    const resultRefs = [...visitedEdges.values()].filter(edge => resultIds.has(edge.sourceNodeId) && resultIds.has(edge.targetNodeId));
     const resultEdges = await hydrateGraphEdges(
       kv,
-      [...visitedEdges.keys()],
+      resultRefs.map(edge => edge.id),
       snapshot.resetAt,
     );
     const inventory = await validateExactEdgeInventorySnapshot(
@@ -642,7 +653,7 @@ export async function queryGraphFromIndex(
       await exactEdgeInventoryPage(
         kv,
         data,
-        [...visitedEdges.values()],
+        resultRefs,
         snapshot.resetAt,
       ),
       manifest,
@@ -653,6 +664,9 @@ export async function queryGraphFromIndex(
       fromIndex: true,
       ...(queryIndexRebuilt ? { queryIndexRebuilt: true } : {}),
       ...inventory,
+      ...(bounded ? { truncated: true, totalsExact: false,
+        ...(inventory.edgeInventory ? { edgeInventoryExact: false, edgeTruncated: true } : {}),
+        warning: appendWarning(inventory.warning, "Graph traversal reached its node or edge work limit; this is a partial view.") } : {}),
     };
   }
 
@@ -715,12 +729,14 @@ export async function queryGraphFromIndex(
         pageIds.has(ref.sourceNodeId) && pageIds.has(ref.targetNodeId),
     )
     .map((ref) => ref.id);
-  const pageEdges = await hydrateGraphEdges(kv, pageEdgeIds, snapshot.resetAt);
+  const pageEdges = await hydrateGraphEdges(kv, pageEdgeIds.slice(0, MAX_GRAPH_EDGE_QUERY_LIMIT), snapshot.resetAt);
   const nodeWarning = pageNodes.length !== pageDocuments.length
     ? "Graph changed while the indexed page was being hydrated."
     : undefined;
-  const warning = inventory.warning || nodeWarning
-    ? appendWarning(nodeWarning, inventory.warning ?? "")
+  const edgeWarning = pageEdgeIds.length > MAX_GRAPH_EDGE_QUERY_LIMIT
+    ? "Graph page edges reached the response limit; use exact edge inventory pagination for complete edges." : undefined;
+  const warning = inventory.warning || nodeWarning || edgeWarning
+    ? appendWarning(appendWarning(nodeWarning, inventory.warning ?? ""), edgeWarning ?? "")
     : undefined;
   return {
     nodes: pageNodes,
@@ -728,7 +744,7 @@ export async function queryGraphFromIndex(
     depth: 0,
     totalNodes,
     totalEdges: universeEdges.length,
-    truncated: offset + pageDocuments.length < totalNodes,
+    truncated: offset + pageDocuments.length < totalNodes || pageEdgeIds.length > MAX_GRAPH_EDGE_QUERY_LIMIT,
     limit,
     offset,
     fromIndex: true,

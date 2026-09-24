@@ -905,7 +905,9 @@ or model-generated text does not supply a topic.
 Explicit MCP recall remains available. Graph neighbors need their own topic
 match, except for explicit supersession links preserving a matched decision's
 replacement and historical status. Local and fallback candidate queries share
-the existing 1,200 ms retrieval budget. Recall normally has up to 650 characters;
+a shared 3,000 ms retrieval budget (at most 2,000 ms for the current project).
+Original-text recall runs before graph/curation requests and current input
+storage so these reads do not consume its budget. Recall normally has up to 650 characters;
 two or more distinct topical user originals permit up to 1,150. Graph context
 stays at 500 and curation keeps its reserved budget. Total injected context is
 normally capped at 2,300 characters, or at 2,800 when the longer original-source
@@ -1339,6 +1341,14 @@ exact-project import lifecycle with original provenance; no alternate queue
 or database is introduced.
 
 ### Native reconciliation warnings
+
+Indexed graph walks cap queued nodes at the requested page end, with a floor
+of 64 and a ceiling of 5,000, and retain at most 1,000 traversed edge references.
+Reaching either work bound returns a partial view with `totalsExact: false` and
+an incomplete edge inventory. Automatic succession context refuses that result.
+Node-page edge hydration is limited to 1,000 edges; an explicit warning directs
+complete consumers to the existing exact edge inventory pages. Canonical graph
+data is preserved.
 
 From preview.10, discovery accepts a working-directory transition already
 verified by the native capture cursor when it matches the current index. It
