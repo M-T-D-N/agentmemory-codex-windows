@@ -34,7 +34,7 @@ other hosts. The supported Windows/Codex build in
   exact-project `delete-empty`/`restore-empty` actions recover one proven empty,
   processed non-cursor observation in its canonical row; see the packaging contract;
   deliberate reads may use `*`, and the managed user-prompt hook performs a
-  current-project-first recall with bounded cross-project fallback and source labels;
+  current-project recall plus bounded historical-user discovery with source labels;
 - Codex performs selective promotion through the official memory, lesson, and
   manual graph tools; provider-backed summary, consolidation, reflection,
   crystallization, and compression remain disabled while local Qwen may enrich

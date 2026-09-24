@@ -13,6 +13,7 @@ import { getAgentId, isAgentScopeIsolated } from "../config.js";
 import {
   isExcludedCodexAmbientSession,
   sanitizeCodexAmbientObservation,
+  observationSourceKind,
 } from "./observation-visibility.js";
 
 let index: SearchIndex | null = null
@@ -384,6 +385,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       token_budget?: number
       agentId?: string
       trackAccess?: boolean
+      sourceKind?: "user" | "assistant"
     }) => {
       const idx = getSearchIndex()
 
@@ -392,6 +394,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         throw new Error('mem::search: query must be a non-empty string')
       }
       const query = data.query.trim()
+      if (data.sourceKind !== undefined && !["user", "assistant"].includes(data.sourceKind)) {
+        throw new Error('mem::search: sourceKind must be user or assistant')
+      }
       const MAX_LIMIT = 100
       let effectiveLimit = 20
       if (data.limit !== undefined) {
@@ -473,7 +478,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         await rebuildPromise
       }
 
-      const selection = createSearchCandidateSelection(kv, { project: projectFilter, cwd: cwdFilter, agentId: filterAgentId })
+      const selection = createSearchCandidateSelection(kv, { project: projectFilter, cwd: cwdFilter, agentId: filterAgentId, sourceKind: data.sourceKind })
       const fetchLimit = effectiveLimit
       // Hybrid results carry the observation the ranker already loaded,
       // so the load pass below doesn't refetch every record it just
@@ -555,6 +560,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         // happens post-lookup. Wildcard ("*") and no-isolation paths
         // resolved filterAgentId=undefined upstream and pass through.
         if (filterAgentId !== undefined && obs.agentId !== filterAgentId) continue
+        if (data.sourceKind && observationSourceKind(obs) !== data.sourceKind) continue
         if (enriched.length >= effectiveLimit) break
         enriched.push({
           observation: obs,

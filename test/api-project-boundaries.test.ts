@@ -46,6 +46,14 @@ describe("REST exact-project and provenance boundaries", () => {
     registerApiTriggers(sdk as never, kv as never, readContext);
   });
 
+  it("forwards explicit source-kind selection and rejects an invalid selector before search", async () => {
+    expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", sourceKind: "user" } })).toMatchObject({ status_code: 200 });
+    expect(sdk.downstream.at(-1)).toMatchObject({ functionId: "mem::search", payload: { sourceKind: "user", project: "*" } });
+    const count = sdk.downstream.length;
+    expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", sourceKind: "other" } })).toMatchObject({ status_code: 400 });
+    expect(sdk.downstream.length).toBe(count);
+  });
+
   it("preserves the official non-reinforcing search option and rejects non-boolean values", async () => {
     const response = await sdk.trigger("api::search", { body: { query: "source", project: "project-a", trackAccess: false } });
     expect(response).toMatchObject({ status_code: 200 });

@@ -870,16 +870,26 @@ reindexing preserves posting and tie order. Previous-shard cleanup remains
 sequential and records every attempted target and outcome in one grouped audit.
 This changes neither stored formats nor the canonical source/graph lifecycle.
 
-The managed user-prompt hook searches the exact current project first. A
-successful local read with no topical result may fall back to a bounded `*`
-search; a failed local read does not silently broaden scope. A matching local
-result stays local, and graph succession still expands through each node's exact
-source project. Automatic recall and graph context require a
+The managed user-prompt hook searches the exact current project first, then
+requests original user evidence with `sourceKind: "user"` across `*` within the
+same time budget, even when the local search found a match. This discovers older
+requirements stored before project moves without assigning unrelated records to
+the current project or hard-coding aliases. A failed local read does not silently
+broaden scope; a failed historical lookup preserves local evidence and marks
+history unavailable. Graph lookup retains its current-project-first fallback,
+and graph succession expands through each node's exact source project.
+Automatic recall and graph context require a
 concrete topic, filename, or identifier shared with the effective request;
 product names, generic follow-ups, search score and project membership alone
-do not qualify. Current-project candidates take priority after this selection.
-Recall output includes the source project, record ID and timestamp (or an explicit
-unknown time). Repeated scoped record IDs are emitted once. Automatic candidate
+do not qualify. Recall reserves current-project evidence, then selects original
+user observations with newer source dates first; retrieved old text cannot
+override the current user request. It labels user versus derived excerpts,
+requires applicability/correction checks and original-source expansion before
+behavior changes, and preserves the source project, record ID and timestamp
+(or an explicit unknown time). Topic-matching paragraphs can be excerpted from
+longer messages. These are limited candidates, not a complete or authoritative
+requirements list; contradictory requirements still need source review.
+Repeated scoped record IDs are emitted once. Automatic candidate
 searches pass the existing `trackAccess: false` option through REST to StateModule
 search, so merely considering a result does not strengthen its access-based
 retention. Explicit searches retain their default access tracking.
@@ -892,8 +902,18 @@ or model-generated text does not supply a topic.
 Explicit MCP recall remains available. Graph neighbors need their own topic
 match, except for explicit supersession links preserving a matched decision's
 replacement and historical status. Local and fallback candidate queries share
-the existing 1,200 ms retrieval budget; output budgets and bounded successor
-expansion are unchanged. Generic display/publishing commands such as
+the existing 1,200 ms retrieval budget. Recall normally has up to 650 characters;
+two or more distinct topical user originals permit up to 1,150. Graph context
+stays at 500 and curation keeps its reserved budget. Total injected context is
+normally capped at 2,300 characters, or at 2,800 when the longer original-source
+excerpts actually use the extra room. Duplicate text and unrelated records do
+not justify expansion. These are character limits, not model-token counts.
+No LLM inference is added. Bounded successor expansion
+is unchanged. Explicit `memory_recall` and REST `/agentmemory/search` also expose
+`sourceKind: "user" | "assistant"`; omission retains ordinary mixed-source
+search. Speaker selection happens before candidate limits, and keeps existing
+archive, source-exclusion, project and agent visibility rules. Derived saved
+memories are not original user observations. Generic display/publishing commands such as
 `띄워줘` and `게시 진행` can use this same-session topic recovery. This lexical
 selection can miss synonyms or unrecognized Korean
 inflections; it is not a semantic relevance guarantee. Durable promotion is

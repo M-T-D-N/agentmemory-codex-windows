@@ -496,6 +496,9 @@ export function registerApiTriggers(
       }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
+      if (body.sourceKind !== undefined && body.sourceKind !== "user" && body.sourceKind !== "assistant") {
+        return { status_code: 400, body: { error: "sourceKind must be user or assistant" } };
+      }
       const queryAgentId =
         typeof (req as { query_params?: Record<string, string> })
           .query_params?.["agentId"] === "string"
@@ -553,6 +556,7 @@ export function registerApiTriggers(
           : undefined;
       const payload = {
         query: body.query.trim(),
+        sourceKind: body.sourceKind as "user" | "assistant" | undefined,
         limit: body.limit as number | undefined,
         project,
         cwd: body.cwd as string | undefined,

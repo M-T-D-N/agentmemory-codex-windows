@@ -1,5 +1,15 @@
 import type { CompressedObservation, Session } from "../types.js";
 
+export function observationSourceKind(observation: CompressedObservation): "user" | "assistant" | undefined {
+  if (observation.codexSource) {
+    return observation.codexSource.kind === "user" ? "user"
+      : observation.codexSource.kind === "assistant_final" ? "assistant" : undefined;
+  }
+  if (observation.title === "prompt_submit") return "user";
+  if (observation.title === "assistant_response") return "assistant";
+  return undefined;
+}
+
 export function isCodexApprovalReviewText(value: unknown): boolean {
   const text = typeof value === "string" ? value.trim().toLowerCase() : "";
   return text.startsWith("the following is the codex agent history whose request action you are assessing.")

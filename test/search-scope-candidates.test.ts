@@ -33,6 +33,32 @@ function fixture() {
 }
 
 describe("scope before retrieval candidate limits", () => {
+  it("retrieves original user requirements below assistant summaries without changing ordinary recall", async () => {
+    const { kv, session, obs } = fixture();
+    await kv.set(KV.sessions, "legacy", session("legacy", "legacy-space"));
+    const index = getSearchIndex();
+    for (let i = 0; i < 75; i++) {
+      const row = { ...obs("summary-" + i, "legacy", "agent", "assistant_response"), narrative: "Invoice rounding" };
+      index.add(row); await kv.set(KV.observations("legacy"), row.id, row);
+    }
+    const target = { ...obs("original", "legacy", "agent", "prompt_submit"), narrative: "Invoice rounding must remain exact until the final total. " + "supporting context ".repeat(40) };
+    index.add(target); await kv.set(KV.observations("legacy"), target.id, target);
+    const handlers = new Map<string, Function>();
+    registerSearchFunction({ registerFunction(id: string, fn: Function) { handlers.set(id, fn); } } as never, kv as never);
+    const input = { query: "Invoice rounding", project: "*", limit: 1, trackAccess: false };
+    const search = handlers.get("mem::search")!;
+    expect((await search(input)).results[0].observation.title).toBe("assistant_response");
+    expect((await search({ ...input, sourceKind: "user" })).results.map((r: any) => r.observation.id)).toEqual(["original"]);
+    expect((await search({ ...input, sourceKind: "user", project: "other" })).results).toEqual([]);
+    expect((await search({ ...input, sourceKind: "user", agentId: "other" })).results).toEqual([]);
+    await expect(search({ ...input, sourceKind: "invented" })).rejects.toThrow("sourceKind");
+    const misleading = { ...target, title: "prompt_submit", codexSource: { kind: "assistant_final" } };
+    await kv.set(KV.observations("legacy"), target.id, misleading);
+    expect((await search({ ...input, sourceKind: "user" })).results).toEqual([]);
+    await kv.set(KV.observations("legacy"), target.id, { ...target, emptyDeletion: { state: "deleted" } });
+    expect((await search({ ...input, sourceKind: "user" })).results).toEqual([]);
+  });
+
   it("finds the keyword hit below hundreds of out-of-project and out-of-agent hits through both service entry points", async () => {
     const { kv, session, obs, maximum } = fixture();
     await kv.set(KV.sessions, "other", session("other", "other"));

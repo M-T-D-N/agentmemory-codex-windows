@@ -6,6 +6,19 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+- Keep a successful current-project recall while also looking for original user
+  evidence across historical project scopes. Recent assistant summaries no longer
+  suppress that lookup. `memory_recall` and REST search accept `sourceKind` to
+  select user or assistant observations before candidate limits, while preserving
+  archive visibility and project/agent access boundaries.
+- Label automatic excerpts as user or derived evidence with their source dates
+  and IDs. Preserve current evidence, prefer newer user corrections among the
+  retrieved originals, and state that the current user request wins. The total
+  hook context keeps its 2,300-character normal cap and can use up to 2,800 only
+  when distinct relevant user originals need the extra room. No model call or data
+  migration is added. Retrieval remains bounded and is not a guarantee of complete history
+  or model compliance.
+
 - Close graph query index updates for empty extraction batches and merge-only
   changes outside the top-degree snapshot. Those cases previously left exact
   graph search unavailable until an explicit rebuild.

@@ -36,13 +36,18 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_recall",
     description:
-      "Search past observations and memories inside an explicit project. Pass '*' only for a deliberate cross-project read.",
+      "Search past observations and memories inside an explicit project. Use sourceKind='user' for original user requirements. Pass '*' for deliberate historical cross-project discovery when the actual work may have moved; retain source labels and verify relevance.",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
           description: "Search query (keywords, file names, concepts)",
+        },
+        sourceKind: {
+          type: "string",
+          enum: ["user", "assistant"],
+          description: "Filter original observations by speaker before ranking limits. Omit for all sources, including derived memories.",
         },
         agentId: {
           type: "string", minLength: 1, maxLength: 512,

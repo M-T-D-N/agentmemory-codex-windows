@@ -185,6 +185,9 @@ export function registerMcpEndpoints(
       try {
         switch (name) {
           case "memory_recall": {
+            if (args.sourceKind !== undefined && args.sourceKind !== "user" && args.sourceKind !== "assistant") {
+              return { status_code: 400, body: { error: "sourceKind must be user or assistant" } };
+            }
             if (typeof args.query !== "string" || !args.query.trim()) {
               return {
                 status_code: 400,
@@ -224,6 +227,7 @@ export function registerMcpEndpoints(
             if (!agentId.valid) return agentId.response;
             const result = await sdk.trigger({ function_id: "mem::search", payload: {
               query: args.query,
+              sourceKind: args.sourceKind,
               limit: typeof args.limit === "number" ? args.limit : 10,
               format,
               token_budget: tokenBudget,

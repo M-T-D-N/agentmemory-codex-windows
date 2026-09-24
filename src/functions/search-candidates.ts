@@ -3,7 +3,7 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { memoryToObservation } from "../state/memory-utils.js";
 import { readArchiveVisibility } from "./archive.js";
-import { isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation } from "./observation-visibility.js";
+import { isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation, observationSourceKind } from "./observation-visibility.js";
 
 export interface SearchCandidate { obsId: string; sessionId: string; sourceSessionIds?: string[] }
 export interface SearchCandidateSelection {
@@ -11,7 +11,7 @@ export interface SearchCandidateSelection {
   select<T extends SearchCandidate>(candidates: T[], limit: number): Promise<T[]>;
 }
 
-export function createSearchCandidateSelection(kv: StateKV, scope: { project?: string; cwd?: string; agentId?: string }): SearchCandidateSelection {
+export function createSearchCandidateSelection(kv: StateKV, scope: { project?: string; cwd?: string; agentId?: string; sourceKind?: "user" | "assistant" }): SearchCandidateSelection {
   let metadata: Promise<{ sessions: Map<string, Session>; memories: Map<string, Memory>; archived: Awaited<ReturnType<typeof readArchiveVisibility>> }> | undefined;
   const cache = new Map<string, Promise<string | null>>();
   const readMetadata = () => metadata ??= Promise.all([kv.list<Session>(KV.sessions), kv.list<Memory>(KV.memories), readArchiveVisibility(kv)])
@@ -24,6 +24,7 @@ export function createSearchCandidateSelection(kv: StateKV, scope: { project?: s
         const { sessions, memories, archived } = await readMetadata();
         const memory = memories.get(candidate.obsId);
         if (memory) {
+          if (scope.sourceKind) return null;
           if (archived({ kind: "memory", id: memory.id })) return null;
           const sessionId = memory.sessionIds?.[0] ?? "memory";
           const session = sessions.get(sessionId);
@@ -39,7 +40,8 @@ export function createSearchCandidateSelection(kv: StateKV, scope: { project?: s
           if (isExcludedCodexAmbientSession(session) || (scope.project && session?.project !== scope.project) ||
               (scope.cwd && session?.cwd !== scope.cwd)) continue;
           const observation = sanitizeCodexAmbientObservation(await kv.get<CompressedObservation>(KV.observations(sessionId), candidate.obsId));
-          if (observation?.id === candidate.obsId && observation.sessionId === sessionId && (!scope.agentId || observation.agentId === scope.agentId)) return sessionId;
+          if (observation?.id === candidate.obsId && observation.sessionId === sessionId && (!scope.agentId || observation.agentId === scope.agentId)
+              && (!scope.sourceKind || observationSourceKind(observation) === scope.sourceKind)) return sessionId;
         }
         return null;
       })();

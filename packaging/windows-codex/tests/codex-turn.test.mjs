@@ -650,7 +650,7 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
   globalThis.fetch = async (url, options) => {
     calls.push({ url, body: JSON.parse(options.body), signal: options.signal });
     return new Response(JSON.stringify(url.endsWith("/search")
-      ? { results: [recallEntry("evidence", "federated recall", "other")] }
+      ? { results: [recallEntry("evidence", "federated recall", "other", { title: "prompt_submit" })] }
       : { nodes: [graphNode("seed", "federated recall")], edges: [], truncated: false }));
   };
   try {
@@ -673,7 +673,7 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
     assert.deepEqual(graphs.map((call) => call.body.project), ["current"]);
     assert.ok(graphs.every((call) => call.body.limit === 160 && call.body.maxDepth === 1 && call.body.queries.length <= 6));
     assert.ok(calls.every((call) => call.signal instanceof AbortSignal && !call.signal.aborted));
-    assert.ok(recall.length <= 400 && graph.length <= 500);
+    assert.ok(recall.length <= 700 && graph.length <= 500);
     assert.match(recall, /<\/agentmemory-recall-context>$/);
     assert.match(graph, /<\/agentmemory-graph-context>$/);
   } finally {
@@ -698,7 +698,7 @@ test("native capture keeps recall injection while storage belongs to the source 
         : String(url).endsWith("/session/start") ? { status: "caught_up", inserted: 1 }
         : String(url).includes("/livez") ? { status: "ok", nativeCapture: { status: "attention" } }
         : String(url).includes("/observations?") ? { total: 1, observations: [{ id: "prior-user", sessionId: "native-fixture", title: "prompt_submit", narrative: "federated recall", timestamp: "2026-09-14T00:00:00Z" }] }
-        : String(url).endsWith("/search") ? { results: [recallEntry("evidence", "federated recall", "other")] }
+        : String(url).endsWith("/search") ? { results: [recallEntry("evidence", "federated recall", "other", { title: "prompt_submit" })] }
         : String(url).includes("/sessions") ? { sessions: [] } : { nodes: [], edges: [], truncated: false }));
     };
     process.stdout.write = value => { output.push(String(value)); return true; };
@@ -759,7 +759,7 @@ test("continuation recall inherits the latest scoped user topic, while explicit 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("automatic recall keeps local evidence with provenance and does not search outside a successful local match", async () => {
+test("automatic recall keeps local evidence and searches user history even after a local match", async () => {
   const originalFetch = globalThis.fetch; const calls = [];
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body); calls.push(body);
@@ -767,7 +767,8 @@ test("automatic recall keeps local evidence with provenance and does not search 
   };
   try {
     const result = await federatedRecallContext("native source", "current");
-    assert.deepEqual(calls.map(call => call.project), ["current"]);
+    assert.deepEqual(calls.map(call => call.project), ["current", "*"]);
+    assert.equal(calls[1].sourceKind, "user");
     assert.match(result, /\[current\] obs-local @2026-09-14T00:00:00Z/);
     assert.match(result, /Native source capture verified/);
     assert.equal(calls[0].trackAccess, false);
@@ -776,6 +777,73 @@ test("automatic recall keeps local evidence with provenance and does not search 
     ] });
     assert.equal((duplicated.match(/obs-local/g) ?? []).length, 1);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("historical user requirements survive recent assistant summaries under a renamed project", async () => {
+  const originalFetch = globalThis.fetch; const calls = [];
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body); calls.push(body);
+    return new Response(JSON.stringify({ results: body.project === "editor-new"
+      ? [recallEntry("recent-summary", "Canvas labels were limited to three.", "editor-new", { title: "assistant_response", timestamp: "2026-09-24T00:00:00Z" })]
+      : [recallEntry("original-request", "Keep all valid canvas labels while unrelated tiles move.", "old-workspace", { title: "prompt_submit", timestamp: "2026-07-26T00:00:00Z" })] }));
+  };
+  try {
+    const context = await federatedRecallContext("canvas labels", "editor-new");
+    assert.deepEqual(calls.map(body => [body.project, body.sourceKind]), [["editor-new", undefined], ["*", "user"]]);
+    assert.match(context, /original-request .* user: Keep all valid canvas labels/);
+    assert.match(context, /recent-summary .* derived:/);
+    assert.ok(context.indexOf("recent-summary") < context.indexOf("original-request"));
+    assert.ok(context.length <= 900);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("source excerpts select the relevant paragraph, label derived text and preserve the total context cap", () => {
+  const context = formatRecallContext("invoice rounding", "new-billing", { results: [
+    recallEntry("user-rounding", "Account setup details.\nKeep invoice rounding exact until the final total.", "legacy-billing", { title: "prompt_submit" }),
+    recallEntry("summary-rounding", "Invoice rounding completed.", "new-billing", { title: "assistant_response" }),
+    recallEntry("unrelated-user", "Change the canvas colour.", "design", { title: "prompt_submit" }),
+  ] });
+  assert.match(context, /user: Keep invoice rounding exact/);
+  assert.doesNotMatch(context, /Account setup|unrelated-user/);
+  assert.ok(context.length <= 900);
+  assert.ok(boundedAdditionalContext("curation".repeat(200), context, "graph".repeat(100)).length <= 2300);
+});
+
+test("historical lookup failure preserves successful local evidence without treating it as full history", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    if (JSON.parse(options.body).project === "*") throw Error("history unavailable");
+    return new Response(JSON.stringify({ results: [recallEntry("local", "Invoice rounding state.")] }));
+  };
+  try {
+    const context = await federatedRecallContext("invoice rounding", "current");
+    assert.match(context, /\[current\] local/);
+    assert.match(context, /history="unavailable"/);
+  }
+  finally { globalThis.fetch = originalFetch; }
+});
+
+test("new user corrections and local evidence are not displaced by highly ranked old requirements", () => {
+  const context = formatRecallContext("invoice rounding", "billing", { results: [
+    { ...recallEntry("old-rule", "Invoice rounding is per line.", "legacy", { title: "prompt_submit", timestamp: "2025-01-01" }), score: 999 },
+    { ...recallEntry("new-rule", "Invoice rounding is only at the final total.", "legacy", { title: "prompt_submit", timestamp: "2026-09-24" }), score: 1 },
+    recallEntry("current-check", "Invoice rounding change is pending.", "billing", { title: "assistant_response", timestamp: "2026-09-25" }),
+  ] });
+  assert.match(context, /Current user request wins/);
+  assert.match(context, /current-check .* derived:/);
+  assert.match(context, /new-rule @2026-09-24 user:/);
+  assert.ok(!context.includes("old-rule") || context.indexOf("new-rule") < context.indexOf("old-rule"));
+  assert.ok(context.length <= 1150);
+});
+
+test("context expands only for distinct relevant user originals, with a hard combined ceiling", () => {
+  const originals = ["keep invoice rounding exact", "use the invoice final total"].map((text, i) =>
+    recallEntry("obs_" + String(i).repeat(64), (text + " ").repeat(20), "legacy", { title: "prompt_submit", timestamp: "2026-09-24" }));
+  const expanded = formatRecallContext("invoice rounding", "current", { results: originals });
+  assert.ok(expanded.length > 650 && expanded.length <= 1150);
+  assert.ok(boundedAdditionalContext("c".repeat(1146), expanded, "g".repeat(500)).length <= 2800);
+  const repeated = formatRecallContext("invoice rounding", "current", { results: [originals[0], { ...originals[0], observation: { ...originals[0].observation, id: "duplicate" } }] });
+  assert.ok(repeated.length <= 650);
 });
 
 test("current-project read failures cannot silently turn into wildcard retrieval", async () => {

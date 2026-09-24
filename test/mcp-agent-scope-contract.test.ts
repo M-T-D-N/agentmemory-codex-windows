@@ -17,6 +17,16 @@ describe("MCP recall agent scope contract", () => {
   });
 
   const tools = ["memory_recall", "memory_smart_search"] as const;
+
+  it("offers original-user recall with a validated speaker filter", async () => {
+    const schema = getAllTools().find(tool => tool.name === "memory_recall")!.inputSchema;
+    expect(schema.properties.sourceKind).toMatchObject({ enum: ["user", "assistant"] });
+    expect((await call("memory_recall", { sourceKind: "user" })).status_code).toBe(200);
+    expect(search.mock.calls[0][0]).toMatchObject({ sourceKind: "user" });
+    search.mockClear();
+    expect((await call("memory_recall", { sourceKind: "unknown" })).status_code).toBe(400);
+    expect(search).not.toHaveBeenCalled();
+  });
   function call(name: string, args: Record<string, unknown>) {
     return sdk.trigger("mcp::tools::call", {
       headers: {}, body: { name, arguments: { query: "decision", project: "project-a", ...args } },
