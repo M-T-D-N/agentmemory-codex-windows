@@ -415,13 +415,13 @@ for (const scenario of ['roundtrip', 'collision', 'outside', 'junction', 'cleanu
       assert.equal(await readFile(path.join(root,'data/protected'),'utf8'),'canonical');
       if (scenario === 'roundtrip') {
         assert.equal(result.status,0,result.stderr); const output=JSON.parse(result.stdout); assert.equal(output.compacted,true);
-        assert.equal(output.archive,backup+'.zip'); await assert.rejects(readdir(backup),{code:'ENOENT'});
+        assert.equal(await realpath(output.archive),await realpath(backup+'.zip')); await assert.rejects(readdir(backup),{code:'ENOENT'});
         assert.equal(await readFile(path.join(dir,'restored/config/install-manifest.json'),'utf8'),'{"release_revision":"r115"}');
         assert.deepEqual(await readFile(path.join(dir,'restored/payload.bin')),Buffer.from([0,255,42,13,10]));
         assert.deepEqual(await readdir(path.join(dir,'restored/empty')),[]);
       } else if (scenario === 'cleanup-error') {
         assert.equal(result.status,0,result.stderr); const output=JSON.parse(result.stdout); assert.equal(output.compacted,false);
-        assert.equal(output.archive,backup+'.zip'); assert.match(output.error,/simulated cleanup lock/);
+        assert.equal(await realpath(output.archive),await realpath(backup+'.zip')); assert.match(output.error,/simulated cleanup lock/);
         assert.equal((await readFile(output.archive)).subarray(0,2).toString(),'PK');
         assert.equal(await readFile(path.join(backup,'config/install-manifest.json'),'utf8'),'{"release_revision":"r115"}');
       } else {
