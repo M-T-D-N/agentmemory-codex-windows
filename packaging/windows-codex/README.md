@@ -1094,7 +1094,31 @@ Normal observations in a mixed batch retain strict, separately filtered citation
 validation. New hook capture skips both envelope forms without excluding the
 normal user session.
 
+## Source validation without a release payload
+
+During source iteration, run `packaging/windows-codex/Build-WindowsCodex.ps1 -ValidationOnly`.
+It runs the frozen hoisted dependency install, skills check, typecheck, build and
+existing source/adapter/distribution tests, but does not deploy dependencies or
+create an output/release directory. It accepts a dirty source checkout and reports
+`source_dirty`; it is validation evidence, not a release source identity.
+`-SkipTests` keeps its existing explicit meaning for a focused subsequent run.
+
+Use the normal `-OutputDirectory` and `-IiiEnginePath` invocation once the source is
+ready for final packaging. That mode still requires a clean Git checkout and
+creates the same self-contained release. Validation does not activate a runtime.
+
 ## Release retention and cleanup
+
+After a successful update and readiness confirmation, the installer compacts only
+the new code/config backup into one sibling ZIP. It verifies every archived file
+against SHA-256 before removing that newly created expanded copy; canonical data
+and older backups are untouched. Failed updates retain the expanded backup used
+for rollback. A compaction failure preserves the backup and reports
+backup_compaction_error without undoing an already healthy installation.
+Successful compaction reports backup_archive and clears backup_root.
+For manual recovery, extract the archive into a new empty recovery directory
+before inspecting or restoring its predecessor files; never extract over live data.
+Superseded backup archives still follow the explicit maintenance rules below.
 
 Keep the active package, the immediately preceding rollback package, the
 pristine upstream source archive, and the final qualification artifact for the

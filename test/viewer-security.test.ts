@@ -185,7 +185,9 @@ describe("viewer request handler DNS rebinding defence (e2e)", () => {
 
   it("returns 403 on an attacker-controlled Host header (DNS rebinding payload)", async () => {
     const { port } = await spinUpViewer();
-    const res = await request(port, `attacker.com:${port}`);
+    // A real hostile domain may be intercepted by host security software
+    // before reaching this server, replacing its 403 with a block page.
+    const res = await request(port, `rebind-test.invalid:${port}`);
     expect(res.status).toBe(403);
     expect(res.body).toContain("forbidden host");
   });

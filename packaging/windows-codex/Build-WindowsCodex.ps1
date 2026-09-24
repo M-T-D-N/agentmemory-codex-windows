@@ -1,9 +1,11 @@
+[CmdletBinding(DefaultParameterSetName = 'Release')]
 param(
-    [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [Parameter(Mandatory = $true)][string]$IiiEnginePath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Release')][string]$OutputDirectory,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Release')][string]$IiiEnginePath,
     [string]$NodePath = '',
     [string]$ReleaseRevision = 'r32',
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Validation')][switch]$ValidationOnly
 )
 
 Set-StrictMode -Version Latest
@@ -23,25 +25,17 @@ function Get-NormalizedTextSha256 {
     }
 }
 
-$priorNodeOptions = [System.Environment]::GetEnvironmentVariable('NODE_OPTIONS', 'Process')
-$priorCi = [System.Environment]::GetEnvironmentVariable('CI', 'Process')
-$env:CI = 'true'
-$nodeHeapOption = '--max-old-space-size=12288'
-if ([string]::IsNullOrWhiteSpace($priorNodeOptions)) {
-    $env:NODE_OPTIONS = $nodeHeapOption
-}
-elseif ($priorNodeOptions -notmatch '(?:^|\s)--max-old-space-size(?:=|\s)') {
-    $env:NODE_OPTIONS = "$priorNodeOptions $nodeHeapOption"
-}
-
 $sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $sourceCommit = (& git -C $sourceRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[a-f0-9]{40}$') { throw 'Build requires a Git source commit.' }
 $sourceDirty = @(& git -C $sourceRoot status --porcelain --untracked-files=normal)
-if ($LASTEXITCODE -ne 0 -or $sourceDirty.Count -gt 0) { throw 'Build requires a clean source checkout.' }
-$outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
-if (Test-Path -LiteralPath $outputRoot) {
-    throw "OutputDirectory already exists: $outputRoot"
+if ($LASTEXITCODE -ne 0) { throw 'Could not inspect source checkout.' }
+if (-not $ValidationOnly -and $sourceDirty.Count -gt 0) { throw 'Build requires a clean source checkout.' }
+if (-not $ValidationOnly) {
+    $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
+    if (Test-Path -LiteralPath $outputRoot) {
+        throw "OutputDirectory already exists: $outputRoot"
+    }
 }
 
 $node = $NodePath
@@ -50,13 +44,13 @@ if ([string]::IsNullOrWhiteSpace($node)) {
 }
 $node = [System.IO.Path]::GetFullPath($node)
 $pnpm = [string](Get-Command pnpm.cmd -ErrorAction Stop).Source
-$iii = [System.IO.Path]::GetFullPath($IiiEnginePath)
-foreach ($required in @($node, $iii, (Join-Path $sourceRoot 'pnpm-lock.yaml'), (Join-Path $sourceRoot 'pnpm-workspace.yaml'), (Join-Path $sourceRoot 'upstream-source.json'))) {
+foreach ($required in @($node, (Join-Path $sourceRoot 'pnpm-lock.yaml'), (Join-Path $sourceRoot 'pnpm-workspace.yaml'), (Join-Path $sourceRoot 'upstream-source.json'))) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required build input is missing: $required"
     }
 }
 
+if (-not $ValidationOnly) {
 $thirdParty = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'config\third-party-inputs.json') | ConvertFrom-Json
 $stateDurability = $thirdParty.iii_engine.PSObject.Properties['state_durability']
 if ($null -eq $stateDurability -or [string]$stateDurability.Value -ne 'file-flush-v1') {
@@ -69,12 +63,15 @@ if ([string]$thirdParty.iii_engine.source_commit -notmatch '^[a-f0-9]{40}$' -or
     [string]$thirdParty.iii_engine.build_profile -ne 'release') {
     throw 'Patched engine source, patch hash and release build provenance are required.'
 }
+    $iii = [IO.Path]::GetFullPath($IiiEnginePath)
+    if (-not (Test-Path -LiteralPath $iii -PathType Leaf)) { throw 'Required iii-engine input is missing.' }
 $iiiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $iii).Hash
 if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'licenses\iii-LICENSE_ELv2')).Hash -ne [string]$thirdParty.iii_engine.license_sha256) {
     throw 'iii-engine license hash mismatch.'
 }
 if ($iiiHash -ne [string]$thirdParty.iii_engine.sha256) {
     throw "iii-engine hash mismatch: expected $($thirdParty.iii_engine.sha256), got $iiiHash"
+}
 }
 
 $packageJson = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
@@ -89,11 +86,25 @@ if ($downstreamVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$')
 if ($ReleaseRevision -notmatch '^r[1-9][0-9]*$') {
     throw 'ReleaseRevision must use the form r1, r2, and so on.'
 }
-$runtimeRelease = "$version-codex-$ReleaseRevision"
-$releaseRoot = Join-Path $outputRoot "agentmemory-codex-windows-$downstreamVersion"
-$payloadRoot = Join-Path $releaseRoot 'payload'
-$runtimePackageRoot = Join-Path $payloadRoot "runtime\$runtimeRelease\agentmemory"
-[void][System.IO.Directory]::CreateDirectory($releaseRoot)
+if (-not $ValidationOnly) {
+    $runtimeRelease = "$version-codex-$ReleaseRevision"
+    $releaseRoot = Join-Path $outputRoot "agentmemory-codex-windows-$downstreamVersion"
+    $payloadRoot = Join-Path $releaseRoot 'payload'
+    $runtimePackageRoot = Join-Path $payloadRoot "runtime\$runtimeRelease\agentmemory"
+    [void][System.IO.Directory]::CreateDirectory($releaseRoot)
+
+}
+
+$priorNodeOptions = [System.Environment]::GetEnvironmentVariable('NODE_OPTIONS', 'Process')
+$priorCi = [System.Environment]::GetEnvironmentVariable('CI', 'Process')
+$env:CI = 'true'
+$nodeHeapOption = '--max-old-space-size=12288'
+if ([string]::IsNullOrWhiteSpace($priorNodeOptions)) {
+    $env:NODE_OPTIONS = $nodeHeapOption
+}
+elseif ($priorNodeOptions -notmatch '(?:^|\s)--max-old-space-size(?:=|\s)') {
+    $env:NODE_OPTIONS = "$priorNodeOptions $nodeHeapOption"
+}
 
 Push-Location $sourceRoot
 try {
@@ -114,8 +125,13 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "test suite failed with exit code $LASTEXITCODE" }
         & $node (Join-Path $PSScriptRoot 'tests\codex-turn.test.mjs')
         if ($LASTEXITCODE -ne 0) { throw "Codex adapter tests failed with exit code $LASTEXITCODE" }
-        & $node --test (Join-Path $PSScriptRoot 'tests\npm-distribution.test.mjs')
+        & $node --test (Join-Path $PSScriptRoot 'tests\npm-distribution.test.mjs') (Join-Path $PSScriptRoot 'tests\build-validation.test.mjs')
         if ($LASTEXITCODE -ne 0) { throw "npm distribution tests failed with exit code $LASTEXITCODE" }
+    }
+
+    if ($ValidationOnly) {
+        [ordered]@{ success = $true; validation_only = $true; source_commit = $sourceCommit; source_dirty = ($sourceDirty.Count -gt 0); tests_skipped = [bool]$SkipTests; release_created = $false } | ConvertTo-Json
+        return
     }
 
     & $pnpm --config.node-linker=hoisted --filter '@agentmemory/agentmemory' deploy --prod --legacy $runtimePackageRoot

@@ -388,6 +388,53 @@ test('ZIP extraction includes hidden entries and rejects traversal without desti
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+const psQuote = s => "'" + s.replaceAll("'", "''") + "'";
+for (const scenario of ['roundtrip', 'collision', 'outside', 'junction', 'cleanup-error', 'content-change']) {
+  test('completed backup compaction: ' + scenario, { skip: !windows }, async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'am-backup-'));
+    const root = path.join(dir, 'install'), backup = path.join(root, 'backups/releases/20260924T000000001Z');
+    try {
+      await mkdir(path.join(backup, 'config'), { recursive: true }); await mkdir(path.join(backup, 'empty'));
+      await writeFile(path.join(backup, 'config/install-manifest.json'), '{"release_revision":"r115"}');
+      await writeFile(path.join(backup, 'payload.bin'), Buffer.from([0,255,42,13,10]));
+      await mkdir(path.join(root, 'data')); await writeFile(path.join(root, 'data/protected'), 'canonical');
+      if (scenario === 'collision') await writeFile(backup + '.zip', 'existing archive');
+      const target = scenario === 'outside' ? path.join(root, 'data') : backup;
+      const setup = scenario === 'junction' ? "New-Item -ItemType Junction -Path (Join-Path $backup 'linked') -Target " + psQuote(path.join(root,'data')) + " | Out-Null; " :
+        scenario === 'content-change' ? "function Get-FileHash { param($LiteralPath,$Algorithm) $h=Microsoft.PowerShell.Utility\\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm; if($LiteralPath.EndsWith('payload.bin') -and -not $script:changed) { $script:changed=$true; [IO.File]::WriteAllText($LiteralPath,'changed fixture') }; return $h }; $script:changed=$false; " :
+        scenario === 'cleanup-error' ? "function Remove-Item { param($LiteralPath,[switch]$Recurse,[switch]$Force,$ErrorAction) throw 'simulated cleanup lock' }; " : '';
+      const command = "$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest; $e=$null;$t=$null;" +
+        "$ast=[Management.Automation.Language.Parser]::ParseFile(" + psQuote(path.join(packaging,'Install-WindowsCodex.ps1')) + ",[ref]$t,[ref]$e);" +
+        "$fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Compress-CompletedReleaseBackup'},$true);" +
+        "Invoke-Expression $fn.Extent.Text; $backup=" + psQuote(target) + ";" + setup +
+        "$result=Compress-CompletedReleaseBackup -InstallRoot " + psQuote(root) + " -BackupRoot $backup -CreationTicks (Get-Item -LiteralPath $backup).CreationTimeUtc.Ticks;" +
+        (scenario === 'roundtrip' ? "[IO.Compression.ZipFile]::ExtractToDirectory($result.archive," + psQuote(path.join(dir,'restored')) + ");" : '') +
+        "$result|ConvertTo-Json -Compress";
+      const result = spawnSync(ps, ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',command],
+        { env:powershellEnvironment(), encoding:'utf8', timeout:30000, windowsHide:true });
+      assert.equal(await readFile(path.join(root,'data/protected'),'utf8'),'canonical');
+      if (scenario === 'roundtrip') {
+        assert.equal(result.status,0,result.stderr); const output=JSON.parse(result.stdout); assert.equal(output.compacted,true);
+        assert.equal(output.archive,backup+'.zip'); await assert.rejects(readdir(backup),{code:'ENOENT'});
+        assert.equal(await readFile(path.join(dir,'restored/config/install-manifest.json'),'utf8'),'{"release_revision":"r115"}');
+        assert.deepEqual(await readFile(path.join(dir,'restored/payload.bin')),Buffer.from([0,255,42,13,10]));
+        assert.deepEqual(await readdir(path.join(dir,'restored/empty')),[]);
+      } else if (scenario === 'cleanup-error') {
+        assert.equal(result.status,0,result.stderr); const output=JSON.parse(result.stdout); assert.equal(output.compacted,false);
+        assert.equal(output.archive,backup+'.zip'); assert.match(output.error,/simulated cleanup lock/);
+        assert.equal((await readFile(output.archive)).subarray(0,2).toString(),'PK');
+        assert.equal(await readFile(path.join(backup,'config/install-manifest.json'),'utf8'),'{"release_revision":"r115"}');
+      } else {
+        assert.notEqual(result.status,0);
+        assert.match(result.stderr,scenario==='collision'?/already exists/:scenario==='outside'?/identity/:scenario==='content-change'?/content mismatch/:/reparse/);
+        assert.equal(await readFile(path.join(backup,'config/install-manifest.json'),'utf8'),'{"release_revision":"r115"}');
+        if(scenario==='collision') assert.equal(await readFile(backup+'.zip','utf8'),'existing archive');
+        else await assert.rejects(readFile(backup+'.zip'),{code:'ENOENT'});
+      }
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+}
+
 
 test('cutover confirms partial starts with absent worker identities and rejects live or untracked runs', { skip: !windows }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'am-partial-start-'));

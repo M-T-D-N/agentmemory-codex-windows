@@ -14,6 +14,107 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+function Compress-CompletedReleaseBackup {
+    param([Parameter(Mandatory)][string]$InstallRoot,
+          [Parameter(Mandatory)][string]$BackupRoot,
+          [Parameter(Mandatory)][long]$CreationTicks)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $expectedParent = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'backups\releases')).TrimEnd('\')
+    $item = Get-Item -LiteralPath $BackupRoot -Force
+    if (-not $item.PSIsContainer -or $item.Parent.FullName -ine $expectedParent -or
+        $item.Name -notmatch '^[0-9]{8}T[0-9]{9}Z$' -or $item.CreationTimeUtc.Ticks -ne $CreationTicks) {
+        throw 'Completed backup identity does not match this installation.'
+    }
+    $cursor = $item
+    while ($null -ne $cursor) {
+        if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Backup has a reparse ancestor.' }
+        $cursor = $cursor.Parent
+    }
+    $files = @{}
+    $directories = @()
+    $pending = New-Object 'Collections.Generic.Stack[IO.DirectoryInfo]'
+    $pending.Push($item)
+    while ($pending.Count) {
+        foreach ($child in $pending.Pop().EnumerateFileSystemInfos()) {
+            if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Backup contains a reparse entry.' }
+            if ($child -is [IO.DirectoryInfo]) {
+                $directories += $child.FullName.Substring($item.FullName.Length + 1).Replace('\', '/') + '/'
+                $pending.Push($child)
+            }
+            else {
+                $relative = $child.FullName.Substring($item.FullName.Length + 1).Replace('\', '/')
+                $files[$relative] = (Get-FileHash -LiteralPath $child.FullName -Algorithm SHA256).Hash
+            }
+        }
+    }
+    $archive = $item.FullName + '.zip'
+    $partial = $archive + '.partial'
+    if ((Test-Path -LiteralPath $archive) -or (Test-Path -LiteralPath $partial)) { throw 'Backup archive destination already exists.' }
+    $created = $false
+    try {
+        $output = [IO.File]::Open($partial, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $created = $true
+        try { $writer = [IO.Compression.ZipArchive]::new($output, [IO.Compression.ZipArchiveMode]::Create, $false) }
+        catch { $output.Dispose(); throw }
+        try {
+            foreach ($directory in $directories) { [void]$writer.CreateEntry($directory) }
+            foreach ($relative in $files.Keys) {
+                [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($writer, (Join-Path $item.FullName $relative), $relative, [IO.Compression.CompressionLevel]::Optimal)
+            }
+        } finally { $writer.Dispose(); $output.Dispose() }
+        $zip = [IO.Compression.ZipFile]::OpenRead($partial)
+        try {
+            $entries = @($zip.Entries | Where-Object { $_.Name.Length -gt 0 })
+            if ($entries.Count -ne $files.Count) { throw 'Backup archive file count differs.' }
+            $seen = @{}
+            foreach ($entry in $entries) {
+                if (-not $files.ContainsKey($entry.FullName) -or $seen.ContainsKey($entry.FullName)) { throw 'Backup archive path mismatch.' }
+                $seen[$entry.FullName] = $true
+                $stream = $entry.Open()
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+                finally { $stream.Dispose(); $sha.Dispose() }
+                if ($hash -ne $files[$entry.FullName]) { throw 'Backup archive content mismatch.' }
+            }
+        } finally { $zip.Dispose() }
+        $current = Get-Item -LiteralPath $item.FullName -Force
+        if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $current.CreationTimeUtc.Ticks -ne $CreationTicks) {
+            throw 'Backup identity changed during compression.'
+        }
+        $pending.Push($current)
+        $entryCount = 0
+        while ($pending.Count) {
+            foreach ($child in $pending.Pop().EnumerateFileSystemInfos()) {
+                $entryCount++
+                if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Backup changed to a reparse entry.' }
+                if ($child -is [IO.DirectoryInfo]) {
+                    $relative = $child.FullName.Substring($item.FullName.Length + 1).Replace('\', '/') + '/'
+                    if ($directories -notcontains $relative) { throw 'Backup directories changed during compression.' }
+                    $pending.Push($child)
+                }
+                else {
+                    $relative = $child.FullName.Substring($item.FullName.Length + 1).Replace('\', '/')
+                    if (-not $files.ContainsKey($relative) -or
+                        (Get-FileHash -LiteralPath $child.FullName -Algorithm SHA256).Hash -ne $files[$relative]) {
+                        throw 'Backup content changed during compression.'
+                    }
+                }
+            }
+        }
+        if ($entryCount -ne ($files.Count + $directories.Count)) { throw 'Backup entries changed during compression.' }
+        [IO.File]::Move($partial, $archive)
+        try {
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            return [pscustomobject]@{ archive = $archive; compacted = $true; error = $null }
+        } catch {
+            return [pscustomobject]@{ archive = $archive; compacted = $false; error = $_.Exception.Message }
+        }
+    } finally {
+        if ($created -and (Test-Path -LiteralPath $partial)) { Remove-Item -LiteralPath $partial -Force }
+    }
+}
+
 function Get-ManagedDataContractVersion {
     param([Parameter(Mandatory = $true)]$Manifest)
     $property = $Manifest.PSObject.Properties['data_contract_version']
@@ -440,7 +541,9 @@ if (-not $Execute) {
 
 $backupId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $backupRoot = Join-Path $root "backups\releases\$backupId"
+if (Test-Path -LiteralPath $backupRoot) { throw 'Release backup destination already exists.' }
 [void][System.IO.Directory]::CreateDirectory($backupRoot)
+$backupCreationTicks = (Get-Item -LiteralPath $backupRoot -Force).CreationTimeUtc.Ticks
 $copyRoots = @('scripts', 'bin', 'src', 'licenses')
 foreach ($relative in $copyRoots) {
     $current = Join-Path $root $relative
@@ -587,7 +690,6 @@ try {
 
     $summary.backup_root = $backupRoot
     $summary.healthy = $true
-    $summary | ConvertTo-Json
 }
 catch {
     $failure = $_
@@ -641,3 +743,17 @@ catch {
 finally {
     if ($cutoverLock) { $cutoverLock.Dispose() }
 }
+
+# A completed backup is inactive; compaction failure must not roll back a healthy install.
+$summary.backup_archive = $null
+$summary.backup_compacted = $false
+try {
+    $compaction = Compress-CompletedReleaseBackup -InstallRoot $root -BackupRoot $backupRoot -CreationTicks $backupCreationTicks
+    $summary.backup_archive = $compaction.archive
+    $summary.backup_compacted = $compaction.compacted
+    if ($compaction.compacted) { $summary.backup_root = $null }
+    else { $summary.backup_compaction_error = $compaction.error }
+} catch {
+    $summary.backup_compaction_error = $_.Exception.Message
+}
+$summary | ConvertTo-Json

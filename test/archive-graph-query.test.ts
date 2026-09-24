@@ -77,7 +77,8 @@ describe("archive-aware graph query and traversal", () => {
     for (const input of [{}, { project: "*" }, { query: "Concept" }, { startNodeId: "a" }]) {
       const result = await f.query(input);
       expect(result.fromSnapshot).toBe(true);
-      expect(result.warning).toContain("totals may therefore be incomplete");
+      expect(result.totalsExact).toBe(false);
+      expect(result.warning).toContain("Zero matches");
       expect(result.nodes.map(row => row.id)).not.toContain("b");
       expect(result.edges).toEqual([]);
     }
