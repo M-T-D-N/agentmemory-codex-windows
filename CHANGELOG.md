@@ -6,9 +6,14 @@ The upstream AgentMemory release history remains in the
 
 ## 0.1.0-preview.11 — 2026-09-25
 
-- Give original-text recall priority before competing graph/curation requests
-  and use a shared three-second retrieval budget, with at most two seconds for
-  the current project. Keep a verified local result if historical lookup times out.
+- Use one hook work deadline shared by recall, capture, graph and curation.
+  A lightweight graph-statistics read scales the base 12-second prompt budget
+  with node-plus-edge count, up to 60 seconds; the registered host timeout is
+  65 seconds. Individual retrieval budgets scale with it. This is a ceiling,
+  not an added delay. Keep recalled evidence when capture is unconfirmed.
+- Run original-text recall and capture before graph/curation work, serialize
+  the two heavy graph reads and cap observation-fetch concurrency at four.
+  Once the shared deadline expires, do not dispatch more auxiliary requests.
 - Bound indexed graph walks before canonical hydration, including high-degree
   roots. Partial walks carry explicit incomplete totals/inventory warnings.
   Dense node pages hydrate at most 1,000 page edges; exact edge inventory

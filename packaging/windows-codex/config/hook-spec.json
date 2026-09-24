@@ -4,20 +4,25 @@
   "events": [
     {
       "name": "SessionStart",
-      "timeout_seconds": 3
+      "timeout_seconds": 5,
+      "work_budget_ms": 3000
     },
     {
       "name": "UserPromptSubmit",
-      "timeout_seconds": 6,
-      "additional_context_limit": 2400
+      "timeout_seconds": 65,
+      "work_budget_ms": 12000,
+      "work_budget_max_ms": 60000,
+      "additional_context_limit": 2800
     },
     {
       "name": "Stop",
-      "timeout_seconds": 4
+      "timeout_seconds": 9,
+      "work_budget_ms": 6500
     },
     {
       "name": "SessionEnd",
-      "timeout_seconds": 3
+      "timeout_seconds": 5,
+      "work_budget_ms": 3000
     }
   ]
 }

@@ -898,23 +898,38 @@ search, so merely considering a result does not strengthen its access-based
 retention. Explicit searches retain their default access tracking.
 When a short follow-up omits its topic, the hook can reuse the most recent
 topical user prompt among 12 recent observations in the same exact project and
-session. It uses at most two existing observation-page reads (700 ms each),
+session. It uses at most two existing observation-page reads (a base 3,000 ms each),
 without a separate topic cache or model call. The captured user message remains
 unchanged. If no topic is found, automatic retrieval abstains; earlier injected
 or model-generated text does not supply a topic.
 Explicit MCP recall remains available. Graph neighbors need their own topic
 match, except for explicit supersession links preserving a matched decision's
 replacement and historical status. Local and fallback candidate queries share
-a shared 3,000 ms retrieval budget (at most 2,000 ms for the current project).
-Original-text recall runs before graph/curation requests and current input
-storage so these reads do not consume its budget. Recall normally has up to 650 characters;
+a base 5,000 ms retrieval budget (at most 3,000 ms for the current project).
+Original-text recall runs before current input storage; graph and curation reads
+follow those two essential stages. Recall normally has up to 650 characters;
 two or more distinct topical user originals permit up to 1,150. Graph context
 stays at 500 and curation keeps its reserved budget. Total injected context is
 normally capped at 2,300 characters, or at 2,800 when the longer original-source
 excerpts actually use the extra room. Duplicate text and unrelated records do
 not justify expansion. These are character limits, not model-token counts.
-No LLM inference is added. Bounded successor expansion
-is unchanged. Explicit `memory_recall` and REST `/agentmemory/search` also expose
+All prompt work shares one deadline defined in `config/hook-spec.json`.
+A lightweight `/graph/stats` read sets a scale of
+`max(1, (totalNodes + totalEdges) / 80000)`, capped at five. The 12-second base
+prompt deadline and individual read allowances use that scale, up to 60 seconds
+of work within a 65-second host ceiling. Unavailable/invalid counts retain the
+base budget. These are maximum allowances, not sleeps; fast work exits promptly.
+The base covers the measured roughly 30,000-node/50,000-edge corpus. At larger
+sizes the allowance grows without editing constants for each increase. Counts
+are an estimate of work, not a guarantee of latency: storage contention or a
+different graph shape can still exhaust the maximum. Successful recall survives
+capture errors, failures are distinguished from confirmed capture, and no new
+auxiliary requests start after the shared deadline. The heavy topic/curation
+graph reads are serialized; curation observation reads run at most four at a time.
+Indexed topic/curation reads still scale with corpus size; this is not a claim of
+constant-time graph search. Controlled large-corpus tests supplement actual
+installed-hook validation rather than representing a 200,000-node deployment.
+No LLM inference is added. Explicit `memory_recall` and REST `/agentmemory/search` also expose
 `sourceKind: "user" | "assistant"`; omission retains ordinary mixed-source
 search. Speaker selection happens before candidate limits, and keeps existing
 archive, source-exclusion, project and agent visibility rules. Derived saved

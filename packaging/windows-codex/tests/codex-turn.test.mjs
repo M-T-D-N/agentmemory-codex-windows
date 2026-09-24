@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -685,7 +685,7 @@ test("registry v4 prompt and stop keep recall injection while storage belongs to
   const temp = mkdtempSync(join(tmpdir(), "agentmemory-native-hook-"));
   const keys = ["AGENTMEMORY_WORKSPACE_ROOT", "AGENTMEMORY_PROJECT_REGISTRY", "AGENTMEMORY_URL", "AGENTMEMORY_SECRET"];
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-  const originalFetch = globalThis.fetch; const originalWrite = process.stdout.write;
+  const originalFetch = globalThis.fetch; const originalWrite = process.stdout.write; const originalNow = Date.now;
   const calls = []; const output = [];
   try {
     const cwd = join(temp, "source-project"); mkdirSync(cwd);
@@ -704,7 +704,7 @@ test("registry v4 prompt and stop keep recall injection while storage belongs to
     };
     process.stdout.write = value => { output.push(String(value)); return true; };
     await handleTurn({ session_id: "native-fixture", turn_id: "turn-a", cwd, prompt: "federated recall" }, "UserPromptSubmit");
-    assert.ok(calls[0].url.endsWith("/search") && calls[1].url.endsWith("/search"), "Both original searches precede competing graph/backlog requests and storage");
+    assert.ok(calls[0].url.endsWith("/graph/stats") && calls[1].url.endsWith("/search") && calls[2].url.endsWith("/search"), "A lightweight scale read precedes the two original searches; heavy graph/backlog work follows storage");
     assert.equal(calls.filter(call => call.url.endsWith("/observe")).length, 1);
     assert.deepEqual(calls.find(call => call.url.endsWith("/session/start")).body,
       { action: "capture-source", project: "source-project", sessionId: "native-fixture" });
@@ -722,8 +722,49 @@ test("registry v4 prompt and stop keep recall injection while storage belongs to
     assert.equal(calls.find(call => call.url.endsWith("/observe")).body.project, "source-project");
     assert.equal(calls.find(call => call.url.endsWith("/session/start")).body.action, "capture-source");
     assert.equal(calls.some(call => call.url.endsWith("/search")), false);
+    const normalFetch = globalThis.fetch;
+    for (const failure of [new DOMException("fixture timeout", "TimeoutError"), new Error("fixture storage unavailable")]) {
+      calls.length = 0; output.length = 0;
+      globalThis.fetch = async (url, options) => {
+        if (String(url).endsWith("/session/start")) throw failure;
+        return normalFetch(url, options);
+      };
+      await handleTurn({ session_id: "native-fixture", turn_id: "failed-capture", cwd, prompt: "federated recall" }, "UserPromptSubmit");
+      const failed = JSON.parse(output.join(""));
+      assert.match(failed.hookSpecificOutput.additionalContext, /agentmemory-recall-context/);
+      assert.match(failed.systemMessage, /수집은 아직 확인하지 못했습니다/);
+      assert.equal(calls.some(call => call.url.endsWith("/graph/query")), false, "Do not add graph work after capture failure");
+    }
+    calls.length = 0; output.length = 0;
+    let now = 1000; Date.now = () => now;
+    globalThis.fetch = async (url, options) => {
+      const response = await normalFetch(url, options);
+      if (String(url).endsWith("/session/start")) now += 12001;
+      return response;
+    };
+    await handleTurn({ session_id: "native-fixture", turn_id: "spent-budget", cwd, prompt: "federated recall" }, "UserPromptSubmit");
+    assert.equal(calls.some(call => call.url.endsWith("/graph/query") || call.url.includes("/livez")), false,
+      "The single spent hook budget prevents new optional requests");
+    assert.match(JSON.parse(output.join("")).hookSpecificOutput.additionalContext, /agentmemory-recall-context/);
+    calls.length = 0; output.length = 0;
+    globalThis.fetch = normalFetch;
+    await handleTurn({ session_id: "native-fixture", turn_id: "next-budget", cwd, last_assistant_message: "Verified result" }, "Stop");
+    assert.equal(calls.filter(call => call.url.endsWith("/observe")).length, 1, "A later hook has its own budget");
+    for (const totalNodes of [100000, 200000]) {
+      calls.length = 0; output.length = 0; now = 1000;
+      globalThis.fetch = async (url, options) => {
+        if (String(url).endsWith("/graph/stats")) return new Response(JSON.stringify({ totalNodes, totalEdges: totalNodes * 2 }));
+        const response = await normalFetch(url, options);
+        now += 3000;
+        return response;
+      };
+      await handleTurn({ session_id: "native-fixture", turn_id: `scale-${totalNodes}`, cwd, prompt: "federated recall" }, "UserPromptSubmit");
+      assert.ok(now > 13000, "The larger corpus is not cut off at the old base budget");
+      assert.ok(calls.some(call => call.url.includes("/sessions?")), "Scaled graph and curation stages remain usable");
+      assert.match(JSON.parse(output.join("")).hookSpecificOutput.additionalContext, /agentmemory-recall-context/);
+    }
   } finally {
-    globalThis.fetch = originalFetch; process.stdout.write = originalWrite;
+    globalThis.fetch = originalFetch; process.stdout.write = originalWrite; Date.now = originalNow;
     for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
     rmSync(temp, { recursive: true, force: true });
   }
@@ -893,11 +934,17 @@ test("an incomplete graph snapshot cannot masquerade as current evidence or an e
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("hook work deadlines leave room for host startup and preserve the expanded context limit", () => {
+  const spec = JSON.parse(readFileSync(new URL("../config/hook-spec.json", import.meta.url), "utf8"));
+  for (const event of spec.events) assert.ok((event.work_budget_max_ms ?? event.work_budget_ms) + 2000 <= event.timeout_seconds * 1000);
+  assert.equal(spec.events.find(event => event.name === "UserPromptSubmit").additional_context_limit, 2800);
+});
+
 test("empty local search does not start a second full deadline after its retrieval budget expires", async () => {
   const originalFetch = globalThis.fetch, originalNow = Date.now;
   let now = 1000; const calls = [];
   Date.now = () => now;
-  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); now += 3001; return new Response(JSON.stringify({ results: [] })); };
+  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); now += 5001; return new Response(JSON.stringify({ results: [] })); };
   try {
     assert.equal(await federatedRecallContext("native capture", "current"), null);
     assert.deepEqual(calls.map(call => call.project), ["current"]);
