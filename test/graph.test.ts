@@ -138,11 +138,13 @@ describe("Graph Functions", () => {
     expect(await sdk.trigger("mem::graph-query", { query: "absent" })).toMatchObject({
       nodes: [], totalsExact: false, fromSnapshot: true,
     });
-    expect(await sdk.trigger("mem::graph-snapshot-rebuild", { onlyIfIndexUnavailable: true })).toMatchObject({ success: true });
+    const writes = vi.spyOn(kv, "set");
+    expect(await sdk.trigger("mem::graph-snapshot-rebuild", { onlyIfIndexUnavailable: true })).toMatchObject({ success: true, queryIndexOnly: true });
+    expect(writes.mock.calls.every(([scope]) => scope.startsWith("mem:graph:query-"))).toBe(true);
     expect(await sdk.trigger("mem::graph-query", { query: "src/index.ts" })).toMatchObject({ fromIndex: true });
     expect(await kv.list("mem:graph:nodes")).toEqual(nodes);
     expect(await kv.list("mem:graph:edges")).toEqual(edges);
-    const writes = vi.spyOn(kv, "set");
+    writes.mockClear();
     expect(await sdk.trigger("mem::graph-snapshot-rebuild", { onlyIfIndexUnavailable: true })).toEqual({ success: true, skipped: true });
     expect(writes).not.toHaveBeenCalled();
   });

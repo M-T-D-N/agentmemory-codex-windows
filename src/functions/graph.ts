@@ -3725,6 +3725,19 @@ export function registerGraphFunction(
           liveNodeIds.has(edge.sourceNodeId) &&
           liveNodeIds.has(edge.targetNodeId),
       );
+      // A healthy snapshot with matching canonical totals needs only its
+      // query shards repaired. Rewriting every name/degree/edge lookup here
+      // needlessly floods the state channel during automatic startup repair.
+      if (data?.onlyIfIndexUnavailable === true && existingSnapshot &&
+          !existingSnapshot.dirty &&
+          existingSnapshot.stats.totalNodes === liveNodes.length &&
+          existingSnapshot.stats.totalEdges === liveEdges.length) {
+        const previousManifest = await readGraphQueryIndexManifest(kv);
+        if (previousManifest) await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, { ...previousManifest, dirty: true });
+        await buildGraphQueryIndex(kv, nodes, edges, existingSnapshot);
+        return { success: true, queryIndexOnly: true, ...existingSnapshot.stats,
+          enumeration: paged ? "paged" : "legacy", tookMs: Date.now() - started };
+      }
       const degree = new Map<string, number>();
       for (const e of liveEdges) {
         degree.set(e.sourceNodeId, (degree.get(e.sourceNodeId) ?? 0) + 1);
@@ -3732,7 +3745,7 @@ export function registerGraphFunction(
       }
       const previousManifest = await readGraphQueryIndexManifest(kv);
       if (previousManifest) await kv.set(KV.graphQueryManifest, GRAPH_QUERY_INDEX_MANIFEST_KEY, { ...previousManifest, dirty: true });
-      const BATCH_SIZE = 100;
+      const BATCH_SIZE = Math.floor(GRAPH_QUERY_INDEX_IO_BATCH / 2);
       for (let i = 0; i < liveNodes.length; i += BATCH_SIZE) {
         const batch = liveNodes.slice(i, i + BATCH_SIZE);
         await Promise.all(

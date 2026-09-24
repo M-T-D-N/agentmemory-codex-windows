@@ -1207,7 +1207,9 @@ resetting the graph; corpora outside the bounded budget remain an explicit error
 The managed worker checks query-index consistency during its existing 30-second
 health cycle, starting at worker startup. An unavailable index requests one
 `mem::graph-snapshot-rebuild` invocation, which rechecks consistency under the
-graph write lock before rebuilding. A completed failed attempt retries after
+graph write lock before rebuilding. When a clean snapshot matches canonical node and edge totals, only
+query shards are rewritten; full lookup rebuilding is reserved for a missing or
+inconsistent snapshot and limits each batch to 16 state writes. A completed failed attempt retries after
 five minutes; a running attempt is never duplicated. `health.graphQueryIndex`
 reports ready, recovering, unavailable or error, with the last failure and next
 retry time when applicable. Recovery uses no Qwen invocation. Other observation

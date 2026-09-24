@@ -13,6 +13,9 @@ The upstream AgentMemory release history remains in the
   bounded, serialized rebuild using the existing recovery operation. Failed
   attempts remain visible and retry after five minutes. Reads stay bounded,
   canonical records and archive decisions are preserved, and no model is needed.
+  When a clean snapshot agrees with canonical totals, repair only query shards;
+  avoid rewriting every name, degree and relationship lookup on startup. Full
+  rebuilds also cap concurrent lookup writes at the existing index I/O bound.
 - Mark fallback graph totals as inexact, including empty fallback results.
 
 ## 0.1.0-preview.10 — 2026-09-23
