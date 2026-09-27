@@ -302,6 +302,26 @@ closed. Internal requests preserve existing normal session history; only the
 automatic `codex_internal_prompt` exclusion can recover on a later normal
 Codex prompt, with an audit entry. Other exclusion reasons remain in force.
 
+Normal user turns now require a completed bounded recall before substantive work,
+including new and projectless chats. The prompt hook independently retrieves
+current-project context, historical user originals, and cross-project records.
+It reports lookup status separately from evidence coverage; successful search or
+injected graph text does not prove that a relevant original was read or applied.
+Concrete identifiers anchor retrieval, including identifiers within hostnames;
+attachment transport headers are not treated as the user's search topic.
+
+An unavailable required lookup returns the documented `UserPromptSubmit` blocking
+decision. No-match results permit normal processing and require no extra retry.
+Image-only requests can require the agent to inspect the image and perform a
+topic-specific lookup before proceeding. Stop/cancel requests bypass recall.
+For recovery during an outage, users may directly put `AgentMemory 조회 없이 복구`
+or `AgentMemory 조회 없이 진행` on the first line and the request on following
+lines. This bypass applies to that turn only, not quoted text or document content.
+Capture failures retain their independent reconciliation path and do not invalidate
+a successful recall. No new queue, per-tool guard, or automatic Stop retry is added.
+Hook execution/availability and correct use of evidence must be verified in the
+host; a delivered excerpt alone is not an end-to-end acceptance result.
+
 `memory_recall` and `memory_smart_search` expose an optional `agentId`, including
 smart-search expansion. Omission preserves the configured agent scope; an
 explicit `*` requests a cross-agent read within the selected project. Invalid

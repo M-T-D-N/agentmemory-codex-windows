@@ -123,7 +123,7 @@ try {
     if (-not $SkipTests) {
         & $pnpm test
         if ($LASTEXITCODE -ne 0) { throw "test suite failed with exit code $LASTEXITCODE" }
-        & $node (Join-Path $PSScriptRoot 'tests\codex-turn.test.mjs')
+        & $node --test (Join-Path $PSScriptRoot 'tests\codex-turn.test.mjs') (Join-Path $PSScriptRoot 'tests\recall-first.test.mjs')
         if ($LASTEXITCODE -ne 0) { throw "Codex adapter tests failed with exit code $LASTEXITCODE" }
         & $node --test (Join-Path $PSScriptRoot 'tests\npm-distribution.test.mjs') (Join-Path $PSScriptRoot 'tests\build-validation.test.mjs')
         if ($LASTEXITCODE -ne 0) { throw "npm distribution tests failed with exit code $LASTEXITCODE" }

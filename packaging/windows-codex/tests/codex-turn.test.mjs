@@ -26,6 +26,10 @@ import {
   projectFor,
   readProjectRegistry,
   promptText,
+  recallRequestText,
+  recallQuery,
+  recallBypass,
+  recallForTurn,
   retrievalPrompt,
   safeText,
   sourceHealthWarning,
@@ -663,9 +667,9 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
     const [recall, graph] = await Promise.all([
       federatedRecallContext("federated recall", "current"), graphContext("federated recall", "current"),
     ]);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 5);
     const searches = calls.filter((call) => call.url.endsWith("/search"));
-    assert.deepEqual(searches.map(call => call.body.project), ["current", "*"]);
+    assert.deepEqual(searches.map(call => call.body.project), ["current", "*", "*"]);
     assert.deepEqual(searches[0].body, { query: "federated recall", project: "current", searchMode: "keyword", format: "full", limit: 12, token_budget: 1200, trackAccess: false });
     assert.ok(searches.every(call => call.body.trackAccess === false));
     const graphs = calls.filter((call) => call.url.endsWith("/graph/query") && call.body.queries);
@@ -815,7 +819,7 @@ test("automatic recall keeps local evidence and searches user history even after
   };
   try {
     const result = await federatedRecallContext("native source", "current");
-    assert.deepEqual(calls.map(call => call.project), ["current", "*"]);
+    assert.deepEqual(calls.map(call => call.project), ["current", "*", "*"]);
     assert.equal(calls[1].sourceKind, "user");
     assert.ok(calls.every(body => body.searchMode === "keyword"));
     assert.match(result, /\[current\] obs-local @2026-09-14T00:00:00Z/);
@@ -838,7 +842,7 @@ test("historical user requirements survive recent assistant summaries under a re
   };
   try {
     const context = await federatedRecallContext("canvas labels", "editor-new");
-    assert.deepEqual(calls.map(body => [body.project, body.sourceKind]), [["editor-new", undefined], ["*", "user"]]);
+    assert.deepEqual(calls.map(body => [body.project, body.sourceKind]), [["editor-new", undefined], ["*", "user"], ["*", undefined]]);
     assert.match(context, /original-request .* user: Keep all valid canvas labels/);
     assert.match(context, /recent-summary .* derived:/);
     assert.ok(context.indexOf("recent-summary") < context.indexOf("original-request"));
@@ -964,7 +968,7 @@ test("native source warnings distinguish diagnostics from graph completion and o
   assert.doesNotMatch(sourceHealthWarning({ nativeCapture: { status: "attention", error: "secret-content" } }), /secret-content/);
 });
 
-test("capture failure emits a nonblocking Codex systemMessage instead of losing the failure in stderr", () => {
+test("missing prompt identity blocks work before unverified recall instead of silently continuing", () => {
   const hook = resolve(import.meta.dirname, "..", "hooks", "codex-turn.mjs");
   const child = spawnSync(process.execPath, [hook], {
     input: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "synthetic capture test" }),
@@ -972,8 +976,8 @@ test("capture failure emits a nonblocking Codex systemMessage instead of losing 
   });
   assert.equal(child.status, 0);
   const output = JSON.parse(child.stdout);
-  assert.match(output.systemMessage, /자동 수집을 확인하지 못했습니다/);
-  assert.equal(output.decision, undefined);
+  assert.match(output.reason, /필수 회상/);
+  assert.equal(output.decision, "block");
   assert.equal(output.continue, undefined);
   assert.equal(output.hookSpecificOutput, undefined);
   assert.match(child.stderr, /no capture completion is confirmed/);

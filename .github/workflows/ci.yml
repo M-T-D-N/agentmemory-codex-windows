@@ -37,5 +37,5 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run build
       - run: pnpm test
-      - run: node packaging/windows-codex/tests/codex-turn.test.mjs
+      - run: node --test packaging/windows-codex/tests/codex-turn.test.mjs packaging/windows-codex/tests/recall-first.test.mjs
       - run: node --test packaging/windows-codex/tests/npm-distribution.test.mjs

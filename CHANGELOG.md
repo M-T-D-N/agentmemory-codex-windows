@@ -4,6 +4,16 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+- Require bounded recall on normal user turns, including fresh and projectless
+  questions. Report lookup status and source scope, block unavailable recall,
+  and preserve explicit per-turn recovery/bypass and immediate stop requests.
+- Retrieve historical user originals and other source-labelled records across
+  projects; match concrete identifiers inside hostnames and exclude attachment
+  transport headers from recall queries. Keep the shared deadline and independent
+  capture-reconciliation behavior. No graph completion wait or Stop retry loop.
+
 ## 0.1.0-preview.11 — 2026-09-25
 
 - Page large graph write intents instead of sending their combined index shards
