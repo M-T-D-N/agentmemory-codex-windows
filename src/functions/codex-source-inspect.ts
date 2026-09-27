@@ -43,12 +43,11 @@ export async function inspectCodexSource(
     completeNativeInventory: last.caughtUp, exclusions: captureExclusions, unresolvedCaptures });
   const unresolved = new Set(unmatchedCodexCaptures(observations, decisions).map(row => row.observationId));
   const retained = last.caughtUp ? await readCodexRetainedSources({ sourceRoot: managed.sourceRoot, sourcePath: input.sourcePath, sessionId: input.sessionId },
-    compared, observations.filter(row => unresolved.has(row.id)), readWindow) : { messages: [] };
-  if (retained.messages.length) {
-    compared = [...compared, ...retained.messages];
-    decisions = matchCodexMessages(compared, observations, { ...input, agentId: managed.agentId,
-      completeNativeInventory: last.caughtUp, exclusions: captureExclusions, unresolvedCaptures });
-  }
+    compared, observations.filter(row => unresolved.has(row.id)), readWindow) : { messages: [], singlePhysicalSource: false };
+  compared = [...compared, ...retained.messages];
+  decisions = matchCodexMessages(compared, observations, { ...input, agentId: managed.agentId,
+    completeNativeInventory: last.caughtUp, exclusions: captureExclusions, unresolvedCaptures,
+    singlePhysicalSource: retained.singlePhysicalSource, sourceCreatedAt: last.source.createdAt });
   const unmatched = unmatchedCodexCaptures(observations, decisions);
   const counts: Record<string, number> = {};
   const reasons: Record<string, number> = {};

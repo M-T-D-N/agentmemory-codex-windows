@@ -6,6 +6,17 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+- Reconcile image-read failure displays without changing canonical source text:
+  a separate host diagnostic, attachment header, exact image path and matching
+  same-turn display must agree. Consume each primary at most once, including
+  source-hold review and restartable cursor reads.
+- Recover uniquely corresponding legacy user hooks when hook and native record
+  timestamps differ by more than five seconds in either direction. Require the
+  complete inventory, proven absence of alternate source files, original hook
+  provenance and unique source/capture claims. Preserve IDs, timestamps and
+  origin; repeated text, conflicting provenance and protected records remain
+  unresolved. Image display recovery restores the exact canonical diagnostic
+  through the audited initialization path. No timeout increase or graph wait.
 - Require evidence handling on normal user turns, including fresh and projectless
   questions. Retrieve new scope, or validate originals already expanded in the
   same uncompacted conversation through official project-scoped expansion.

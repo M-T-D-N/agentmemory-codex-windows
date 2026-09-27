@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { CodexSourceHold } from "../types.js";
-import { parseCodexRecord, type CodexParseState } from "./codex-record.js";
+import { parseCodexRecord, unmatchedCodexUserMirrors, type CodexParseState } from "./codex-record.js";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const exact = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512 && value.trim() === value;
@@ -40,7 +40,7 @@ export function parseCodexRecordWithHolds(value: unknown,
     };
   }
   if (result.status !== "unknown" || result.reason !== "completion_has_unmatched_message_mirrors") return { result, holds };
-  const candidates = prior.userMirrors.filter(mirror => !prior.userMessages.some(message => message.digest === mirror.digest));
+  const candidates = unmatchedCodexUserMirrors(prior);
   if (!prior.turnId || !candidates.length || candidates.some(mirror => !mirror.sourceLocation ||
       prior.userMirrors.filter(other => other.digest === mirror.digest).length !== 1)) return { result, holds };
   const ids = new Set(candidates.map(mirror => mirror.id));

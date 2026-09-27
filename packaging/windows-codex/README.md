@@ -409,7 +409,33 @@ Initialization preserves existing observation IDs and metadata. Legacy matching
 ignores already deleted, unbound empty rows as conversation candidates using
 the official empty-observation content check. Those rows and their recovery
 metadata are not modified. Protected rows with content, restored state or source
-provenance continue to require their existing lifecycle. Ordinary correspondence
+provenance continue to require their existing lifecycle.
+
+Initialization and inspection can also identify a delayed legacy user hook
+without enlarging the ordinary five-second window. This requires a complete
+native inventory, successful discovery proving no alternate physical source,
+one full-content source and one stored claimant across the entire inventory,
+the exact original `prompt_submit`/`conversation` synthetic hook shape and user
+origin, and a capture timestamp no earlier than that source's session creation.
+Hook and native record writes may occur in either order. Conflicting item/turn
+provenance, repeated text, protected observations and uncertain source discovery
+do not qualify. Duplicate reconciliation cannot infer uniqueness from a reduced
+row set. Preview/audit report `adoptDelayedHook`; IDs, timestamps and origin stay
+unchanged.
+
+An image-read diagnostic can make the canonical input differ from its displayed
+user message. Only a separate terminal host diagnostic with an exact attachment
+header and a matching same-turn local-image path qualifies for a display alias.
+Each primary satisfies at most one mirror, and cursor resume/source-hold review
+use the same correspondence rule. Canonical primary text and identity stay intact.
+A legacy hook containing only that proven display can regain the full canonical
+text in its original observation through initialization; preview/audit report
+`restoreImageReadDiagnostic`. This additionally requires unique full-inventory
+claims and no alternate source, and preserves the original user text, ID, time,
+origin and other metadata. An absent mirror, quoted/inline diagnostic, different
+image path or ambiguous claim is insufficient. No failed file is read or altered.
+
+Ordinary correspondence
 uses full-content correspondence within the existing five-second window and
 requires a unique mapping across the complete inventory. It can append one final
 LF when the resulting digest exactly matches the native source. Legacy synthetic

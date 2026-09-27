@@ -10,8 +10,8 @@ export interface CodexParseState {
   normalSessionSeen: boolean;
   internalTurn: boolean;
   finalDigests: string[];
-  userMessages: Array<{ key: string; digest: string }>;
-  userMirrors: Array<{ id: string; digest: string; sourceLocation?: { ordinal: number; byteOffset: number; recordDigest: string } }>;
+  userMessages: Array<{ key: string; digest: string; imageReadFailureDisplay?: { digest: string; path: string } }>;
+  userMirrors: Array<{ id: string; digest: string; localImagePaths?: string[]; sourceLocation?: { ordinal: number; byteOffset: number; recordDigest: string } }>;
   finalMessages: Array<{ id: string | null; digest: string }>;
   finalMirrors: Array<{ id: string; digest: string }>;
   userInputToolIds: string[];
@@ -27,6 +27,7 @@ export interface CodexNativeMessage {
   ordinal: number;
   byteOffset: number;
   text: string;
+  imageReadFailureDisplay?: { digest: string; path: string };
   legacyImageWrappedDigest?: string;
   legacyRecovery?: { observationId: string; textDigest: string };
   legacyExcludedReason?: "assistant_without_normal_user";
@@ -35,7 +36,7 @@ export interface CodexNativeMessage {
 export type CodexRecordResult =
   | { status: "message"; message: CodexNativeMessage; state: CodexParseState }
   | { status: "excluded"; reason: string; state: CodexParseState; legacyMessage?: CodexNativeMessage;
-      legacyUserItem?: { turnId: string; id: string; textDigest: string } }
+      legacyUserItem?: { turnId: string; id: string; textDigest: string; localImagePaths?: string[] } }
   | { status: "unknown"; reason: string; state: CodexParseState };
 
 const ignoredResponseTypes = new Set(["reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "web_search_call", "tool_search_call", "tool_search_output", "image_generation_call", "compaction", "agent_message", "configuration_update"]);
@@ -60,9 +61,41 @@ function isInternalTurnInstruction(text: string): boolean {
 
 const eligibleFinal = (state: CodexParseState) => state.normalUserSeen || (state.normalSessionSeen && !state.internalTurn);
 
+export function unmatchedCodexUserMirrors(state: CodexParseState): CodexParseState["userMirrors"] {
+  const owners = new Map<number, number>();
+  const candidates = state.userMirrors.map(mirror => state.userMessages.flatMap((message, index) =>
+    message.digest === mirror.digest ? [index] : []).concat(state.userMessages.flatMap((message, index) =>
+    message.digest !== mirror.digest && message.imageReadFailureDisplay?.digest === mirror.digest &&
+    mirror.localImagePaths?.includes(message.imageReadFailureDisplay.path) ? [index] : [])));
+  const assign = (mirror: number, visited: Set<number>): boolean => {
+    for (const index of candidates[mirror]!) {
+      if (visited.has(index)) continue;
+      visited.add(index);
+      const owner = owners.get(index);
+      if (owner === undefined || assign(owner, visited)) { owners.set(index, mirror); return true; }
+    }
+    return false;
+  };
+  return state.userMirrors.filter((_, index) => !assign(index, new Set()));
+}
+
+function imageReadFailureDisplay(content: unknown[]): { digest: string; path: string } | undefined {
+  if (content.length !== 2) return;
+  const original = asRecord(content[0]), diagnostic = asRecord(content[1]);
+  if (original?.type !== "input_text" || typeof original.text !== "string" ||
+      diagnostic?.type !== "input_text" || typeof diagnostic.text !== "string") return;
+  const match = /^Codex could not read the local image at `([^`\r\n]{1,2048})`: [^\r\n]+ \(os error \d+\)$/.exec(diagnostic.text);
+  if (!match || !original.text.startsWith("\n# Files mentioned by the user:\n") ||
+      !original.text.includes("\n## My request:\n")) return;
+  const path = match[1]!;
+  const lines = original.text.split(/\r?\n/);
+  if (!lines.some((line, index) => /^## [^\r\n]+: /.test(line) && line.endsWith(": " + path) && lines[index + 1] === "Image attachment: true")) return;
+  const text = codexUserText(original.text);
+  return text === null ? undefined : { digest: digest(text), path };
+}
+
 export function pendingCodexMirrors(state: CodexParseState): boolean {
-  if (state.userMirrors.some(mirror => state.userMirrors.filter(m => m.digest === mirror.digest).length >
-    state.userMessages.filter(m => m.digest === mirror.digest).length)) return true;
+  if (unmatchedCodexUserMirrors(state).length) return true;
   const unmatchedMessages = [...state.finalMessages];
   const unmatchedMirrors = state.finalMirrors.filter(mirror => {
     const index = unmatchedMessages.findIndex(message => message.id === mirror.id && message.digest === mirror.digest);
@@ -177,9 +210,15 @@ export function parseCodexRecord(
       const existing = state.userMirrors.find(mirror => mirror.id === item.id);
       if (existing) return existing.digest === fingerprint ? excluded("verified_user_item_mirror") : unknown("conflicting_user_item_identity");
       if (state.userMirrors.length >= 256) return unknown("excessive_user_items_in_turn");
-      state.userMirrors.push({ id: item.id, digest: fingerprint });
+      const localImagePaths = item.content.flatMap(raw => {
+        const part = asRecord(raw);
+        return part?.type === "local_image" && typeof part.path === "string" && part.path.length > 0 &&
+          part.path.length <= 2048 && !/[\r\n\0]/.test(part.path) ? [part.path] : [];
+      });
+      if (localImagePaths.length > 16) return unknown("excessive_local_images_in_item");
+      state.userMirrors.push({ id: item.id, digest: fingerprint, ...(localImagePaths.length ? { localImagePaths } : {}) });
       return { ...excluded("user_item_mirror"), ...(context.includeExcludedMessages ? {
-        legacyUserItem: { turnId: state.turnId!, id: item.id, textDigest: fingerprint },
+        legacyUserItem: { turnId: state.turnId!, id: item.id, textDigest: fingerprint, ...(localImagePaths.length ? { localImagePaths } : {}) },
       } : {}) };
     }
     if (payload.type === "turn_aborted") return excluded("turn_aborted");
@@ -237,6 +276,7 @@ export function parseCodexRecord(
   const key = digest(JSON.stringify(["codex-native-v1", context.sessionId, kind,
     nativeMessageId ?? ["legacy-position", row.timestamp, context.ordinal, context.byteOffset]]));
   const text = parts.join("\n");
+  const display = kind === "user" ? imageReadFailureDisplay(payload.content) : undefined;
   const recoveryText = kind === "user" ? codexUserText(payload.content
     .map(part => typeof part.text === "string" ? part.text : "")
     .filter(part => !/^<image name=|^<\/image>$/.test(part.trim())).join("\n")) : null;
@@ -246,6 +286,7 @@ export function parseCodexRecord(
   } : undefined;
   const message: CodexNativeMessage = { key, sessionId: context.sessionId, nativeMessageId,
     turnId: state.turnId, kind, timestamp: row.timestamp, ordinal: context.ordinal, byteOffset: context.byteOffset, text,
+    ...(display ? { imageReadFailureDisplay: display } : {}),
     ...(hasImageWrapper ? { legacyImageWrappedDigest: digest(legacyParts.join("\n")) } : {}),
     ...(legacyRecovery ? { legacyRecovery } : {}) };
   if (excludedFinal) return { status: "excluded", reason: "assistant_without_normal_user", state,
@@ -258,7 +299,7 @@ export function parseCodexRecord(
     if (existing && existing.digest !== digest(text)) return unknown("conflicting_user_message_identity");
     if (!existing) {
       if (state.userMessages.length >= 256) return unknown("excessive_user_messages_in_turn");
-      state.userMessages.push({ key, digest: digest(text) });
+      state.userMessages.push({ key, digest: digest(text), ...(display ? { imageReadFailureDisplay: display } : {}) });
     }
   }
   else {

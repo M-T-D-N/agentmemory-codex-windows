@@ -11,10 +11,11 @@ export interface CodexMatchDecision {
   sourceKey: string;
   observationId: string | null;
   action: "insert" | "adopt" | "present" | "duplicate" | "excluded" | "blocked";
-  contentRepair?: "restore_terminal_lf" | "restore_legacy_synthetic" | "restore_legacy_image_text" | "restore_legacy_recovery_parts" | "restore_legacy_prompt_whitespace";
+  contentRepair?: "restore_terminal_lf" | "restore_legacy_synthetic" | "restore_legacy_image_text" | "restore_legacy_recovery_parts" | "restore_legacy_prompt_whitespace" | "restore_image_read_diagnostic";
   timestampRepair?: "restore_legacy_utc";
   legacyTurnMatch?: true;
   legacyUserItemMatch?: true;
+  legacyDelayedHookMatch?: true;
   duplicateOfObservationId?: string;
   reason?: string;
 }
@@ -24,6 +25,7 @@ export type CodexMessageReference = Omit<CodexNativeMessage, "text"> & {
   textDigest: string; legacySyntheticDigest?: string; legacyUserItemId?: string;
   legacyPromptDigests?: { textDigest: string; syntheticDigest?: string };
   retainedSourcePath?: string;
+  legacyImageReadFailureDigest?: string;
 };
 export function codexLegacySyntheticDigest(message: CodexNativeMessage): string | undefined {
   if (message.kind === "user") return message.text.length > 400 ? codexTextDigest(message.text.slice(0, 399) + "…") : undefined;
@@ -52,6 +54,8 @@ const syntheticDigest = (message: CodexNativeMessage | CodexMessageReference) =>
   "text" in message ? codexLegacySyntheticDigest(message) : message.legacySyntheticDigest;
 const promptDigests = (message: CodexNativeMessage | CodexMessageReference) =>
   "text" in message ? codexLegacyPromptDigests(message) : message.legacyPromptDigests;
+const imageFailureDigest = (message: CodexNativeMessage | CodexMessageReference) =>
+  "legacyImageReadFailureDigest" in message ? message.legacyImageReadFailureDigest : undefined;
 const matchesLegacyPromptWhitespace = (row: CompressedObservation, message: CodexNativeMessage | CodexMessageReference, digest: string) => {
   if (message.kind !== "user" || !matchesLegacySyntheticShape(row, message)) return false;
   const expected = promptDigests(message);
@@ -123,6 +127,10 @@ export function codexSourceMessages<T extends CodexNativeMessage | CodexMessageR
         (message.legacyExcludedReason !== undefined && (message.legacyExcludedReason !== "assistant_without_normal_user" ||
           message.kind !== "assistant_final" || !message.turnId)) ||
         (message.legacyImageWrappedDigest !== undefined && (message.kind !== "user" || !/^[a-f0-9]{64}$/.test(message.legacyImageWrappedDigest))) ||
+        (message.imageReadFailureDisplay !== undefined && (message.kind !== "user" || !message.imageReadFailureDisplay ||
+          !/^[a-f0-9]{64}$/.test(message.imageReadFailureDisplay.digest) || typeof message.imageReadFailureDisplay.path !== "string" ||
+          !message.imageReadFailureDisplay.path || message.imageReadFailureDisplay.path.length > 2048 || /[\r\n\0]/.test(message.imageReadFailureDisplay.path))) ||
+        (imageFailureDigest(message) !== undefined && imageFailureDigest(message) !== message.imageReadFailureDisplay?.digest) ||
         ("legacyUserItemId" in message && (message.kind !== "user" || !message.turnId ||
           typeof message.legacyUserItemId !== "string" || !message.legacyUserItemId || message.legacyUserItemId.length > 512 ||
           message.legacyUserItemId.trim() !== message.legacyUserItemId)) ||
@@ -139,6 +147,8 @@ export function codexSourceMessages<T extends CodexNativeMessage | CodexMessageR
         ("legacyUserItemId" in prior ? prior.legacyUserItemId : undefined) !== ("legacyUserItemId" in message ? message.legacyUserItemId : undefined) ||
         prior.legacyRecovery?.observationId !== message.legacyRecovery?.observationId ||
         prior.legacyRecovery?.textDigest !== message.legacyRecovery?.textDigest ||
+        prior.imageReadFailureDisplay?.digest !== message.imageReadFailureDisplay?.digest || prior.imageReadFailureDisplay?.path !== message.imageReadFailureDisplay?.path ||
+        imageFailureDigest(prior) !== imageFailureDigest(message) ||
         prior.legacyImageWrappedDigest !== message.legacyImageWrappedDigest)) throw Error("Conflicting native message identity");
     sources.set(message.key, message);
   }
@@ -147,20 +157,53 @@ export function codexSourceMessages<T extends CodexNativeMessage | CodexMessageR
 
 export interface CodexMatchScope {
   sessionId: string; project: string; agentId: string; completeNativeInventory: boolean;
+  singlePhysicalSource?: boolean;
+  sourceCreatedAt?: string;
   exclusions?: CodexCaptureExclusion[]; reconcileDuplicates?: boolean;
   unresolvedCaptures?: import("../types.js").CodexUnresolvedCapture[];
 }
 
 export function matchCodexMessages(messages: Array<CodexNativeMessage | CodexMessageReference>, observations: CompressedObservation[], scope: CodexMatchScope): CodexMatchDecision[] {
+  const delayedHooks = new Map<string, string>();
+  if (scope.completeNativeInventory && scope.singlePhysicalSource === true && Number.isFinite(Date.parse(scope.sourceCreatedAt ?? ""))) {
+    const sources = [...codexSourceMessages(messages, scope.sessionId).values()];
+    const byDigest = new Map<string, typeof sources>();
+    for (const message of sources.filter(message => message.kind === "user")) {
+      for (const key of new Set([messageDigest(message), imageFailureDigest(message)].filter((key): key is string => key !== undefined))) {
+        const rows = byDigest.get(key) ?? [];
+        rows.push(message); byDigest.set(key, rows);
+      }
+    }
+    const captures = new Map<string, CompressedObservation[]>();
+    for (const row of observations.filter(row => capturedKind(row) === "user" && typeof row.narrative === "string")) {
+      const key = codexTextDigest(row.narrative), rows = captures.get(key) ?? [];
+      rows.push(row); captures.set(key, rows);
+    }
+    for (const [digest, rows] of captures) {
+      const native = byDigest.get(digest);
+      if (rows.length !== 1 || native?.length !== 1) continue;
+      const row = rows[0]!, message = native[0]!;
+      const allClaimants = new Set([messageDigest(message), imageFailureDigest(message)]
+        .flatMap(key => key === undefined ? [] : (captures.get(key) ?? []).map(row => row.id)));
+      if (allClaimants.size !== 1) continue;
+      if (row.sessionId === scope.sessionId && (row.project === undefined || row.project === scope.project) && row.agentId === scope.agentId &&
+          row.codexSource === undefined && row.emptyDeletion === undefined && row.title === "prompt_submit" &&
+          row.type === "conversation" && row.confidence === 0.3 && row.subtitle === undefined &&
+          row.origin?.channel === "user" && row.origin.detail === undefined && row.origin.capturedAt === row.timestamp &&
+          Date.parse(row.timestamp) >= Date.parse(scope.sourceCreatedAt!)) delayedHooks.set(message.key, row.id);
+    }
+  }
   const unresolved = validateUnresolvedCodexCaptures(scope.unresolvedCaptures, observations, scope);
   return matchCodexDuplicateCaptures(messages, observations.filter(row => !unresolved.has(row.id)),
-    { ...scope, unresolvedCaptures: undefined }, matchSingleCodexMessages, unmatchedCodexCaptures);
+    { ...scope, unresolvedCaptures: undefined },
+    (messages, observations, scope) => matchSingleCodexMessages(messages, observations, scope, delayedHooks), unmatchedCodexCaptures);
 }
 
 function matchSingleCodexMessages(
   messages: Array<CodexNativeMessage | CodexMessageReference>,
   observations: CompressedObservation[],
   scope: CodexMatchScope,
+  delayedHooks: ReadonlyMap<string, string>,
 ): CodexMatchDecision[] {
   if (!scope.sessionId || !scope.project || scope.project === "*" || !scope.agentId || scope.agentId === "*") throw Error("An exact Codex capture scope is required");
   const seen = new Set<string>();
@@ -190,6 +233,7 @@ function matchSingleCodexMessages(
     const digest = messageDigest(message);
     const candidates = mapped.length ? [] : legacy.filter(row => capturedKind(row) === message.kind &&
       (Math.abs(Date.parse(row.timestamp) - Date.parse(message.timestamp)) <= 5000 ||
+        delayedHooks.get(key) === row.id ||
         (digests.get(row.id)!.exact === digest && (matchesLegacyUtcTimestamp(row, message) || matchesLegacyFinalTurn(row, message) || matchesLegacyUserItem(row, message)))));
     nearby.set(key, candidates);
     const synthetic = syntheticDigest(message);
@@ -198,6 +242,7 @@ function matchSingleCodexMessages(
       (row.emptyDeletion === undefined && digests.get(row.id)!.terminalLf === digest) ||
       (synthetic !== undefined && digests.get(row.id)!.exact === synthetic && matchesLegacySyntheticShape(row, message)) ||
       matchesLegacyPromptWhitespace(row, message, digests.get(row.id)!.exact) ||
+      (delayedHooks.get(key) === row.id && digests.get(row.id)!.exact === imageFailureDigest(message)) ||
       (digests.get(row.id)!.exact === message.legacyRecovery?.textDigest && matchesLegacyRecovery(row, message)) ||
       (message.legacyImageWrappedDigest !== undefined && digests.get(row.id)!.exact === message.legacyImageWrappedDigest && matchesLegacyImageShape(row, message))));
     compatible.set(key, matching);
@@ -242,7 +287,10 @@ function matchSingleCodexMessages(
         : digests.get(candidate.id)?.exact === message.legacyRecovery?.textDigest && matchesLegacyRecovery(candidate, message) ? "restore_legacy_recovery_parts" as const
         : matchesLegacyPromptWhitespace(candidate, message, digests.get(candidate.id)!.exact) ? "restore_legacy_prompt_whitespace" as const : undefined
       : undefined;
-    if (typeof candidate.narrative !== "string" || (codexTextDigest(candidate.narrative) !== messageDigest(message) && !repair)) { decisions.set(key, blocked("legacy_or_canonical_content_mismatch", candidate)); continue; }
+    const imageRepair = !mapped.length && delayedHooks.get(key) === candidate?.id &&
+      digests.get(candidate.id)?.exact === imageFailureDigest(message) ? "restore_image_read_diagnostic" as const
+      : undefined;
+    if (typeof candidate.narrative !== "string" || (codexTextDigest(candidate.narrative) !== messageDigest(message) && !repair && !imageRepair)) { decisions.set(key, blocked("legacy_or_canonical_content_mismatch", candidate)); continue; }
     if (candidate.codexSource) {
       const source = candidate.codexSource;
       const preservedEligibilityReview = source.legacyExcludedReason === "assistant_without_normal_user" &&
@@ -261,7 +309,8 @@ function matchSingleCodexMessages(
     const legacyUserItemMatch = !mapped.length && Math.abs(Date.parse(candidate.timestamp) - Date.parse(message.timestamp)) > 5000 &&
       codexTextDigest(candidate.narrative) === messageDigest(message) && matchesLegacyUserItem(candidate, message);
     decisions.set(key, { sourceKey: key, observationId: candidate.id, action: mapped.length && (!retainedPath(message) || candidate.codexSource?.retainedSourcePath) ? "present" : "adopt",
-      ...(repair ? { contentRepair: repair } : {}), ...(timestampRepair ? { timestampRepair } : {}),
+      ...(repair || imageRepair ? { contentRepair: repair ?? imageRepair } : {}), ...(timestampRepair ? { timestampRepair } : {}),
+      ...(!mapped.length && Math.abs(Date.parse(candidate.timestamp) - Date.parse(message.timestamp)) > 5000 && delayedHooks.get(key) === candidate.id ? { legacyDelayedHookMatch: true as const } : {}),
       ...(legacyTurnMatch ? { legacyTurnMatch: true } : {}), ...(legacyUserItemMatch ? { legacyUserItemMatch: true } : {}) });
   }
   const exclusions = (scope.exclusions ?? []).map(validateCodexExclusion).filter(row => row.sessionId === scope.sessionId);

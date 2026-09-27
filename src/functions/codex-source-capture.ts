@@ -131,6 +131,7 @@ export async function initializeCodexSourceCapture(kv: StateKV,
           const digest = codexLegacySyntheticDigest(message);
           const prompt = codexLegacyPromptDigests(message);
           if ((digest && legacyDigests.has(digest)) || (message.legacyImageWrappedDigest && imageDigests.has(message.legacyImageWrappedDigest)) ||
+            (message.imageReadFailureDisplay && imageDigests.has(message.imageReadFailureDisplay.digest)) ||
             (message.legacyRecovery && imageDigests.has(message.legacyRecovery.textDigest)) ||
             (prompt && (imageDigests.has(prompt.textDigest) || (prompt.syntheticDigest && imageDigests.has(prompt.syntheticDigest))))) {
             const oversized = checkPayloadFrameSize(message.text, "recovered observation exceeds the supported state frame");
@@ -150,10 +151,9 @@ export async function initializeCodexSourceCapture(kv: StateKV,
     const unmatched = new Set(unmatchedCodexCaptures(normalized.observations, decisions).map(row => row.observationId));
     const retained = await readCodexRetainedSources({ sourceRoot: managed.sourceRoot, sourcePath: input.sourcePath, sessionId: input.sessionId },
       messages, normalized.observations.filter(row => unmatched.has(row.id)), readWindow);
-    if (retained.messages.length) {
-      messages = [...messages, ...retained.messages];
-      decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId, completeNativeInventory: true, exclusions });
-    }
+    messages = [...messages, ...retained.messages];
+    decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId,
+      completeNativeInventory: true, exclusions, singlePhysicalSource: retained.singlePhysicalSource, sourceCreatedAt: last.source.createdAt });
     const proven = new Set(decisions.filter(row => row.action === "adopt" || row.action === "present").map(row => row.observationId));
     const previousUnresolved = validateUnresolvedCodexCaptures(session.codexNativeCapture?.unresolvedCaptures?.filter(row => !proven.has(row.observationId)),
       observations, { ...input, agentId: managed.agentId });
@@ -165,7 +165,7 @@ export async function initializeCodexSourceCapture(kv: StateKV,
       }).sort((a, b) => a.observationId.localeCompare(b.observationId)) : [];
     const unresolvedIds = new Set(unresolvedCaptures.map(row => row.observationId));
     if (unresolvedCaptures.length) decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId,
-      completeNativeInventory: true, exclusions, unresolvedCaptures });
+      completeNativeInventory: true, exclusions, unresolvedCaptures, singlePhysicalSource: retained.singlePhysicalSource, sourceCreatedAt: last.source.createdAt });
     const adopted = new Set(decisions.filter(row => row.action === "adopt").map(row => row.observationId));
     if (decisions.some(row => row.action === "blocked") || unmatchedCodexCaptures(normalized.observations, decisions).some(row => !unresolvedIds.has(row.observationId)) ||
       [...normalized.recovered.keys()].some(id => !adopted.has(id)) ||
@@ -186,7 +186,7 @@ export async function initializeCodexSourceCapture(kv: StateKV,
       const row = normalized.recovered.get(decision.observationId!) ?? byId.get(decision.observationId!)!;
       if (!message) throw Error(`Missing native source for capture recovery: ${decision.observationId}`);
       const narrative = decision.contentRepair === "restore_legacy_synthetic" || decision.contentRepair === "restore_legacy_image_text" ||
-        decision.contentRepair === "restore_legacy_recovery_parts" || decision.contentRepair === "restore_legacy_prompt_whitespace" ? recoveryTexts.get(message.key)
+        decision.contentRepair === "restore_legacy_recovery_parts" || decision.contentRepair === "restore_legacy_prompt_whitespace" || decision.contentRepair === "restore_image_read_diagnostic" ? recoveryTexts.get(message.key)
         : decision.contentRepair === "restore_terminal_lf" ? row.narrative + "\n" : row.narrative;
       if (typeof narrative !== "string" || codexTextDigest(narrative) !== message.textDigest) throw Error("Recovered capture does not match its full native source");
       const next = { ...row, narrative, ...(decision.timestampRepair ? { timestamp: message.timestamp } : {}), codexSource: sourceMetadata(message, decision.duplicateOfObservationId) };
@@ -209,6 +209,8 @@ export async function initializeCodexSourceCapture(kv: StateKV,
       restoreLegacyTimestamp: decisions.filter(row => row.action === "adopt" && row.timestampRepair).length,
       adoptDelayedFinal: decisions.filter(row => row.action === "adopt" && row.legacyTurnMatch).length,
       adoptImportedUserItem: decisions.filter(row => row.action === "adopt" && row.legacyUserItemMatch).length,
+      adoptDelayedHook: decisions.filter(row => row.action === "adopt" && row.legacyDelayedHookMatch).length,
+      restoreImageReadDiagnostic: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_image_read_diagnostic").length,
       restoreLegacyRecoveryParts: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_recovery_parts").length,
       restoreLegacyImageText: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_image_text").length };
     if (input.dryRun) return { dryRun: true, expectedVersion, sessionId: session.id, ...counts };
@@ -219,6 +221,8 @@ export async function initializeCodexSourceCapture(kv: StateKV,
       restoreLegacyTimestampObservationIds: decisions.filter(row => row.action === "adopt" && row.timestampRepair).map(row => row.observationId),
       adoptDelayedFinalObservationIds: decisions.filter(row => row.action === "adopt" && row.legacyTurnMatch).map(row => row.observationId),
       adoptImportedUserItemObservationIds: decisions.filter(row => row.action === "adopt" && row.legacyUserItemMatch).map(row => row.observationId),
+      adoptDelayedHookObservationIds: decisions.filter(row => row.action === "adopt" && row.legacyDelayedHookMatch).map(row => row.observationId),
+      restoreImageReadDiagnosticObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_image_read_diagnostic").map(row => row.observationId),
       restoreLegacyRecoveryPartsObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_recovery_parts").map(row => row.observationId),
       restoreTerminalLfObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_terminal_lf").map(row => row.observationId),
       retainedSourceObservations: decisions.filter(row => row.action === "adopt" && byKey.get(row.sourceKey)?.retainedSourcePath).map(row => ({ observationId: row.observationId, sourcePath: byKey.get(row.sourceKey)!.retainedSourcePath, sourceKey: row.sourceKey })),

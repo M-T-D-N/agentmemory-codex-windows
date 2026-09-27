@@ -16,7 +16,7 @@ export async function readCodexInventory(
   const messages: CodexMessageReference[] = [];
   const sourceHolds: CodexSourceHold[] = [];
   const legacyMessages: CodexMessageReference[] = [];
-  const legacyUserItems: Array<{ turnId: string; id: string; textDigest: string }> = [];
+  const legacyUserItems: Array<{ turnId: string; id: string; textDigest: string; localImagePaths?: string[] }> = [];
   const exclusions: Record<string, number> = {};
   for (let window = 0; window < maxWindows; window++) {
     const result = await readWindow({ ...input, cursor, maxBytes: 16 * 1024 * 1024, maxMessages: 200 });
@@ -38,8 +38,10 @@ export async function readCodexInventory(
     const itemClaims = new Map<string, Set<string>>();
     for (const message of messages) {
       if (message.kind !== "user" || !message.turnId) continue;
-      const key = JSON.stringify([message.turnId, message.textDigest]);
-      const keys = primaries.get(key) ?? new Set<string>(); keys.add(message.key); primaries.set(key, keys);
+      for (const fingerprint of new Set([message.textDigest, message.imageReadFailureDisplay?.digest].filter(Boolean))) {
+        const key = JSON.stringify([message.turnId, fingerprint]);
+        const keys = primaries.get(key) ?? new Set<string>(); keys.add(message.key); primaries.set(key, keys);
+      }
     }
     for (const item of legacyUserItems) {
       const key = JSON.stringify([item.turnId, item.textDigest]);
@@ -52,6 +54,16 @@ export async function readCodexInventory(
       if (primaries.get(key)?.size === 1 && items.get(key)?.size === 1) {
         const id = [...items.get(key)!][0]!;
         if (itemClaims.get(id)?.size === 1) message.legacyUserItemId = id;
+      }
+      if (message.imageReadFailureDisplay) {
+        const displayKey = JSON.stringify([message.turnId, message.imageReadFailureDisplay.digest]);
+        const provenDisplay = legacyUserItems.filter(item => item.turnId === message.turnId &&
+          item.textDigest === message.imageReadFailureDisplay!.digest && item.localImagePaths?.includes(message.imageReadFailureDisplay!.path) &&
+          !sourceHolds.some(hold => hold.turnId === item.turnId && hold.itemId === item.id));
+        if (primaries.get(displayKey)?.size === 1 && items.get(displayKey)?.size === 1 &&
+            itemClaims.get([...items.get(displayKey)!][0]!)?.size === 1 && provenDisplay.length === 1) {
+          message.legacyImageReadFailureDigest = message.imageReadFailureDisplay.digest;
+        }
       }
     }
   }

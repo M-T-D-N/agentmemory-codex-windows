@@ -55,8 +55,13 @@ export async function readCodexWindow(input: {
         previous.parser.finalDigests.some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) ||
         !Array.isArray(previous.parser.userMessages) || !Array.isArray(previous.parser.userMirrors) ||
         previous.parser.userMessages.length > 256 || previous.parser.userMirrors.length > 256 ||
-        previous.parser.userMessages.some(value => !value || !/^[a-f0-9]{64}$/.test(value.key) || !/^[a-f0-9]{64}$/.test(value.digest)) ||
-        previous.parser.userMirrors.some(value => !value || typeof value.id !== "string" || !value.id || !/^[a-f0-9]{64}$/.test(value.digest)) ||
+        previous.parser.userMessages.some(value => !value || !/^[a-f0-9]{64}$/.test(value.key) || !/^[a-f0-9]{64}$/.test(value.digest) ||
+          (value.imageReadFailureDisplay !== undefined && (!value.imageReadFailureDisplay ||
+            !/^[a-f0-9]{64}$/.test(value.imageReadFailureDisplay.digest) || typeof value.imageReadFailureDisplay.path !== "string" ||
+            !value.imageReadFailureDisplay.path || value.imageReadFailureDisplay.path.length > 2048 || /[\r\n\0]/.test(value.imageReadFailureDisplay.path)))) ||
+        previous.parser.userMirrors.some(value => !value || typeof value.id !== "string" || !value.id || !/^[a-f0-9]{64}$/.test(value.digest) ||
+          (value.localImagePaths !== undefined && (!Array.isArray(value.localImagePaths) || value.localImagePaths.length > 16 ||
+            value.localImagePaths.some(path => typeof path !== "string" || !path || path.length > 2048 || /[\r\n\0]/.test(path))))) ||
         !Array.isArray(previous.parser.finalMessages) || !Array.isArray(previous.parser.finalMirrors) ||
         previous.parser.finalMessages.length > 128 || previous.parser.finalMirrors.length > 128 ||
         previous.parser.finalMessages.some(value => !value || (value.id !== null && typeof value.id !== "string") || !/^[a-f0-9]{64}$/.test(value.digest)) ||
@@ -77,7 +82,7 @@ export async function readCodexWindow(input: {
     const start = offset;
     const messages: CodexNativeMessage[] = [];
     const legacyMessages: CodexNativeMessage[] = [];
-    const legacyUserItems: Array<{ turnId: string; id: string; textDigest: string }> = [];
+    const legacyUserItems: Array<{ turnId: string; id: string; textDigest: string; localImagePaths?: string[] }> = [];
     const excluded: Record<string, number> = {};
     let issue: { reason: string; ordinal: number; byteOffset: number; recordType?: string; payloadType?: string; itemType?: string } | null = null;
     let incompleteTail = false;

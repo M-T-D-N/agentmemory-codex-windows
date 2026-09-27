@@ -14,10 +14,10 @@ export async function readCodexRetainedSources(
   const sources: Array<{ source: Awaited<ReturnType<typeof readCodexInventory>>["last"]["source"]; cursor: Awaited<ReturnType<typeof readCodexInventory>>["last"]["cursor"] }> = [];
   const eligible = observations.filter(row => row.emptyDeletion === undefined && typeof row.narrative === "string" &&
     row.narrative.length > 0 && ["prompt_submit", "assistant_response"].includes(row.title));
-  if (!eligible.length) return { messages, sources };
+  if (!eligible.length) return { messages, sources, singlePhysicalSource: false };
   const paths = (await codexSourceCandidatePaths(input.sourceRoot, input.sessionId))
     .filter(path => path.toLowerCase() !== input.sourcePath.toLowerCase());
-  if (!paths.length) return { messages, sources };
+  if (!paths.length) return { messages, sources, singlePhysicalSource: true };
   if (paths.length > 16) throw Error("Retained native source inventory exceeds the supported bound");
   const active = await withReadOnlyCodexPhysicalSource(input.sourceRoot, input.sourcePath, input.sessionId, async source => source);
   const known = new Map(current.map(message => [message.key, message]));
@@ -51,5 +51,5 @@ export async function readCodexRetainedSources(
     }
     if (found.length) { messages.push(...found); sources.push({ source: previous.last.source, cursor: previous.last.cursor }); }
   }
-  return { messages, sources };
+  return { messages, sources, singlePhysicalSource: false };
 }
