@@ -302,16 +302,20 @@ closed. Internal requests preserve existing normal session history; only the
 automatic `codex_internal_prompt` exclusion can recover on a later normal
 Codex prompt, with an audit entry. Other exclusion reasons remain in force.
 
-Normal user turns now require a completed bounded recall before substantive work,
-including new and projectless chats. The prompt hook independently retrieves
-current-project context, historical user originals, and cross-project records.
+Normal user turns require evidence handling before substantive work, including
+new and projectless chats. The prompt hook retrieves current-project context,
+widening to historical user originals and other records when local originals
+are insufficient or historical scope is requested. It can instead validate
+originals already expanded in the same uncompacted conversation.
 It reports lookup status separately from evidence coverage; successful search or
 injected graph text does not prove that a relevant original was read or applied.
 Concrete identifiers anchor retrieval, including identifiers within hostnames;
 attachment transport headers are not treated as the user's search topic.
 
-An unavailable required lookup returns the documented `UserPromptSubmit` blocking
-decision. No-match results permit normal processing and require no extra retry.
+Unavailable lookup is explicitly reported as missing evidence, not no history.
+The agent must hold decisions depending on that missing history; independently
+supported work and recovery can continue. An optional history failure preserves
+local candidates. No-match results require no identical automatic retry.
 Image-only requests can require the agent to inspect the image and perform a
 topic-specific lookup before proceeding. Stop/cancel requests bypass recall.
 For recovery during an outage, users may directly put `AgentMemory 조회 없이 복구`
@@ -890,9 +894,11 @@ reindexing preserves posting and tie order. Previous-shard cleanup remains
 sequential and records every attempted target and outcome in one grouped audit.
 This changes neither stored formats nor the canonical source/graph lifecycle.
 
-The managed user-prompt hook searches the exact current project first, then
-requests original user evidence with `sourceKind: "user"` across `*` within the
-same time budget, even when the local search found a match. It uses REST
+The managed user-prompt hook searches the exact current project first. When no
+local user-original candidate covers the concrete query terms, or the request
+asks for history, it requests user evidence with `sourceKind: "user"` and other
+records across `*` within the same time budget. Local lexical coverage remains a
+candidate test, never proof that all aliases/corrections were checked. It uses REST
 `searchMode: "keyword"`; the separate graph lookup
 already supplies graph context, so automatic recall does not repeat the full
 hybrid graph traversal. Omitted `searchMode` keeps ordinary hybrid search.
@@ -916,12 +922,24 @@ Repeated scoped record IDs are emitted once. Automatic candidate
 searches pass the existing `trackAccess: false` option through REST to StateModule
 search, so merely considering a result does not strengthen its access-based
 retention. Explicit searches retain their default access tracking.
-When a short follow-up omits its topic, the hook can reuse the most recent
-topical user prompt among 12 recent observations in the same exact project and
-session. It uses at most two existing observation-page reads (a base 3,000 ms each),
-without a separate topic cache or model call. The captured user message remains
-unchanged. If no topic is found, automatic retrieval abstains; earlier injected
-or model-generated text does not supply a topic.
+When a follow-up omits its topic, the hook uses the recent actual user task in
+the same session. New qualifiers are retained even alongside concrete identifiers.
+It first reads at most the last 1 MiB of the canonical host transcript, verifying
+the session header and source-root boundary. A small hook plan binds the query
+to the prior user prompt; incomplete/oversized plans cannot qualify for reuse.
+Without that plan, actual user prompts supply context, with at most two existing
+observation-page reads of 12 rows as a fallback (base 3,000 ms each).
+
+Only full `expanded` observation results in tool outputs qualify as retained
+originals. User quotations, compact results, assistant summaries and compacted
+history do not. At most four same-project originals are re-expanded through the
+official `/smart-search` API with access tracking disabled; all must remain
+visible and have unchanged content/identity. Successful reuse emits references,
+not their bodies, and skips optional graph/curation enrichment. Fresh searches,
+changed scope, corrections, current-state requests, compaction, unknown transcript
+shapes and failed source validation invalidate reuse or fall back to retrieval.
+No separate topic/evidence cache or model call is introduced. Data validation is
+not a guarantee that a model understood or correctly applied the originals.
 Explicit MCP recall remains available. Graph neighbors need their own topic
 match, except for explicit supersession links preserving a matched decision's
 replacement and historical status. Local and fallback candidate queries share

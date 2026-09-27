@@ -968,7 +968,7 @@ test("native source warnings distinguish diagnostics from graph completion and o
   assert.doesNotMatch(sourceHealthWarning({ nativeCapture: { status: "attention", error: "secret-content" } }), /secret-content/);
 });
 
-test("missing prompt identity blocks work before unverified recall instead of silently continuing", () => {
+test("missing prompt identity explicitly limits evidence claims instead of claiming recall success", () => {
   const hook = resolve(import.meta.dirname, "..", "hooks", "codex-turn.mjs");
   const child = spawnSync(process.execPath, [hook], {
     input: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "synthetic capture test" }),
@@ -976,10 +976,10 @@ test("missing prompt identity blocks work before unverified recall instead of si
   });
   assert.equal(child.status, 0);
   const output = JSON.parse(child.stdout);
-  assert.match(output.reason, /필수 회상/);
-  assert.equal(output.decision, "block");
+  assert.match(output.systemMessage, /회상 조회/);
+  assert.equal(output.decision, undefined);
   assert.equal(output.continue, undefined);
-  assert.equal(output.hookSpecificOutput, undefined);
+  assert.match(output.hookSpecificOutput.additionalContext, /status="unavailable"/);
   assert.match(child.stderr, /no capture completion is confirmed/);
 });
 

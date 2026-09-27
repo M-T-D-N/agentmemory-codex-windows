@@ -6,9 +6,18 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
-- Require bounded recall on normal user turns, including fresh and projectless
-  questions. Report lookup status and source scope, block unavailable recall,
-  and preserve explicit per-turn recovery/bypass and immediate stop requests.
+- Require evidence handling on normal user turns, including fresh and projectless
+  questions. Retrieve new scope, or validate originals already expanded in the
+  same uncompacted conversation through official project-scoped expansion.
+  Reuse source references without repeating their bodies; no separate cache.
+- Resolve omitted follow-up subjects to the actual recent user task. New details,
+  corrections and current-state requests require fresh evidence; latest user
+  instructions always take precedence. Do not equate candidate matches with
+  verified requirements or source stability with model understanding.
+- Avoid unconditional historical searches after sufficient local user-original
+  candidates. Preserve local evidence on optional history failure, report the
+  missing scope and hold dependent decisions while allowing independent work.
+  Preserve explicit per-turn bypass and immediate stop requests.
 - Retrieve historical user originals and other source-labelled records across
   projects; match concrete identifiers inside hostnames and exclude attachment
   transport headers from recall queries. Keep the shared deadline and independent

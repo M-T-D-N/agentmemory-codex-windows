@@ -173,6 +173,7 @@ foreach ($directory in @($scriptsOut, $binOut, $configOut, $srcOut)) {
 Copy-Item -Path (Join-Path $PSScriptRoot 'powershell\*.ps1') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-turn.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-project.mjs') -Destination $scriptsOut
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-recall-evidence.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'node\agentmemory-worker.mjs') -Destination $binOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\iii-config.yaml') -Destination $configOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\hook-spec.json') -Destination $configOut
