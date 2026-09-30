@@ -714,6 +714,12 @@ export function startSemanticGraphBacklogScheduler(
       try {
         runtime = await provider.probe();
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("local_qwen_deferred:")) {
+          fingerprint = null;
+          readySince = 0;
+          logger.info("Semantic graph background extraction deferred", { reason: error.message });
+          return;
+        }
         if (!lifecycle) {
           throw new Error(`local_qwen_autostart_unconfigured:${error instanceof Error ? error.message : String(error)}`, { cause: error });
         }

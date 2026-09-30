@@ -18,6 +18,11 @@ import { extractEntitiesFromQuery } from "../functions/query-expansion.js";
 import { rerank } from "./reranker.js";
 import type { SearchCandidateSelection } from "../functions/search-candidates.js";
 
+export interface AutomaticRetrievalPolicy {
+  maxVectorScan: number;
+  channels: Record<string, string>;
+}
+
 const RRF_K = 60;
 
 export class HybridSearch {
@@ -36,8 +41,8 @@ export class HybridSearch {
     this.graphRetrieval = new GraphRetrieval(kv);
   }
 
-  async search(query: string, limit = 20, selection?: SearchCandidateSelection): Promise<HybridSearchResult[]> {
-    return this.tripleStreamSearch(query, limit, undefined, selection);
+  async search(query: string, limit = 20, selection?: SearchCandidateSelection, policy?: AutomaticRetrievalPolicy): Promise<HybridSearchResult[]> {
+    return this.tripleStreamSearch(query, limit, undefined, selection, policy);
   }
 
   async searchWithExpansion(
@@ -88,6 +93,7 @@ export class HybridSearch {
     limit: number,
     entityHints?: string[],
     selection?: SearchCandidateSelection,
+    policy?: AutomaticRetrievalPolicy,
   ): Promise<HybridSearchResult[]> {
     const fetchDepth = Math.max(limit * 5, 50);
     const bm25Candidates = this.bm25.search(query, selection ? this.bm25.size : fetchDepth);
@@ -100,11 +106,15 @@ export class HybridSearch {
     }> = [];
     let queryEmbedding: Float32Array | null = null;
 
-    if (this.vector && this.embeddingProvider && this.vector.size > 0) {
+    if (policy) policy.channels.graph = "skipped-automatic";
+    const vectorEligible = this.vector && this.embeddingProvider && this.vector.size > 0;
+    if (policy) policy.channels.vector = !vectorEligible ? "unavailable" : this.vector!.size > policy.maxVectorScan ? "skipped-scan-bound" : "available";
+    if (vectorEligible && (!policy || this.vector!.size <= policy.maxVectorScan)) {
       try {
-        queryEmbedding = await this.embeddingProvider.embed(query);
-        vectorResults = this.vector.search(queryEmbedding, selection ? this.vector.size : fetchDepth);
+        queryEmbedding = await this.embeddingProvider!.embed(query);
+        vectorResults = this.vector!.search(queryEmbedding, selection ? this.vector!.size : fetchDepth);
       } catch {
+        if (policy) policy.channels.vector = "failed";
         // fall through to BM25-only
       }
     }
@@ -115,7 +125,8 @@ export class HybridSearch {
         ? entityHints
         : extractEntitiesFromQuery(query);
     let graphResults: GraphRetrievalResult[] = [];
-    if (entities.length > 0) {
+    const graphEnabled = !policy && this.graphWeight > 0;
+    if (graphEnabled && entities.length > 0) {
       try {
         graphResults = await this.graphRetrieval.searchByEntities(
           entities,
@@ -130,7 +141,7 @@ export class HybridSearch {
     if (selection) graphResults = await selection.select(graphResults, limit);
 
     const topVectorObs = vectorResults.slice(0, 5).map((r) => r.obsId);
-    if (topVectorObs.length > 0) {
+    if (graphEnabled && topVectorObs.length > 0) {
       let expansionResults: GraphRetrievalResult[] = [];
       try {
         expansionResults =
@@ -255,7 +266,7 @@ export class HybridSearch {
     const diversified = this.diversifyBySession(combined, combined.length);
     const enriched = await this.enrichResults(diversified, combined.length);
 
-    if (this.rerankEnabled && enriched.length > 1) {
+    if (!policy && this.rerankEnabled && enriched.length > 1) {
       try {
         const head = enriched.slice(0, rerankWindow);
         const tail = enriched.slice(rerankWindow);

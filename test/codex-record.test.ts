@@ -250,3 +250,30 @@ describe("canonical native Codex conversation records", () => {
     expect(parse({ ...record("user", "invalid", "request"), timestamp: null })).toMatchObject({ status: "unknown" });
   });
 });
+
+
+describe("plugin mention mirrors", () => {
+  const text = "@app-example\nRecall algorithm research";
+  const mention = { type: "mention", name: "Exa", path: "plugin://app-example/Search" };
+  const mirror = (part: unknown = mention) => ({ type: "event_msg", payload: { type: "item_completed", turn_id: "turn-a",
+    item: { type: "UserMessage", id: "mention-display", content: [{ type: "text", text }, part] } } });
+  it.each([true, false])("preserves canonical text and matching identity (primary first: %s)", primaryFirst => {
+    const parse = harness(); parse(turn);
+    if (primaryFirst) expect(parse(record("user", "primary", text)).status).toBe("message");
+    expect(parse(mirror())).toMatchObject({ status: "excluded", reason: "user_item_mirror" });
+    if (!primaryFirst) expect(parse(record("user", "primary", text)).status).toBe("message");
+    expect(parse({type: "event_msg",payload:{type:"task_complete",turn_id:"turn-a"}}).status).toBe("excluded");
+    expect(parse({type: "event_msg",payload:{type:"task_started",turn_id:"turn-b"}}).status).toBe("excluded");
+    expect(parse(record("user", "next", "Continue")).status).toBe("message");
+  });
+  it.each([{...mention,path:"https://example.test"},{...mention,name:""},{...mention,path:"plugin://x\n"},
+    {...mention,path:12},{type:"future_unknown"}])("fails closed for invalid or unknown mention content %j", part => {
+    const parse = harness();parse(turn);parse(record("user","primary",text));
+    expect(parse(mirror(part))).toMatchObject({status:"unknown",reason:"unsupported_item_content"});
+  });
+  it("does not allow metadata to resolve a missing or mismatched canonical original", () => {
+    const parse=harness();parse(turn);parse(mirror());
+    parse(record("user","wrong","Different content"));
+    expect(parse({type:"event_msg",payload:{type:"task_complete",turn_id:"turn-a"}}).status).toBe("unknown");
+  });
+});

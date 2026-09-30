@@ -6,6 +6,65 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+## 0.1.0-preview.12 — 2026-10-01
+
+- Normalize Windows child environment keys before overriding PowerShell module paths,
+  preventing duplicate-case inherited keys from hiding native utility commands.
+
+- Coalesce slow index saves into one running and one pending generation; retry
+  quiet failures at most three times and preserve required-save error reporting.
+- Reconcile restored nonempty search indexes from canonical rows. Publish complete
+  rebuild candidates with concurrent additions/deletions merged; retain the live
+  generation on failed reads or cancellation. Preserve compatible existing vectors
+  during startup reconciliation and report readiness after complete publication.
+- Count acknowledged original deletions before ancillary cleanup, continue independent
+  cleanup steps, and disclose image/access/index persistence failures separately.
+  Keep source, graph, archive and primary-delete failures strict and audited.
+
+- Selectively backport upstream snapshot read-failure protection and pagination
+  total floors, weight-zero graph retrieval exclusion, and HTTP 413 export refusal.
+  Preserve managed graph locks, provenance and exact query indexes.
+- Keep the first five-second index-save reservation under continuous writes; schedule
+  completed live additions and late vectors without newly checkpointing unfinished
+  bulk rebuild chunks. Preserve existing index generations and strict flush behavior.
+- Record all 26 upstream main changes and remaining compatibility candidates in the
+  Windows/Codex upstream review; engine, data layout and installed version stay pinned.
+
+- Accept validated plugin mentions in Codex user display mirrors while retaining
+  canonical text identity and fail-closed handling of unknown content.
+- Apply LocalAI's background hold to every local-Qwen probe/extraction entrypoint
+  without launching Qwen. Keep historical transport errors distinct from current
+  holds; preserve graph cursors and report unrelated failures normally.
+- Resolve demonstrative follow-ups against the preceding final answer as a
+  bounded, unverified topic locator; current user requirements remain authoritative.
+
+- Discover automatic recall with compact source metadata, then expand bounded
+  original observation/session pairs in their exact source projects. Preserve
+  established user constraints and later corrections, whole narratives or
+  explicit expansion pointers, and adaptive estimated-token budgets. Missing
+  subjects and partial retrieval remain explicit; optional output cannot erase
+  successful recall. Conditional automatic hybrid fallback skips vector scans
+  above 4,096 entries and graph/provider reranking, reports degraded channels,
+  and never starts Qwen. Manual defaults and stored originals remain unchanged.
+- Search response budgets skip oversized items and continue to later affordable
+  originals without changing their content; compact results include source role.
+
+- Ignore only valid session-end-only legacy rows during timeline enumeration;
+  retain their source data and reject conflicting declared identities. Do not
+  allow an incomplete historical session marker to disable unrelated recall.
+
+- Preserve the concrete same-conversation subject and intervening latest user
+  qualifiers when short follow-up requests ask to proceed, analyze or create a
+  goal. Reject stale recall-plan subjects and trim duplicate hook/native prompts.
+  Current user corrections continue to take precedence over historical context.
+- Ignore the exact empty host page-open event without excluding a real user
+  session. Keep unrelated or content-bearing events outside this exception.
+- Bound timeline reads by native state pages and serialized response bytes,
+  preserving complete originals, stable ordering, exact project boundaries and
+  explicit offset/continuation metadata. Report changed sources or an original
+  that cannot fit rather than truncating its content or claiming a complete read.
+  Local runtime revision r131 retains upstream 0.9.29 and data contract 4.
+
 - Reconcile image-read failure displays without changing canonical source text:
   a separate host diagnostic, attachment header, exact image path and matching
   same-turn display must agree. Consume each primary at most once, including

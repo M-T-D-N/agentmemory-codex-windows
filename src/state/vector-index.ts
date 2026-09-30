@@ -38,11 +38,16 @@ export class VectorIndex {
   private vectors: Map<string, { embedding: Float32Array; sessionId: string }> =
     new Map();
 
+  private changeCapture: Set<string> | null = null;
+  private captureReset = false;
+
   add(obsId: string, sessionId: string, embedding: Float32Array): void {
+    this.changeCapture?.add(obsId);
     this.vectors.set(obsId, { embedding, sessionId });
   }
 
   remove(obsId: string): void {
+    this.changeCapture?.add(obsId);
     this.vectors.delete(obsId);
   }
 
@@ -104,10 +109,12 @@ export class VectorIndex {
   }
 
   clear(): void {
+    if (this.changeCapture) this.captureReset = true;
     this.vectors.clear();
   }
 
   restoreFrom(other: VectorIndex): void {
+    if (this.changeCapture) this.captureReset = true;
     const src = (other as any).vectors as Map<
       string,
       { embedding: Float32Array; sessionId: string }
@@ -119,6 +126,30 @@ export class VectorIndex {
         sessionId: entry.sessionId,
       });
     }
+  }
+
+  copyMatchingTo(target: VectorIndex, keep: (id: string) => boolean): void {
+    for (const [id, entry] of this.vectors) {
+      if (keep(id)) target.add(id, entry.sessionId, new Float32Array(entry.embedding));
+    }
+  }
+
+  captureChanges(): { applyTo: (target: VectorIndex, keep?: (id: string) => boolean) => void; stop: () => void } {
+    if (this.changeCapture) throw new Error("Vector index change capture already active");
+    const changed = new Set<string>();
+    this.changeCapture = changed;
+    this.captureReset = false;
+    return {
+      applyTo: (target, keep = () => true) => {
+        if (this.captureReset) throw new Error("Vector index reset during rebuild");
+        for (const id of changed) {
+          target.remove(id);
+          const entry = this.vectors.get(id);
+          if (entry && keep(id)) target.add(id, entry.sessionId, new Float32Array(entry.embedding));
+        }
+      },
+      stop: () => { if (this.changeCapture === changed) this.changeCapture = null; },
+    };
   }
 
   serialize(): string {

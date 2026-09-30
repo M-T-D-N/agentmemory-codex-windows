@@ -315,9 +315,10 @@ export function paginateFromSnapshot(
   const filteredNodes = filterType
     ? snapshot.topNodes.filter((node) => node.type === filterType)
     : snapshot.topNodes;
-  const total = filterType
+  const totalRaw = filterType
     ? snapshot.stats.nodesByType[filterType] ?? 0
     : snapshot.stats.totalNodes;
+  const total = Math.max(totalRaw, filteredNodes.length);
   const pageNodes = filteredNodes.slice(offset, offset + limit);
   const pageIds = new Set(pageNodes.map((node) => node.id));
   const pageEdges = snapshot.topEdges.filter(

@@ -35,7 +35,7 @@ function expandedRecords(value, depth = 0) {
 }
 
 export function parseRecallTranscript(lines, normalPrompt) {
-  let users = [], sources = [], plan = null;
+  let users = [], sources = [], plan = null, referent;
   for (const line of lines) {
     let row;
     try { row = JSON.parse(line); } catch { continue; }
@@ -43,7 +43,7 @@ export function parseRecallTranscript(lines, normalPrompt) {
     const itemType = payload.item?.type;
     if (row.type === "compacted" || payload.type === "compaction" || payload.type === "context_compacted"
       || itemType === "ContextCompaction") {
-      users = []; sources = []; plan = null;
+      users = []; sources = []; plan = null; referent = undefined;
       continue;
     }
     if (row.type !== "response_item") continue;
@@ -51,6 +51,9 @@ export function parseRecallTranscript(lines, normalPrompt) {
       const text = normalPrompt(messageText(payload));
       if (text) users.push(text);
       users = users.slice(-12);
+    } else if (payload.type === "message" && payload.role === "assistant" && ["final", "final_answer"].includes(payload.phase)) {
+      const text = messageText(payload).trim();
+      if (text && users.at(-1)) referent = { text: text.slice(0, 1536), userDigest: promptDigest(users.at(-1)) };
     } else if (payload.type === "message" && payload.role === "developer") {
       const match = /<agentmemory-recall-plan>([^]*?)<\/agentmemory-recall-plan>/u.exec(messageText(payload));
       if (match) {
@@ -70,7 +73,7 @@ export function parseRecallTranscript(lines, normalPrompt) {
       }
     }
   }
-  return { users, sources, plan };
+  return { users, sources, plan, ...(referent ? { referent } : {}) };
 }
 
 export function readRecallTranscript(event, normalPrompt) {

@@ -14,7 +14,7 @@ import {
   isGraphExtractionEnabled,
 } from "../config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
-import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
+import { getSearchIndex, scheduleIndexSave, vectorIndexAddGuarded } from "./search.js";
 import { logger } from "../logger.js";
 import { saveImageToDisk } from "../utils/image-store.js";
 import { createHash } from "node:crypto";
@@ -439,6 +439,7 @@ export function registerObserveFunction(
             synthetic,
           );
           getSearchIndex().add(synthetic);
+          scheduleIndexSave();
           await vectorIndexAddGuarded(
             synthetic.id,
             synthetic.sessionId,

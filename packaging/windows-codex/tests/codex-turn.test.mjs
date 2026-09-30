@@ -468,7 +468,7 @@ test("curation and graph context stay within the managed hook output budget", ()
   const combined = boundedAdditionalContext(curation, graph);
   assert.ok(combined.length <= 2_300, `context length was ${combined.length}`);
   assert.match(combined, /<\/agentmemory-curation>/);
-  assert.match(combined, /<\/agentmemory-graph-context>$/);
+  assert.match(combined, /<\/agentmemory-graph-context>/);
 });
 
 test("curation context falls through to the next source when the first exceeds the budget", () => {
@@ -544,7 +544,19 @@ test("federated recall labels source projects, boosts current-project evidence, 
 });
 
 function recallEntry(id, narrative, project = "current", extra = {}) {
-  return { project, score: 100, observation: { id, title: id, narrative, ...extra } };
+  return { project, sessionId: "fixture-session", score: 100, observation: { id, sessionId: "fixture-session", title: id, narrative, ...extra } };
+}
+
+function recallFixtureResponse(url, body, payload) {
+  if (!String(url).endsWith("/search") && !String(url).endsWith("/smart-search")) return new Response(JSON.stringify(payload));
+  const rows = payload.results ?? [];
+  if (body.expandIds) return new Response(JSON.stringify({mode: "expanded", truncated: false, results: rows
+    .filter(row => row.project === body.project && body.expandIds.some(item => item.obsId === row.observation.id && item.sessionId === row.sessionId))
+    .map(row => ({...row, obsId: row.observation.id}))}));
+  return new Response(JSON.stringify({format: "compact", truncated: false, results: rows
+    .filter(row => (body.project === "*" || row.project === body.project) && (!body.sourceKind || (row.observation.title === "prompt_submit" ? "user" : "derived") === body.sourceKind))
+    .map(row => ({obsId: row.observation.id, sessionId: row.sessionId, project: row.project, score: row.score, title: row.observation.title,
+      timestamp: row.observation.timestamp, sourceKind: row.observation.title === "prompt_submit" ? "user" : "derived"}))}));
 }
 
 function graphNode(id, name, status = "confirmed", project = "current") {
@@ -565,6 +577,38 @@ test("automatic recall abstains on vague follow-ups and broad product names", ()
   }
 });
 
+test("operational followup words cannot qualify unrelated status candidates", () => {
+  for (const prompt of [
+    "모든순간을 전부다 나열하고 분석 진행",
+    "과거의 문제에서 도출한 내용을 토대로 뭘 어떻게 수정해야할까?",
+    "권장안은?",
+    "현재 에이전트메모리 현황을 기반으로 재분석",
+    "권장안대로 골을 설정하고 작업 진행",
+    "추천안은?",
+    "현재 현황을 기반으로 재분석해줘",
+    "모든 순간을 나열해줘",
+  ]) assert.deepEqual(graphTokens(prompt), [], prompt);
+  const query = "내가 욕하기 시작하는 순간을 에이전트메모리로 확인하고 사용자가 왜 그러는건지 생각"
+    + "\n현재 에이전트메모리 현황을 기반으로 재분석";
+  const recall = formatRecallContext(query, "current", { results: [
+    recallEntry("noise", "AgentMemory 서비스 현황 재분석 권장안 골 상태"),
+    recallEntry("subject", "사용자가 욕하기 시작하는 순간의 원인"),
+  ] });
+  assert.match(recall, /subject/);
+  assert.doesNotMatch(recall, /noise/);
+  const graph = formatGraphContext(query, "current", { nodes: [
+    graphNode("noise", "AgentMemory 서비스 현황 재분석 권장안 골 상태"),
+    graphNode("subject", "사용자가 욕하기 시작하는 순간의 원인"),
+  ], edges: [] });
+  assert.match(graph, /욕하기/);
+  assert.doesNotMatch(graph, /현황 재분석/);
+});
+
+test("incidental host page event is ignored without hiding its whole conversation", () => {
+  const event = '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>';
+  assert.equal(promptText(event), null);
+  assert.equal(isExcludedSession({firstPrompt: event}), false);
+});
 test("automatic recall requires topical evidence before project or score weighting", () => {
   const result = { results: [
     recallEntry("noise", "AgentMemory Qwen GPU experiment", "current"),
@@ -653,9 +697,9 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     calls.push({ url, body: JSON.parse(options.body), signal: options.signal });
-    return new Response(JSON.stringify(url.endsWith("/search")
+    return recallFixtureResponse(url, JSON.parse(options.body), url.endsWith("/search") || url.endsWith("/smart-search")
       ? { results: [recallEntry("evidence", "federated recall", "other", { title: "prompt_submit" })] }
-      : { nodes: [graphNode("seed", "federated recall")], edges: [], truncated: false }));
+      : { nodes: [graphNode("seed", "federated recall")], edges: [], truncated: false });
   };
   try {
     for (const prompt of ["잔여작업진행", "띄워줘", "게시 진행"]) {
@@ -667,17 +711,17 @@ test("automatic retrieval skips vague requests and keeps bounded read-only reque
     const [recall, graph] = await Promise.all([
       federatedRecallContext("federated recall", "current"), graphContext("federated recall", "current"),
     ]);
-    assert.equal(calls.length, 5);
+    assert.equal(calls.length, 6);
     const searches = calls.filter((call) => call.url.endsWith("/search"));
     assert.deepEqual(searches.map(call => call.body.project), ["current", "*", "*"]);
-    assert.deepEqual(searches[0].body, { query: "federated recall", project: "current", searchMode: "keyword", format: "full", limit: 12, token_budget: 1200, trackAccess: false });
+    assert.deepEqual(searches[0].body, { query: "federated recall", project: "current", searchMode: "keyword", retrievalPolicy: "automatic", format: "compact", limit: 12, token_budget: 1200, trackAccess: false });
     assert.ok(searches.every(call => call.body.trackAccess === false));
     const graphs = calls.filter((call) => call.url.endsWith("/graph/query") && call.body.queries);
     assert.deepEqual(calls.find((call) => call.body.startNodeId).body, { project: "current", startNodeId: "seed", maxDepth: 1, limit: 64 });
     assert.deepEqual(graphs.map((call) => call.body.project), ["current"]);
     assert.ok(graphs.every((call) => call.body.limit === 160 && call.body.maxDepth === 1 && call.body.queries.length <= 6));
     assert.ok(calls.every((call) => call.signal instanceof AbortSignal && !call.signal.aborted));
-    assert.ok(recall.length <= 700 && graph.length <= 500);
+    assert.ok(recall.length <= 1536 && graph.length <= 500);
     assert.match(recall, /<\/agentmemory-recall-context>$/);
     assert.match(graph, /<\/agentmemory-graph-context>$/);
   } finally {
@@ -699,12 +743,12 @@ test("registry v4 prompt and stop keep recall injection while storage belongs to
     const { handleTurn } = await import(new URL("../hooks/codex-turn.mjs?native-capture-test", import.meta.url).href);
     globalThis.fetch = async (url, options) => {
       calls.push({ url: String(url), body: options?.body ? JSON.parse(options.body) : undefined });
-      return new Response(JSON.stringify(String(url).endsWith("/observe") ? { success: true, skipped: true, nativeSourceManaged: true }
+      return recallFixtureResponse(url, options?.body ? JSON.parse(options.body) : {}, String(url).endsWith("/observe") ? { success: true, skipped: true, nativeSourceManaged: true }
         : String(url).endsWith("/session/start") ? { status: "caught_up", inserted: 1 }
         : String(url).includes("/livez") ? { status: "ok", nativeCapture: { status: "attention" } }
         : String(url).includes("/observations?") ? { total: 1, observations: [{ id: "prior-user", sessionId: "native-fixture", title: "prompt_submit", narrative: "federated recall", timestamp: "2026-09-14T00:00:00Z" }] }
-        : String(url).endsWith("/search") ? { results: [recallEntry("evidence", "federated recall", "other", { title: "prompt_submit" })] }
-        : String(url).includes("/sessions") ? { sessions: [] } : { nodes: [], edges: [], truncated: false }));
+        : (String(url).endsWith("/search") || String(url).endsWith("/smart-search")) ? { results: [recallEntry("evidence", "federated recall", "other", { title: "prompt_submit" })] }
+        : String(url).includes("/sessions") ? { sessions: [] } : { nodes: [], edges: [], truncated: false });
     };
     process.stdout.write = value => { output.push(String(value)); return true; };
     await handleTurn({ session_id: "native-fixture", turn_id: "turn-a", cwd, prompt: "federated recall" }, "UserPromptSubmit");
@@ -720,7 +764,7 @@ test("registry v4 prompt and stop keep recall injection while storage belongs to
     assert.equal(calls.find(call => call.url.endsWith("/search")).body.query, "federated recall");
     const injected = JSON.parse(output.join("")).hookSpecificOutput.additionalContext;
     assert.match(injected, /agentmemory-recall-context/);
-    assert.ok(injected.length <= 2300);
+    assert.ok(injected.length <= 7600);
     calls.length = 0; output.length = 0;
     await handleTurn({ session_id: "native-fixture", turn_id: "turn-b", cwd, last_assistant_message: "Verified result" }, "Stop");
     assert.equal(calls.find(call => call.url.endsWith("/observe")).body.project, "source-project");
@@ -815,20 +859,20 @@ test("automatic recall keeps local evidence and searches user history even after
   const originalFetch = globalThis.fetch; const calls = [];
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body); calls.push(body);
-    return new Response(JSON.stringify({ results: [recallEntry("obs-local", "Native source capture verified.", "current", { timestamp: "2026-09-14T00:00:00Z" })] }));
+    return recallFixtureResponse(_url, JSON.parse(options.body), { results: [recallEntry("obs-local", "Native source capture verified.", "current", { timestamp: "2026-09-14T00:00:00Z" })] });
   };
   try {
     const result = await federatedRecallContext("native source", "current");
-    assert.deepEqual(calls.map(call => call.project), ["current", "*", "*"]);
+    assert.deepEqual(calls.filter(call => !call.expandIds && call.searchMode === "keyword").map(call => call.project), ["current", "*", "*"]);
     assert.equal(calls[1].sourceKind, "user");
-    assert.ok(calls.every(body => body.searchMode === "keyword"));
+    assert.ok(calls.filter(body => !body.expandIds).every(body => ["keyword", "hybrid"].includes(body.searchMode)));
     assert.match(result, /\[current\] obs-local @2026-09-14T00:00:00Z/);
     assert.match(result, /Native source capture verified/);
     assert.equal(calls[0].trackAccess, false);
     const duplicated = formatRecallContext("native source", "current", { results: [
       recallEntry("obs-local", "Native source capture", "current"), recallEntry("obs-local", "Native source capture", "current"),
     ] });
-    assert.equal((duplicated.match(/obs-local/g) ?? []).length, 1);
+    assert.equal((duplicated.match(/\[current\] obs-local/g) ?? []).length, 1);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -836,37 +880,37 @@ test("historical user requirements survive recent assistant summaries under a re
   const originalFetch = globalThis.fetch; const calls = [];
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body); calls.push(body);
-    return new Response(JSON.stringify({ results: body.project === "editor-new"
+    return recallFixtureResponse(_url, JSON.parse(options.body), { results: body.project === "editor-new"
       ? [recallEntry("recent-summary", "Canvas labels were limited to three.", "editor-new", { title: "assistant_response", timestamp: "2026-09-24T00:00:00Z" })]
-      : [recallEntry("original-request", "Keep all valid canvas labels while unrelated tiles move.", "old-workspace", { title: "prompt_submit", timestamp: "2026-07-26T00:00:00Z" })] }));
+      : [recallEntry("original-request", "Keep all valid canvas labels while unrelated tiles move.", "old-workspace", { title: "prompt_submit", timestamp: "2026-07-26T00:00:00Z" })] });
   };
   try {
     const context = await federatedRecallContext("canvas labels", "editor-new");
-    assert.deepEqual(calls.map(body => [body.project, body.sourceKind]), [["editor-new", undefined], ["*", "user"], ["*", undefined]]);
+    assert.deepEqual(calls.filter(body => !body.expandIds && body.searchMode === "keyword").map(body => [body.project, body.sourceKind]), [["editor-new", undefined], ["*", "user"], ["*", undefined]]);
     assert.match(context, /original-request .* user: Keep all valid canvas labels/);
     assert.match(context, /recent-summary .* derived:/);
-    assert.ok(context.indexOf("recent-summary") < context.indexOf("original-request"));
-    assert.ok(context.length <= 900);
+    assert.ok(context.indexOf("original-request") < context.indexOf("recent-summary"));
+    assert.ok(context.length <= 1536);
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("source excerpts select the relevant paragraph, label derived text and preserve the total context cap", () => {
+test("source originals preserve complete paragraphs, label derived text and stay within the evidence budget", () => {
   const context = formatRecallContext("invoice rounding", "new-billing", { results: [
     recallEntry("user-rounding", "Account setup details.\nKeep invoice rounding exact until the final total.", "legacy-billing", { title: "prompt_submit" }),
     recallEntry("summary-rounding", "Invoice rounding completed.", "new-billing", { title: "assistant_response" }),
     recallEntry("unrelated-user", "Change the canvas colour.", "design", { title: "prompt_submit" }),
   ] });
-  assert.match(context, /user: Keep invoice rounding exact/);
-  assert.doesNotMatch(context, /Account setup|unrelated-user/);
-  assert.ok(context.length <= 900);
-  assert.ok(boundedAdditionalContext("curation".repeat(200), context, "graph".repeat(100)).length <= 2300);
+  assert.match(context, /Keep invoice rounding exact/);
+  assert.doesNotMatch(context, /unrelated-user/);
+  assert.ok(context.length <= 1536);
+  assert.ok(boundedAdditionalContext("curation".repeat(200), context, "graph".repeat(100)).length <= 7600);
 });
 
 test("historical lookup failure preserves successful local evidence without treating it as full history", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, options) => {
     if (JSON.parse(options.body).project === "*") throw Error("history unavailable");
-    return new Response(JSON.stringify({ results: [recallEntry("local", "Invoice rounding state.")] }));
+    return recallFixtureResponse(_url, JSON.parse(options.body), { results: [recallEntry("local", "Invoice rounding state.")] });
   };
   try {
     const context = await federatedRecallContext("invoice rounding", "current");
@@ -886,17 +930,17 @@ test("new user corrections and local evidence are not displaced by highly ranked
   assert.match(context, /current-check .* derived:/);
   assert.match(context, /new-rule @2026-09-24 user:/);
   assert.ok(!context.includes("old-rule") || context.indexOf("new-rule") < context.indexOf("old-rule"));
-  assert.ok(context.length <= 1150);
+  assert.ok(context.length <= 1536);
 });
 
 test("context expands only for distinct relevant user originals, with a hard combined ceiling", () => {
   const originals = ["keep invoice rounding exact", "use the invoice final total"].map((text, i) =>
     recallEntry("obs_" + String(i).repeat(64), (text + " ").repeat(20), "legacy", { title: "prompt_submit", timestamp: "2026-09-24" }));
   const expanded = formatRecallContext("invoice rounding", "current", { results: originals });
-  assert.ok(expanded.length > 650 && expanded.length <= 1150);
-  assert.ok(boundedAdditionalContext("c".repeat(1146), expanded, "g".repeat(500)).length <= 2800);
+  assert.ok(expanded.length > 1536 && expanded.length <= 6144);
+  assert.ok(boundedAdditionalContext("c".repeat(1146), expanded, "g".repeat(500)).length <= 7600);
   const repeated = formatRecallContext("invoice rounding", "current", { results: [originals[0], { ...originals[0], observation: { ...originals[0].observation, id: "duplicate" } }] });
-  assert.ok(repeated.length <= 650);
+  assert.ok(repeated.length <= 6144);
 });
 
 test("current-project read failures cannot silently turn into wildcard retrieval", async () => {
@@ -941,14 +985,14 @@ test("an incomplete graph snapshot cannot masquerade as current evidence or an e
 test("hook work deadlines leave room for host startup and preserve the expanded context limit", () => {
   const spec = JSON.parse(readFileSync(new URL("../config/hook-spec.json", import.meta.url), "utf8"));
   for (const event of spec.events) assert.ok((event.work_budget_max_ms ?? event.work_budget_ms) + 2000 <= event.timeout_seconds * 1000);
-  assert.equal(spec.events.find(event => event.name === "UserPromptSubmit").additional_context_limit, 2800);
+  assert.equal(spec.events.find(event => event.name === "UserPromptSubmit").additional_context_limit, 7600);
 });
 
 test("empty local search does not start a second full deadline after its retrieval budget expires", async () => {
   const originalFetch = globalThis.fetch, originalNow = Date.now;
   let now = 1000; const calls = [];
   Date.now = () => now;
-  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); now += 5001; return new Response(JSON.stringify({ results: [] })); };
+  globalThis.fetch = async (_url, options) => { calls.push(JSON.parse(options.body)); now += 5001; return new Response(JSON.stringify({ format: "compact", results: [], truncated: false })); };
   try {
     assert.equal(await federatedRecallContext("native capture", "current"), null);
     assert.deepEqual(calls.map(call => call.project), ["current"]);
@@ -1925,4 +1969,113 @@ test("desktop lifecycle preserves hidden active Codex and stops only after exit"
     assert.equal(row.state, expected, JSON.stringify(row));
     assert.equal(row.diagnostic, row.window);
   }
+});
+
+
+test("recall budget preserves three established requirements and a late negation in one project", () => {
+  const sentences = ["Invoice rounding must preserve exact decimals.", "Invoice rounding must use the final total.", "Invoice rounding must retain the original audit source.", "Invoice rounding must not upload or start Qwen; local verification only."];
+  const entries = sentences.map((text, i) => recallEntry(`constraint-${i}`, text, "billing", { title: "prompt_submit", timestamp: `2026-09-${10+i}` }));
+  const context = formatRecallContext("invoice rounding", "billing", {results: entries});
+  for (const text of sentences) assert.ok(context.includes(text), text);
+  assert.match(context, /estimated_tokens=/);
+  assert.equal(boundedAdditionalContext("c".repeat(8000), context, "g".repeat(8000)), context);
+});
+
+test("recall preserves a long paragraph qualification or labels the omitted original", () => {
+  const text = "Invoice rounding " + "retain exact audit provenance ".repeat(240) + "must not upload or invoke Qwen.";
+  const context = formatRecallContext("invoice rounding", "billing", {results: [recallEntry("long-original", text, "billing", {title: "prompt_submit"})]});
+  assert.ok(context.includes(text) || /needs-expansion.*long-original/.test(context));
+  assert.equal(context.includes("…"), false);
+});
+
+
+test("automatic recall uses actual loopback compact discovery and exact authenticated original expansion", async () => {
+  const actualFetch = globalThis.fetch, calls = [];
+  const priorSecret = process.env.AGENTMEMORY_SECRET;
+  process.env.AGENTMEMORY_SECRET = "synthetic-hook-fixture";
+  const fixtureHook = await import(new URL("../hooks/codex-turn.mjs?authenticated-recall-fixture", import.meta.url).href);
+  const rows = [
+    recallEntry("current-report", "Invoice rounding is capped at two requirements.", "billing", {title:"assistant_response"}),
+    recallEntry("old-exact", "Invoice rounding must preserve exact decimals.", "legacy-billing", {title:"prompt_submit",timestamp:"2025-01-01"}),
+    recallEntry("old-total", "Invoice rounding uses the final total.", "legacy-billing", {title:"prompt_submit",timestamp:"2025-01-02"}),
+    recallEntry("old-source", "Invoice rounding must retain source provenance.", "legacy-billing", {title:"prompt_submit",timestamp:"2025-01-03"}),
+    recallEntry("new-hold", "Invoice rounding must not upload or invoke Qwen; local verification only.", "billing", {title:"prompt_submit",timestamp:"2026-09-30"}),
+  ];
+  const server = createServer(async (req, res) => {
+    let text=""; for await (const chunk of req) text += chunk;
+    const body = JSON.parse(text); calls.push({path:req.url,body,authorization:req.headers.authorization});
+    const response = recallFixtureResponse(req.url, body, {results:rows});
+    res.writeHead(200, {"content-type":"application/json"}); res.end(await response.text());
+  });
+  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  globalThis.fetch = (url, options) => actualFetch(new URL(new URL(url).pathname,base),options);
+  try {
+    const result = await fixtureHook.recallForTurn("invoice rounding", "billing");
+    assert.equal(result.status,"candidates");
+    for (const row of rows) assert.ok(result.context.includes(row.observation.narrative),row.observation.id);
+    assert.ok(calls.filter(call=>call.path.endsWith("/search")).every(call=>call.body.format === "compact" && call.body.retrievalPolicy === "automatic"));
+    assert.ok(calls.filter(call=>call.path.endsWith("/smart-search")).every(call=>call.body.exactExpansion === true && call.body.project !== "*" && call.body.expandIds.every(item=>typeof item.obsId === "string" && item.sessionId === "fixture-session")));
+    assert.ok(calls.every(call=>call.authorization === "Bearer synthetic-hook-fixture"));
+    assert.ok(calls.every(call=>["/agentmemory/search","/agentmemory/smart-search"].includes(call.path)));
+    assert.ok(result.context.indexOf("old-exact") < result.context.indexOf("current-report"));
+  } finally {priorSecret === undefined ? delete process.env.AGENTMEMORY_SECRET : process.env.AGENTMEMORY_SECRET=priorSecret; globalThis.fetch=actualFetch; await new Promise(resolve=>server.close(resolve));}
+});
+
+test("bounded hybrid fallback keeps semantic originals unverified and reports degraded channels", async () => {
+  const originalFetch=globalThis.fetch,calls=[];
+  const semantic=recallEntry("semantic-old", "Preserve pennies until aggregation; do not upload.", "former-ledger", {title:"prompt_submit"});
+  globalThis.fetch=async (url,options)=>{
+    const body=JSON.parse(options.body);calls.push({url:String(url),body});
+    if(body.expandIds) return recallFixtureResponse(url,body,{results:[semantic]});
+    return new Response(JSON.stringify({format:"compact",results:body.searchMode === "hybrid" ? [{obsId:semantic.observation.id,sessionId:semantic.sessionId,project:semantic.project,title:"prompt_submit",sourceKind:"user"}] : [],truncated:false,
+      retrieval:{keyword:"available",graph:"skipped-automatic",vector:body.searchMode === "hybrid" ? "available":"not-requested"}}));
+  };
+  try {
+    const result=await recallForTurn("invoice rounding", "billing");
+    assert.equal(result.status,"candidates");
+    assert.match(result.context,/Preserve pennies until aggregation; do not upload/);
+    assert.match(result.context,/unverified candidates/);
+    assert.equal(calls.filter(call=>call.body.searchMode === "hybrid").length,1);
+    assert.ok(calls.every(call=>!call.url.includes("qwen") && !call.url.includes("graph")));
+    globalThis.fetch=async (url,options)=>{
+      const body=JSON.parse(options.body);
+      if(body.expandIds) return recallFixtureResponse(url,body,{results:[semantic]});
+      return new Response(JSON.stringify({format:"compact",results:[],truncated:false,retrieval:{vector:"skipped-scan-bound",graph:"skipped-automatic"}}));
+    };
+    const unavailable=await recallForTurn("invoice rounding", "billing");
+    assert.equal(unavailable.status,"partial");
+    assert.equal(unavailable.context,null);
+  } finally {globalThis.fetch=originalFetch;}
+});
+
+test("a missing original in one exact source project preserves successful expansion from another", async () => {
+  const originalFetch=globalThis.fetch;
+  const current=recallEntry("current-rule","Invoice rounding must not upload.","billing",{title:"prompt_submit"});
+  const old=recallEntry("old-rule","Invoice rounding uses final totals.","old",{title:"prompt_submit"});
+  globalThis.fetch=async (url,options)=>{
+    const body=JSON.parse(options.body);
+    if(body.expandIds && body.project === "old") throw Error("old source offline");
+    return recallFixtureResponse(url,body,{results:[current,old]});
+  };
+  try {const result=await recallForTurn("invoice rounding","billing");assert.equal(result.status,"partial");assert.match(result.context,/must not upload/);assert.doesNotMatch(result.context,/uses final totals/);}
+  finally {globalThis.fetch=originalFetch;}
+});
+
+
+test("sufficient current user evidence avoids repetitive global discovery", async () => {
+  const originalFetch=globalThis.fetch,calls=[];
+  const rows=["Invoice rounding stays exact.","Invoice rounding uses final totals.","Invoice rounding must not upload."].map((text,i)=>recallEntry(`local-${i}`,text,"billing",{title:"prompt_submit"}));
+  globalThis.fetch=async(url,options)=>{const body=JSON.parse(options.body);calls.push({url:String(url),body});return recallFixtureResponse(url,body,{results:rows});};
+  try {
+    const result=await recallForTurn("invoice rounding","billing");
+    assert.equal(result.status,"candidates");
+    assert.match(result.context,/history="not-requested"/);
+    assert.equal(calls.length,2);
+    assert.ok(calls.every(call=>call.body.project === "billing"));
+    assert.deepEqual(calls.at(-1).body.expandIds.map(item=>item.obsId).sort(),["local-0","local-1","local-2"]);
+    calls.length=0;
+    await recallForTurn("invoice rounding 과거","billing");
+    assert.ok(calls.some(call=>call.body.project === "*"));
+  } finally {globalThis.fetch=originalFetch;}
 });

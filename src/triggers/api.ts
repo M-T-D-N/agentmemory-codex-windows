@@ -499,6 +499,9 @@ export function registerApiTriggers(
       if (body.sourceKind !== undefined && body.sourceKind !== "user" && body.sourceKind !== "assistant") {
         return { status_code: 400, body: { error: "sourceKind must be user or assistant" } };
       }
+      if (body.retrievalPolicy !== undefined && body.retrievalPolicy !== "automatic") {
+        return { status_code: 400, body: { error: "retrievalPolicy must be automatic" } };
+      }
       if (body.searchMode !== undefined && body.searchMode !== "keyword" && body.searchMode !== "hybrid") {
         return { status_code: 400, body: { error: "searchMode must be keyword or hybrid" } };
       }
@@ -561,6 +564,7 @@ export function registerApiTriggers(
         query: body.query.trim(),
         sourceKind: body.sourceKind as "user" | "assistant" | undefined,
         searchMode: body.searchMode as "keyword" | "hybrid" | undefined,
+        retrievalPolicy: body.retrievalPolicy as "automatic" | undefined,
         limit: body.limit as number | undefined,
         project,
         cwd: body.cwd as string | undefined,
@@ -1570,6 +1574,8 @@ export function registerApiTriggers(
       req: ApiRequest<{
         query?: string;
         expandIds?: Array<string | { obsId: string; sessionId: string }>;
+        exactExpansion?: boolean;
+        trackAccess?: boolean;
         limit?: number;
         project?: string;
         includeLessons?: boolean;
@@ -1580,6 +1586,8 @@ export function registerApiTriggers(
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
+      if (req.body?.exactExpansion !== undefined && typeof req.body.exactExpansion !== "boolean") return {status_code: 400, body: {error: "exactExpansion must be a boolean"}};
+      if (req.body?.trackAccess !== undefined && typeof req.body.trackAccess !== "boolean") return {status_code: 400, body: {error: "trackAccess must be a boolean"}};
       if (
         !req.body?.query &&
         (!req.body?.expandIds || req.body.expandIds.length === 0)
@@ -1609,6 +1617,8 @@ export function registerApiTriggers(
       const payload = {
         query: req.body?.query,
         expandIds: req.body?.expandIds,
+        exactExpansion: req.body?.exactExpansion,
+        trackAccess: req.body?.trackAccess,
         limit: req.body?.limit,
         project,
         includeLessons: req.body?.includeLessons,
@@ -1665,14 +1675,37 @@ export function registerApiTriggers(
         project?: string;
         before?: number;
         after?: number;
+        offset?: number;
+        trackAccess?: boolean;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      if (!req.body?.anchor) {
+      const body = req.body;
+      if (!body || typeof body.anchor !== "string" || !body.anchor.trim()) {
         return { status_code: 400, body: { error: "anchor is required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::timeline", payload: req.body });
+      for (const name of ["before", "after", "offset"] as const) {
+        const value = body[name];
+        if (value !== undefined && (typeof value !== "number"
+          || !Number.isSafeInteger(value) || value < 0)) {
+          return { status_code: 400, body: { error: name + " must be a non-negative safe integer" } };
+        }
+      }
+      if (body.project !== undefined && (typeof body.project !== "string" || !body.project.trim())) {
+        return { status_code: 400, body: { error: "project must be a non-empty string" } };
+      }
+      if (body.trackAccess !== undefined && typeof body.trackAccess !== "boolean") {
+        return { status_code: 400, body: { error: "trackAccess must be a boolean" } };
+      }
+      const result = await sdk.trigger({ function_id: "mem::timeline", payload: {
+        anchor: body.anchor,
+        project: body.project?.trim(),
+        before: body.before,
+        after: body.after,
+        offset: body.offset,
+        trackAccess: body.trackAccess,
+      } });
       return { status_code: 200, body: result };
     },
   );
@@ -1727,7 +1760,10 @@ export function registerApiTriggers(
         function_id: "mem::export",
         payload,
       });
-      return { status_code: 200, body: result };
+      const refused = result && typeof result === "object" &&
+        (result as { success?: unknown }).success === false &&
+        (result as { oversized?: unknown }).oversized === true;
+      return { status_code: refused ? 413 : 200, body: result };
     },
   );
   sdk.registerTrigger({

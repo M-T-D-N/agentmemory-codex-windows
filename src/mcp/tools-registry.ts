@@ -232,7 +232,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_timeline",
-    description: "Chronological observations around an anchor point.",
+    description: "Chronological observations around an anchor point. Read the whole requested window using offset and nextOffset; each page has at most 100 entries and 2 MiB of serialized response.",
     inputSchema: {
       type: "object",
       properties: {
@@ -240,14 +240,18 @@ export const CORE_TOOLS: McpToolDef[] = [
           type: "string",
           description: "Anchor point: ISO date or keyword",
         },
-        project: { type: "string", description: "Filter by project path" },
+        project: { type: "string", description: "Exact project path; use '*' for all projects. Omission keeps the existing all-project scope." },
         before: {
-          type: "number",
-          description: "Observations before anchor (default 5)",
+          type: "integer", minimum: 0,
+          description: "Full-window observations before anchor (default 5; zero is valid)",
         },
         after: {
-          type: "number",
-          description: "Observations after anchor (default 5)",
+          type: "integer", minimum: 0,
+          description: "Full-window observations after anchor (default 5; zero is valid)",
+        },
+        offset: {
+          type: "integer", minimum: 0,
+          description: "Offset within the full window (default 0); continue at nextOffset until null",
         },
         trackAccess: {
           type: "boolean",

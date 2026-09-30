@@ -15,6 +15,8 @@ export class SearchIndex {
   private docTermCounts: Map<string, Map<string, number>> = new Map();
   private totalDocLength = 0;
   private sortedTerms: string[] | null = null;
+  private changeCapture: Set<string> | null = null;
+  private captureReset = false;
 
   private readonly k1 = 1.2;
   private readonly b = 0.75;
@@ -62,6 +64,7 @@ export class SearchIndex {
   }
 
   remove(id: string): void {
+    this.changeCapture?.add(id);
     const entry = this.entries.get(id);
     if (!entry) return;
 
@@ -174,6 +177,7 @@ export class SearchIndex {
   }
 
   clear(): void {
+    if (this.changeCapture) this.captureReset = true;
     this.entries.clear();
     this.invertedIndex.clear();
     this.docTermCounts.clear();
@@ -182,6 +186,7 @@ export class SearchIndex {
   }
 
   restoreFrom(other: SearchIndex): void {
+    if (this.changeCapture) this.captureReset = true;
     this.entries = new Map(
       Array.from(other.entries.entries()).map(([k, v]) => [k, { ...v }]),
     );
@@ -199,6 +204,33 @@ export class SearchIndex {
     );
     this.totalDocLength = other.totalDocLength;
     this.sortedTerms = null;
+  }
+
+  captureChanges(): { applyTo: (target: SearchIndex) => void; stop: () => void } {
+    if (this.changeCapture) throw new Error("Search index change capture already active");
+    const changed = new Set<string>();
+    this.changeCapture = changed;
+    this.captureReset = false;
+    return {
+      applyTo: target => {
+        if (this.captureReset) throw new Error("Search index reset during rebuild");
+        for (const id of changed) {
+          target.remove(id);
+          const entry = this.entries.get(id);
+          const terms = this.docTermCounts.get(id);
+          if (!entry || !terms) continue;
+          target.entries.set(id, { ...entry });
+          target.docTermCounts.set(id, new Map(terms));
+          target.totalDocLength += entry.termCount;
+          for (const term of terms.keys()) {
+            if (!target.invertedIndex.has(term)) target.invertedIndex.set(term, new Set());
+            target.invertedIndex.get(term)!.add(id);
+          }
+          target.sortedTerms = null;
+        }
+      },
+      stop: () => { if (this.changeCapture === changed) this.changeCapture = null; },
+    };
   }
 
   serialize(): string {

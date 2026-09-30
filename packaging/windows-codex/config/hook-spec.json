@@ -12,7 +12,7 @@
       "timeout_seconds": 65,
       "work_budget_ms": 12000,
       "work_budget_max_ms": 60000,
-      "additional_context_limit": 2800
+      "additional_context_limit": 7600
     },
     {
       "name": "Stop",

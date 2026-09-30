@@ -1,11 +1,27 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { win32 } from "node:path";
 import { promisify } from "node:util";
 import { getEnvVar } from "../config.js";
 import { logger } from "../logger.js";
 
 const execute = promisify(execFile);
+
+export function localQwenBackgroundDeferral(options: {
+  script?: string;
+  read?: (path: string) => string;
+} = {}): "background_held" | "background_policy_unknown" | undefined {
+  const script = options.script ?? getEnvVar("AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT");
+  if (!script) return;
+  if (!win32.isAbsolute(script) || win32.basename(script).toLowerCase() !== "invoke-localai.ps1") return "background_policy_unknown";
+  try {
+    const config = JSON.parse((options.read ?? (path => readFileSync(path, "utf8")))(
+      win32.resolve(win32.dirname(script), "..", "config.json"),
+    ));
+    // Match LocalAI's fail-closed background policy without invoking its launcher.
+    return config?.qwen?.background_start_enabled === true ? undefined : "background_held";
+  } catch { return "background_policy_unknown"; }
+}
 
 export interface LocalQwenLifecycle {
   start(): Promise<{ ready: boolean; reason?: string }>;

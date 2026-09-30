@@ -89,6 +89,7 @@ export function registerSmartSearchFunction(
     async (data: {
       query?: string;
       expandIds?: Array<string | { obsId: string; sessionId: string }>;
+      exactExpansion?: boolean;
       limit?: number;
       project?: string;
       includeLessons?: boolean;
@@ -144,6 +145,10 @@ export function registerSmartSearchFunction(
         );
       }
 
+      if (data.exactExpansion !== undefined && typeof data.exactExpansion !== "boolean") throw new Error("exactExpansion must be a boolean");
+      if (data.exactExpansion && (!projectFilter || !Array.isArray(data.expandIds) || data.expandIds.some(item => !item || typeof item !== "object" || typeof item.obsId !== "string" || !item.obsId || typeof item.sessionId !== "string" || !item.sessionId))) {
+        throw new Error("exactExpansion requires an exact project and observation/session pairs");
+      }
       if (data.expandIds && data.expandIds.length > 0) {
         const raw = data.expandIds.slice(0, 20);
         const items = raw.map((entry) => {
@@ -160,7 +165,7 @@ export function registerSmartSearchFunction(
           observation: CompressedObservation;
         }> = [];
 
-        const observations = await findObservations(kv, items);
+        const observations = await findObservations(kv, items, data.exactExpansion);
         for (let index = 0; index < items.length; index++) {
           const { obsId } = items[index];
           const observation = observations[index];
@@ -414,6 +419,7 @@ async function detectFollowup(
 async function findObservations(
   kv: StateKV,
   items: Array<{ obsId: string; sessionId?: string }>,
+  exactExpansion = false,
 ): Promise<Array<CompressedObservation | null>> {
   const observations: Array<CompressedObservation | null> = items.map(
     () => null,
@@ -439,6 +445,10 @@ async function findObservations(
   }
 
   if (unresolved.length === 0) return observations;
+  if (exactExpansion) {
+    await fillMemories();
+    return observations.map((observation, index) => observation?.sessionId === items[index].sessionId ? observation : null);
+  }
   const sessions = await kv.list<{ id: string }>(KV.sessions);
 
   if (unresolved.length > 1) {

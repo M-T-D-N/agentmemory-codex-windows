@@ -207,6 +207,30 @@ describe("mem::search", () => {
     expect(result.truncated).toBe(true);
   });
 
+  it("skips an oversized first hit without starving later affordable originals", async () => {
+    const original = (await kv.get<CompressedObservation>(KV.observations("ses_1"), "obs_a"))!;
+    const large = { ...original, id: "long-first", title: "budget budget budget", narrative: "budget ".repeat(2000) };
+    const small = { ...original, id: "small-later", title: "budget", narrative: "Keep budget exact; do not upload." };
+    for (const row of [large, small]) { await kv.set(KV.observations("ses_1"), row.id, row); getSearchIndex().add(row); }
+    const result = await sdk.trigger("mem::search", { query: "budget", project: "demo", searchMode: "keyword", token_budget: 300, trackAccess: false });
+    expect(result.results.map((r: any) => r.observation.id)).toEqual(["small-later"]);
+    expect(result.truncated).toBe(true);
+    expect(result.results[0].observation.narrative).toBe(small.narrative);
+    expect((await kv.get<CompressedObservation>(KV.observations("ses_1"), large.id))?.narrative).toBe(large.narrative);
+  });
+
+  it("keeps source role in compact discovery and skips oversized compact metadata", async () => {
+    const base = (await kv.get<CompressedObservation>(KV.observations("ses_1"), "obs_a"))!;
+    const large = {...base,id:"long-title",title:"budget ".repeat(1000)};
+    const user = {...base,id:"original-user",title:"prompt_submit",narrative:"budget must not upload"};
+    for (const row of [large,user]) {getSearchIndex().add(row); await kv.set(KV.observations("ses_1"),row.id,row);}
+    const result = await sdk.trigger("mem::search", {query:"budget",project:"demo",searchMode:"keyword",format:"compact",token_budget:300,trackAccess:false});
+    expect(result.results.map((row:any)=>row.obsId)).toEqual([user.id]);
+    expect(result.results[0].sourceKind).toBe("user");
+    expect(result.results[0]).not.toHaveProperty("narrative");
+    expect(result.truncated).toBe(true);
+  });
+
   it("rejects invalid format values", async () => {
     await expect(
       sdk.trigger("mem::search", { query: "auth", format: "verbose" }),

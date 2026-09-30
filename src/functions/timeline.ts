@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ISdk } from "iii-sdk";
 import type {
   CompressedObservation,
@@ -13,142 +14,273 @@ import {
   sanitizeCodexAmbientObservation,
 } from "./observation-visibility.js";
 
-export function registerTimelineFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::timeline", 
-    async (data: {
-      anchor: string;
-      project?: string;
-      before?: number;
-      after?: number;
-      trackAccess?: boolean;
-    }) => {
-      const before = Math.max(0, Math.floor(data.before ?? 5));
-      const after = Math.max(0, Math.floor(data.after ?? 5));
+const MAX_TIMELINE_ENTRIES = 100;
+const MAX_TIMELINE_RESPONSE_BYTES = 2 * 1024 * 1024;
 
-      if (!data.anchor || typeof data.anchor !== "string") {
-        return { entries: [], anchor: data.anchor, reason: "invalid_anchor" };
-      }
+type ObservationRef = {
+  id: string;
+  sessionId: string;
+  project: string;
+  time: number;
+  digest: string;
+};
 
-      let anchorTime: number;
-      const isoPattern = /^\d{4}-\d{2}-\d{2}/;
-      if (isoPattern.test(data.anchor)) {
-        anchorTime = new Date(data.anchor).getTime();
-        if (isNaN(anchorTime)) {
-          return { entries: [], anchor: data.anchor, reason: "invalid_date" };
-        }
-      } else {
-        const searchResults = await findByKeyword(
-          kv,
-          data.anchor,
-          data.project,
-        );
-        if (searchResults.length === 0) {
-          return { entries: [], anchor: data.anchor, reason: "no_match" };
-        }
-        anchorTime = new Date(searchResults[0].timestamp).getTime();
-      }
+type TimelinePage = {
+  entries: TimelineEntry[];
+  anchorIndex: number | null;
+  offset: number;
+  total: number;
+  nextOffset: number | null;
+  truncated: boolean;
+};
 
-      const sessions = await kv.list<Session>(KV.sessions);
-      const filtered = sessions.filter(
-        (session) =>
-          !isExcludedCodexAmbientSession(session) &&
-          (!data.project || session.project === data.project),
-      );
-
-      const allObs: Array<CompressedObservation & { sid: string }> = [];
-      for (const session of filtered) {
-        const observations = await kv.list<CompressedObservation>(
-          KV.observations(session.id),
-        );
-        for (const rawObservation of observations) {
-          const obs = sanitizeCodexAmbientObservation(rawObservation);
-          if (!obs) continue;
-          if (obs.title && obs.timestamp) {
-            allObs.push({ ...obs, sid: session.id });
-          }
-        }
-      }
-
-      allObs.sort(
-        (a, b) =>
-          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-      );
-
-      let anchorIdx = 0;
-      let minDist = Infinity;
-      for (let i = 0; i < allObs.length; i++) {
-        const dist = Math.abs(
-          new Date(allObs[i].timestamp).getTime() - anchorTime,
-        );
-        if (dist < minDist) {
-          minDist = dist;
-          anchorIdx = i;
-        }
-      }
-
-      const startIdx = Math.max(0, anchorIdx - before);
-      const endIdx = Math.min(allObs.length - 1, anchorIdx + after);
-      const entries: TimelineEntry[] = [];
-
-      for (let i = startIdx; i <= endIdx; i++) {
-        const obs = allObs[i];
-        const { sid, ...observation } = obs;
-        entries.push({
-          observation,
-          sessionId: sid,
-          relativePosition: i - anchorIdx,
-        });
-      }
-
-      if (data.trackAccess !== false) {
-        void recordAccessBatch(
-          kv,
-          entries.map((e) => e.observation.id),
-        );
-      }
-
-      logger.info("Timeline retrieved", {
-        anchor: data.anchor,
-        entries: entries.length,
-      });
-      return { entries, anchorIndex: anchorIdx - startIdx };
-    },
-  );
+function rangeValue(value: unknown, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(name + " must be a non-negative safe integer");
+  }
+  return value;
 }
 
-async function findByKeyword(
+function readProject(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("project must be a non-empty string");
+  }
+  return value.trim();
+}
+
+function observationDigest(value: CompressedObservation): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function compareRefs(a: ObservationRef, b: ObservationRef): number {
+  return a.time - b.time
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0);
+}
+
+function isSessionEndOnlyRow(scope: string, value: unknown): boolean {
+  if (scope !== KV.sessions || !value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const keys = Object.keys(row);
+  return keys.length === 2 && keys.includes("status") && keys.includes("endedAt")
+    && row.status === "completed" && typeof row.endedAt === "string"
+    && Number.isFinite(new Date(row.endedAt).getTime());
+}
+
+async function forEachStateRow<T extends { id: string }>(
   kv: StateKV,
-  keyword: string,
-  project?: string,
-): Promise<CompressedObservation[]> {
-  const sessions = await kv.list<Session>(KV.sessions);
-  const filtered = sessions.filter(
-    (session) =>
-      !isExcludedCodexAmbientSession(session) &&
-      (!project || session.project === project),
-  );
-
-  const lower = keyword.toLowerCase();
-  const matches: CompressedObservation[] = [];
-
-  for (const session of filtered) {
-    const observations = await kv.list<CompressedObservation>(
-      KV.observations(session.id),
-    );
-    for (const rawObservation of observations) {
-      const obs = sanitizeCodexAmbientObservation(rawObservation);
-      if (!obs) continue;
-      if (
-        obs.title?.toLowerCase().includes(lower) ||
-        obs.narrative?.toLowerCase().includes(lower) ||
-        obs.concepts?.some((c) => c.toLowerCase().includes(lower))
-      ) {
-        matches.push(obs);
-      }
+  scope: string,
+  visit: (row: T) => void,
+): Promise<void> {
+  if (!kv.usesManagedState) {
+    for (const row of await kv.list<T>(scope, { includeDeleted: true })) {
+      if (!isSessionEndOnlyRow(scope, row)) visit(row);
     }
+    return;
   }
 
-  return matches.sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  );
+  let offset = 0;
+  let total: number | null = null;
+  const keys = new Set<string>();
+  for (;;) {
+    const page = await kv.listPage<T>(scope, offset, { includeDeleted: true });
+    if (!Array.isArray(page?.entries) || !Number.isSafeInteger(page.total)
+      || page.total < offset || (total !== null && page.total !== total)
+      || offset + page.entries.length > page.total) {
+      throw new Error("Timeline source changed during page read: " + scope);
+    }
+    total = page.total;
+    for (const entry of page.entries) {
+      if (!entry || typeof entry.key !== "string" || !entry.key || keys.has(entry.key)) {
+        throw new Error("Timeline source has an invalid or duplicate key: " + scope);
+      }
+      keys.add(entry.key);
+      if (isSessionEndOnlyRow(scope, entry.value)) continue;
+      if (!entry.value || entry.value.id !== entry.key) {
+        throw new Error("Timeline source has an invalid or duplicate key: " + scope);
+      }
+      visit(entry.value);
+    }
+    const next = page.next_offset;
+    if (next === null) {
+      if (offset + page.entries.length !== total) {
+        throw new Error("Timeline source ended before its reported count: " + scope);
+      }
+      return;
+    }
+    if (!Number.isSafeInteger(next) || next !== offset + page.entries.length
+      || next <= offset || next >= total) {
+      throw new Error("Timeline source page did not advance: " + scope);
+    }
+    offset = next;
+  }
+}
+
+function timelinePage(
+  entries: TimelineEntry[],
+  offset: number,
+  total: number,
+  anchorWindowIndex: number,
+): TimelinePage {
+  const end = offset + entries.length;
+  const nextOffset = end < total ? end : null;
+  return {
+    entries,
+    anchorIndex: anchorWindowIndex >= offset && anchorWindowIndex < end
+      ? anchorWindowIndex - offset : null,
+    offset,
+    total,
+    nextOffset,
+    truncated: nextOffset !== null,
+  };
+}
+
+function responseBytes(result: TimelinePage): number {
+  const direct = Buffer.byteLength(JSON.stringify(result), "utf8");
+  const mcp = Buffer.byteLength(JSON.stringify({
+    status_code: 200,
+    body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+  }), "utf8");
+  return Math.max(direct, mcp);
+}
+
+function emptyTimeline(anchor: unknown, reason: string) {
+  const result = { ...timelinePage([], 0, 0, 0), anchor, reason };
+  if (responseBytes(result) > MAX_TIMELINE_RESPONSE_BYTES) {
+    throw new Error("Timeline response exceeds the 2 MiB limit");
+  }
+  return result;
+}
+
+export function registerTimelineFunction(sdk: ISdk, kv: StateKV): void {
+  sdk.registerFunction("mem::timeline", async (data: {
+    anchor: string;
+    project?: string;
+    before?: number;
+    after?: number;
+    offset?: number;
+    trackAccess?: boolean;
+  }) => {
+    const before = rangeValue(data.before, 5, "before");
+    const after = rangeValue(data.after, 5, "after");
+    const offset = rangeValue(data.offset, 0, "offset");
+    const project = readProject(data.project);
+    if (typeof data.anchor !== "string" || !data.anchor.trim()) {
+      return emptyTimeline(data.anchor, "invalid_anchor");
+    }
+
+    const isDate = /^\d{4}-\d{2}-\d{2}/.test(data.anchor);
+    const dateTime = isDate ? new Date(data.anchor).getTime() : null;
+    if (isDate && (dateTime === null || !Number.isFinite(dateTime))) {
+      return emptyTimeline(data.anchor, "invalid_date");
+    }
+
+    const sessions = new Map<string, string>();
+    await forEachStateRow<Session>(kv, KV.sessions, session => {
+      if (!isExcludedCodexAmbientSession(session)
+        && (project === undefined || project === "*" || session.project === project)) {
+        sessions.set(session.id, session.project);
+      }
+    });
+
+    const refs: ObservationRef[] = [];
+    const keyword = isDate ? null : data.anchor.toLowerCase();
+    let latestMatch: ObservationRef | null = null;
+    for (const [sessionId, sessionProject] of sessions) {
+      await forEachStateRow<CompressedObservation>(kv, KV.observations(sessionId), raw => {
+        const observation = sanitizeCodexAmbientObservation(raw);
+        if (!observation || !observation.title || !observation.timestamp) return;
+        if (observation.sessionId !== sessionId) {
+          throw new Error("Timeline observation has a mismatched session: " + observation.id);
+        }
+        const time = new Date(observation.timestamp).getTime();
+        if (!Number.isFinite(time)) return;
+        const ref: ObservationRef = {
+          id: observation.id,
+          sessionId,
+          project: sessionProject,
+          time,
+          digest: observationDigest(observation),
+        };
+        refs.push(ref);
+        if (keyword && (
+          observation.title.toLowerCase().includes(keyword)
+          || observation.narrative?.toLowerCase().includes(keyword)
+          || observation.concepts?.some(concept => concept.toLowerCase().includes(keyword))
+        ) && (!latestMatch || compareRefs(ref, latestMatch) > 0)) {
+          latestMatch = ref;
+        }
+      });
+    }
+
+    if (!isDate && !latestMatch) return emptyTimeline(data.anchor, "no_match");
+    refs.sort(compareRefs);
+    let anchorIndex = 0;
+    if (isDate) {
+      let minimumDistance = Infinity;
+      for (let index = 0; index < refs.length; index++) {
+        const distance = Math.abs(refs[index].time - dateTime!);
+        if (distance < minimumDistance) {
+          minimumDistance = distance;
+          anchorIndex = index;
+        }
+      }
+    } else {
+      anchorIndex = refs.findIndex(ref => ref.id === latestMatch!.id
+        && ref.sessionId === latestMatch!.sessionId);
+    }
+
+    const start = Math.max(0, anchorIndex - before);
+    const end = Math.min(refs.length, anchorIndex + 1 + Math.min(after, refs.length));
+    const window = refs.slice(start, end);
+    if (offset > window.length) {
+      throw new Error("Timeline offset exceeds the current window");
+    }
+    const pageEntries: TimelineEntry[] = [];
+    const checkedSessions = new Set<string>();
+    let nextIndex = offset;
+    while (nextIndex < window.length && pageEntries.length < MAX_TIMELINE_ENTRIES) {
+      const ref = window[nextIndex];
+      if (!checkedSessions.has(ref.sessionId)) {
+        const session = await kv.get<Session>(KV.sessions, ref.sessionId);
+        if (!session || session.id !== ref.sessionId || session.project !== ref.project
+          || isExcludedCodexAmbientSession(session)) {
+          throw new Error("Timeline selected session changed: " + ref.sessionId);
+        }
+        checkedSessions.add(ref.sessionId);
+      }
+      const raw = await kv.get<CompressedObservation>(KV.observations(ref.sessionId), ref.id);
+      const observation = sanitizeCodexAmbientObservation(raw);
+      if (!observation || observation.id !== ref.id || observation.sessionId !== ref.sessionId
+        || new Date(observation.timestamp).getTime() !== ref.time
+        || observationDigest(observation) !== ref.digest) {
+        throw new Error("Timeline selected observation changed: " + ref.sessionId + "/" + ref.id);
+      }
+      const entry: TimelineEntry = {
+        observation,
+        sessionId: ref.sessionId,
+        relativePosition: start + nextIndex - anchorIndex,
+      };
+      const candidate = timelinePage([...pageEntries, entry], offset, window.length, anchorIndex - start);
+      if (responseBytes(candidate) > MAX_TIMELINE_RESPONSE_BYTES) {
+        if (pageEntries.length === 0) {
+          throw new Error("Timeline entry exceeds the 2 MiB response limit: " + ref.sessionId + "/" + ref.id);
+        }
+        break;
+      }
+      pageEntries.push(entry);
+      nextIndex++;
+    }
+    const result = timelinePage(pageEntries, offset, window.length, anchorIndex - start);
+    if (responseBytes(result) > MAX_TIMELINE_RESPONSE_BYTES) {
+      throw new Error("Timeline response exceeds the 2 MiB limit");
+    }
+    if (data.trackAccess !== false) {
+      void recordAccessBatch(kv, pageEntries.map(entry => entry.observation.id));
+    }
+    logger.info("Timeline retrieved", { anchor: data.anchor, entries: pageEntries.length, total: window.length });
+    return result;
+  });
 }

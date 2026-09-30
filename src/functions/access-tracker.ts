@@ -93,12 +93,13 @@ export async function recordAccessBatch(
 export async function deleteAccessLog(
   kv: StateKV,
   memoryId: string,
+  options: { requireSuccess?: boolean } = {},
 ): Promise<void> {
   if (!memoryId) return;
   try {
     await withKeyedLock(`mem:access:${memoryId}`, async () => {
       await kv.delete(KV.accessLog, memoryId);
     });
-  } catch {}
+  } catch (error) { if (options.requireSuccess) throw error; }
 }
 

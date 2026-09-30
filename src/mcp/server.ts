@@ -470,11 +470,22 @@ export function registerMcpEndpoints(
             }
             const trackAccess = parseTrackAccess(args.trackAccess);
             if (!trackAccess.valid) return trackAccess.response;
+            for (const name of ["before", "after", "offset"] as const) {
+              const value = args[name];
+              if (value !== undefined && (typeof value !== "number"
+                || !Number.isSafeInteger(value) || value < 0)) {
+                return { status_code: 400, body: { error: name + " must be a non-negative safe integer" } };
+              }
+            }
+            if (args.project !== undefined && (typeof args.project !== "string" || !args.project.trim())) {
+              return { status_code: 400, body: { error: "project must be a non-empty string" } };
+            }
             const result = await sdk.trigger({ function_id: "mem::timeline", payload: {
               anchor: args.anchor,
-              project: (args.project as string) || undefined,
-              before: (args.before as number) || 5,
-              after: (args.after as number) || 5,
+              project: typeof args.project === "string" ? args.project.trim() : undefined,
+              before: args.before as number | undefined,
+              after: args.after as number | undefined,
+              offset: args.offset as number | undefined,
               trackAccess: trackAccess.value,
             } });
             return {

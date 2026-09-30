@@ -879,7 +879,7 @@ describe("IndexPersistence", () => {
     expect(guardedKv.get).not.toHaveBeenCalledWith("", "data");
   });
 
-  it("scheduleSave debounces multiple calls", async () => {
+  it("scheduleSave coalesces multiple calls", async () => {
     const bm25 = new SearchIndex();
     const persistence = new IndexPersistence(kv as never, bm25, null);
 
@@ -894,6 +894,27 @@ describe("IndexPersistence", () => {
 
     const saved = await kv.get<string>(BM25_SCOPE, BM25_MANIFEST_KEY);
     expect(saved).not.toBeNull();
+  });
+
+  it("does not postpone the first checkpoint during sustained writes", async () => {
+    const bm25 = new SearchIndex();
+    bm25.add(makeObs({ id: "obs_first", title: "first write" }));
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    persistence.scheduleSave();
+    for (let i = 1; i <= 4; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      bm25.add(makeObs({ id: `obs_${i}`, title: `write ${i}` }));
+      persistence.scheduleSave();
+    }
+    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toBeNull();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).not.toBeNull();
+    const loaded = await persistence.load();
+    expect(loaded.bm25?.size).toBe(5);
+    bm25.add(makeObs({ id: "obs_later", title: "later write" }));
+    persistence.scheduleSave();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((await persistence.load()).bm25?.size).toBe(6);
   });
 
   it("stop clears the pending timer", async () => {
@@ -916,6 +937,42 @@ describe("IndexPersistence", () => {
     const loaded = await persistence.load();
     expect(loaded.bm25).toBeNull();
     expect(loaded.vector).toBeNull();
+  });
+
+  it("coalesces slow writes while every required caller waits for its covering snapshot", async () => {
+    const bm25 = makeBm25("first", "first evidence");
+    const serialize = vi.spyOn(bm25, "serialize"); let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(ok => { release = ok; }); const started = new Promise<void>(ok => { entered = ok; });
+    const originalSet = kv.set.bind(kv); let blocked = false;
+    kv.set = vi.fn(async (scope, key, value) => { if (!blocked) { blocked = true; entered(); await gate; } return originalSet(scope, key, value); }) as typeof kv.set;
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    const first = persistence.save({ requireSuccess: true }); await started;
+    bm25.add(makeObs({ id: "last", title: "latest evidence" }));
+    let completed = false; const calls = Promise.all(Array.from({ length: 20 }, () => persistence.save({ requireSuccess: true }))).then(() => { completed = true; });
+    expect(completed).toBe(false); release(); await first; await calls;
+    expect(serialize).toHaveBeenCalledTimes(2);
+    expect((await persistence.load()).bm25?.has("last")).toBe(true); persistence.stop();
+  });
+
+  it("retries a quiet scheduled outage with a bounded budget and stops retrying after stop", async () => {
+    vi.useFakeTimers(); const bm25 = makeBm25("retry", "retry evidence");
+    const originalSet = kv.set.bind(kv); let offline = true;
+    kv.set = vi.fn(async (scope, key, value) => { if (offline) throw Error("offline"); return originalSet(scope, key, value); }) as typeof kv.set;
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    persistence.scheduleSave(); await vi.advanceTimersByTimeAsync(5000); const initialCalls = vi.mocked(kv.set).mock.calls.length;
+    offline = false; await vi.advanceTimersByTimeAsync(5000);
+    expect(vi.mocked(kv.set).mock.calls.length).toBeGreaterThan(initialCalls);
+    expect((await persistence.load()).bm25?.has("retry")).toBe(true);
+    bm25.add(makeObs({ id: "pending", title: "pending" })); offline = true; persistence.scheduleSave(); await vi.advanceTimersByTimeAsync(5000);
+    persistence.stop(); const stoppedCalls = vi.mocked(kv.set).mock.calls.length; await vi.advanceTimersByTimeAsync(60000);
+    expect(vi.mocked(kv.set).mock.calls.length).toBe(stoppedCalls); vi.useRealTimers();
+  });
+
+  it("does not spin indefinitely during a persistent scheduled outage", async () => {
+    vi.useFakeTimers(); const bm25 = makeBm25("outage", "evidence"); const set = vi.fn(async (_scope: string, _key: string, _value: unknown) => { throw Error("offline"); });
+    const persistence = new IndexPersistence({ ...kv, set } as never, bm25, null);
+    persistence.scheduleSave(); await vi.runAllTimersAsync();
+    expect(set.mock.calls.filter(([scope]) => String(scope).startsWith("mem:index:bm25:bm25:"))).toHaveLength(4); expect(vi.getTimerCount()).toBe(0); persistence.stop(); vi.useRealTimers();
   });
 
   it("scheduled save swallows kv.set rejection without unhandledRejection (#204)", async () => {

@@ -363,6 +363,13 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       };
       const { decrementImageRef } = await import("./image-refs.js");
 
+      const cleanupFailures: Array<{ id: string; step: string; error: string }> = [];
+      const cleanup = async (id: string, step: string, action: () => void | Promise<void>) => {
+        try { await action(); }
+        catch (error) { cleanupFailures.push({ id, step, error: error instanceof Error ? error.message : String(error) }); }
+      };
+      let indexFlushAttempted = false;
+      try {
       const sessionId = data.sessionId;
       if (sessionId) {
         await withKeyedLock(
@@ -424,14 +431,14 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
                 );
                 for (const obs of targetObservations) {
                   await kv.delete(KV.observations(sessionId), obs.id);
-                  if (obs.imageData) await decrementImageRef(kv, sdk, obs.imageData);
-                  if (obs.imageRef && obs.imageRef !== obs.imageData) {
-                    await decrementImageRef(kv, sdk, obs.imageRef);
-                  }
-                  getSearchIndex().remove(obs.id);
-                  vectorIndexRemove(obs.id);
                   deletedObservationIds.push(obs.id);
                   deleted++;
+                  if (obs.imageData) await cleanup(obs.id, "image", () => decrementImageRef(kv, sdk, obs.imageData!));
+                  if (obs.imageRef && obs.imageRef !== obs.imageData) {
+                    await cleanup(obs.id, "image", () => decrementImageRef(kv, sdk, obs.imageRef!));
+                  }
+                  await cleanup(obs.id, "keyword-index", () => getSearchIndex().remove(obs.id));
+                  await cleanup(obs.id, "vector-index", () => vectorIndexRemove(obs.id));
                 }
 
                 if (wholeSession) {
@@ -481,23 +488,32 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         const mem = await kv.get<Memory>(KV.memories, data.memoryId);
         if (mem) {
           await kv.delete(KV.memories, data.memoryId);
-          if (mem.imageRef) {
-            await decrementImageRef(kv, sdk, mem.imageRef);
-          }
-          await deleteAccessLog(kv, data.memoryId);
-          getSearchIndex().remove(data.memoryId);
-          vectorIndexRemove(data.memoryId);
           deletedMemoryIds.push(data.memoryId);
           deleted++;
           alreadyAbsent = false;
+          if (mem.imageRef) await cleanup(data.memoryId, "image", () => decrementImageRef(kv, sdk, mem.imageRef!));
+          await cleanup(data.memoryId, "access", () => deleteAccessLog(kv, data.memoryId!, { requireSuccess: true }));
+          await cleanup(data.memoryId, "keyword-index", () => getSearchIndex().remove(data.memoryId!));
+          await cleanup(data.memoryId, "vector-index", () => vectorIndexRemove(data.memoryId!));
         } else if (!sessionId || deleted === 0) {
           alreadyAbsent = true;
         }
       }
 
       const archiveStatesRemoved = await finishArchiveForget();
-      if (deleted > 0) {
-        await flushIndexSave();
+      if (deleted > 0) { indexFlushAttempted = true; await cleanup("search", "persistence", () => flushIndexSave({ reportFailure: true })); }
+      logger.info("Memory forgotten", { deleted });
+      return {
+        success: true,
+        deleted,
+        ...(cleanupFailures.length ? { cleanupFailed: cleanupFailures.length, cleanupFailures } : {}),
+        ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}),
+        ...(sessionId && alreadyAbsent && deleted === 0 ? { alreadyAbsent: true } : {}),
+        ...(sessionId ? graphResult : {}),
+      };
+      } finally {
+        if (deleted > 0) {
+          if (!indexFlushAttempted) await cleanup("search", "persistence", () => flushIndexSave({ reportFailure: true }));
         await safeAudit(
           kv,
           "forget",
@@ -516,18 +532,11 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             sessionDeleted: deletedSession,
             ...graphResult,
             reason: "user-initiated forget",
+            ...(cleanupFailures.length ? { cleanupFailed: cleanupFailures.length, cleanupFailures } : {}),
           },
         );
+        }
       }
-
-      logger.info("Memory forgotten", { deleted });
-      return {
-        success: true,
-        deleted,
-        ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}),
-        ...(sessionId && alreadyAbsent && deleted === 0 ? { alreadyAbsent: true } : {}),
-        ...(sessionId ? graphResult : {}),
-      };
       });
     },
   );

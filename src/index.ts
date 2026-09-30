@@ -25,7 +25,6 @@ import {
   createImageEmbeddingProvider,
 } from "./providers/index.js";
 import { StateKV } from "./state/kv.js";
-import { KV } from "./state/schema.js";
 import { VectorIndex } from "./state/vector-index.js";
 import { HybridSearch } from "./state/hybrid-search.js";
 import { IndexPersistence } from "./state/index-persistence.js";
@@ -441,8 +440,8 @@ async function main() {
     graphWeight,
   );
 
-  const hybridRanker = (query: string, limit: number, selection?: import("./functions/search-candidates.js").SearchCandidateSelection) =>
-    hybridSearch.search(query, limit, selection);
+  const hybridRanker = (query: string, limit: number, selection?: import("./functions/search-candidates.js").SearchCandidateSelection, policy?: import("./state/hybrid-search.js").AutomaticRetrievalPolicy) =>
+    hybridSearch.search(query, limit, selection, policy);
   registerSmartSearchFunction(sdk, kv, hybridRanker);
   setHybridRanker(hybridRanker);
   registerRecentSearchesSweepFunction(sdk, kv);
@@ -528,67 +527,22 @@ async function main() {
 
   const needsRebuild = bm25Index.size === 0;
 
-  if (needsRebuild) {
-    // Fire-and-forget. rebuildIndex iterates every observation across
-    // every session and AWAITS an embedding-provider call per record.
-    // On a large corpus + rate-limited embedding endpoint that can
-    // take HOURS; awaiting it here blocks every subsequent boot step
-    // (including startViewerServer below, leaving the viewer port
-    // unbound for the duration). The index lazily fills in over time
-    // and search degrades gracefully — partial coverage > no viewer
-    // for hours. Errors still surface via the inner .catch.
-    void rebuildIndex(kv)
-      .then((indexCount) => {
-        if (indexCount > 0) {
-          bootLog(`Search index rebuilt: ${indexCount} entries`);
-          indexPersistence.scheduleSave();
+  const indexReconciliation = new AbortController();
+  let indexRetry: ReturnType<typeof setTimeout> | undefined;
+  let indexRetryAttempts = 0;
+  const reconcileIndex = () => {
+    void rebuildIndex(kv, { reuseVectors: !needsRebuild, signal: indexReconciliation.signal })
+      .then(indexCount => bootLog(`Search index reconciled: ${indexCount} entries`))
+      .catch(error => {
+        if (indexReconciliation.signal.aborted) return;
+        console.warn(`[agentmemory] Failed to reconcile search index:`, error);
+        if (indexRetryAttempts < 3) {
+          indexRetry = setTimeout(reconcileIndex, 30_000 * 2 ** indexRetryAttempts++);
+          indexRetry.unref();
         }
-      })
-      .catch((err) => {
-        console.warn(`[agentmemory] Failed to rebuild search index:`, err);
       });
-  } else {
-    // Backfill memories into BM25 for users upgrading from <0.9.5: prior
-    // versions of mem::remember never indexed memories, so the persisted
-    // BM25 covers observations only and `memory_smart_search` returns
-    // empty for everything saved via memory_save (#257). Walk KV.memories
-    // and add the ones missing from the restored index. Idempotent on
-    // re-runs because SearchIndex.has() short-circuits already-indexed
-    // ids.
-    try {
-      const memories = await kv.list<import("./types.js").Memory>(KV.memories);
-      let backfilled = 0;
-      for (const memory of memories) {
-        if (memory.isLatest === false) continue;
-        if (!memory.title || !memory.content) continue;
-        if (bm25Index.has(memory.id)) continue;
-        bm25Index.add({
-          id: memory.id,
-          sessionId: memory.sessionIds?.[0] ?? "memory",
-          timestamp: memory.createdAt,
-          type: "decision",
-          title: memory.title,
-          facts: [memory.content],
-          narrative: memory.content,
-          concepts: memory.concepts,
-          files: memory.files,
-          importance: memory.strength,
-        });
-        backfilled++;
-      }
-      if (backfilled > 0) {
-        bootLog(
-          `Backfilled ${backfilled} memories into BM25 (legacy index gap)`,
-        );
-        indexPersistence.scheduleSave();
-      }
-    } catch (err) {
-      console.warn(
-        `[agentmemory] Failed to backfill memories into BM25:`,
-        err,
-      );
-    }
-  }
+  };
+  reconcileIndex();
 
   // Ready / Endpoints lines are emitted via `bootLog` so they're
   // buffered in quiet mode and printed verbatim under --verbose. The
@@ -698,6 +652,8 @@ async function main() {
 
   const shutdown = async () => {
     console.log(`\n[agentmemory] Shutting down...`);
+    indexReconciliation.abort();
+    clearTimeout(indexRetry);
     await nativeSourceScheduler?.stop();
     await semanticGraphBacklogScheduler?.stop();
     healthMonitor.stop();

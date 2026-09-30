@@ -114,6 +114,17 @@ describe("Smart Search Function", () => {
     registerSmartSearchFunction(sdk as never, kv as never, searchFn);
   });
 
+  it("exact expansion never enumerates sessions or substitutes a missing source pair", async () => {
+    const list = vi.spyOn(kv, "list");
+    const result = await sdk.trigger("mem::smart-search", {project:"my-project", expandIds:[{obsId:"obs_1",sessionId:"wrong-session"}],exactExpansion:true,trackAccess:false});
+    expect(result.results).toEqual([]);
+    expect(list.mock.calls.some(([scope]) => scope === "mem:sessions")).toBe(false);
+    const valid = await sdk.trigger("mem::smart-search", {project:"my-project",expandIds:[{obsId:"obs_1",sessionId:"ses_1"}],exactExpansion:true,trackAccess:false});
+    expect(valid.results[0].observation.narrative).toBe(searchResults[0].observation.narrative);
+    expect(await kv.get("mem:access", "obs_1")).toBeNull();
+    await expect(sdk.trigger("mem::smart-search", {project:"*",expandIds:[{obsId:"obs_1",sessionId:"ses_1"}],exactExpansion:true})).rejects.toThrow("exact project");
+  });
+
   it("uses a memory's project consistently in compact and expanded retrieval", async () => {
     const memory = { id: "owned-memory", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
       type: "fact", title: "owned memory", content: "owned memory", concepts: [], files: [], sessionIds: ["ses_1"],

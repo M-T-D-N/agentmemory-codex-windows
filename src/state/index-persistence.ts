@@ -70,7 +70,10 @@ function isValidShardDescriptor(
 export class IndexPersistence {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private lastFailureLogAt = 0;
-  private saveQueue: Promise<void> = Promise.resolve();
+  private saving = false;
+  private pendingSave: { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void } | null = null;
+  private retryAttempts = 0;
+  private stopped = false;
   private persistedContent = new Map<string, { fingerprint: string; manifest: IndexShardManifest }>();
 
   constructor(
@@ -81,41 +84,63 @@ export class IndexPersistence {
   ) {}
 
   scheduleSave(): void {
-    if (this.timer) clearTimeout(this.timer);
-    // setTimeout discards the returned promise, so any rejection inside
-    // save() would surface as unhandledRejection and crash the process
-    // under sustained iii-engine write timeouts (issue #204). Funnel
-    // rejections through logFailure() instead.
+    if (this.stopped) return;
+    this.retryAttempts = 0;
+    this.reserveSave(DEBOUNCE_MS);
+  }
+
+  private reserveSave(delay: number): void {
+    if (this.timer || this.stopped) return;
     this.timer = setTimeout(() => {
-      this.save().catch((err) => this.logFailure(err));
-    }, DEBOUNCE_MS);
+      this.timer = null;
+      void this.enqueueSave().catch(() => {});
+    }, delay);
+    this.timer.unref?.();
   }
 
   async save(options: { requireSuccess?: boolean } = {}): Promise<void> {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    // A scheduled snapshot can still be running when a delete path asks for
-    // an immediate flush. Queue the next snapshot instead of publishing two
-    // generations concurrently; the queued run serializes the latest index
-    // state after the earlier generation completes. Content fingerprints let
-    // queued callers reuse a successful snapshot while still retrying failures.
-    const queued = this.saveQueue.then(() => this.saveCurrent(options.requireSuccess === true));
-    this.saveQueue = queued.catch(() => {});
-    await queued;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.retryAttempts = 0;
+    try { await this.enqueueSave(); }
+    catch (error) { if (options.requireSuccess) throw error; }
   }
 
-  private async saveCurrent(requireSuccess: boolean): Promise<void> {
-    try {
-      await this.saveBm25Index(this.bm25.serialize());
-      if (this.vector) {
-        await this.saveVectorIndex(this.vector.serialize());
-      }
-    } catch (err) {
-      this.logFailure(err);
-      if (requireSuccess) throw err;
+  private enqueueSave(): Promise<void> {
+    if (!this.pendingSave) {
+      let resolve!: () => void;
+      let reject!: (error: unknown) => void;
+      const promise = new Promise<void>((ok, fail) => { resolve = ok; reject = fail; });
+      this.pendingSave = { promise, resolve, reject };
     }
+    const promise = this.pendingSave.promise;
+    if (!this.saving) void this.drainSaves();
+    return promise;
+  }
+
+  private async drainSaves(): Promise<void> {
+    this.saving = true;
+    try {
+      while (this.pendingSave) {
+        const batch = this.pendingSave;
+        this.pendingSave = null;
+        try {
+          await this.saveCurrent();
+          this.retryAttempts = 0;
+          batch.resolve();
+        } catch (error) {
+          this.logFailure(error);
+          batch.reject(error);
+          if (!this.pendingSave && this.retryAttempts < 3) {
+            this.reserveSave([5000, 15000, 30000][this.retryAttempts++]);
+          }
+        }
+      }
+    } finally { this.saving = false; }
+  }
+
+  private async saveCurrent(): Promise<void> {
+    await this.saveBm25Index(this.bm25.serialize());
+    if (this.vector) await this.saveVectorIndex(this.vector.serialize());
   }
 
   async load(): Promise<{
@@ -139,6 +164,7 @@ export class IndexPersistence {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -159,7 +185,7 @@ export class IndexPersistence {
       message,
       hint:
         code === "TIMEOUT"
-          ? "iii-engine state::set timed out; recent index updates remain in memory and will retry on the next debounce flush"
+          ? "iii-engine state::set timed out; recent index updates remain in memory; scheduled failures retry up to three times and later writes can retry again"
           : undefined,
     });
   }

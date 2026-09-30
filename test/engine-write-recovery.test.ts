@@ -11,6 +11,7 @@ import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
 import { applyGraphWritePlan, prepareGraphWritePlan, resumeGraphWritePlan } from "../src/state/graph-write-plan.js";
 import { archiveTargetAddress } from "../src/functions/archive.js";
+import { registerTimelineFunction } from "../src/functions/timeline.js";
 import { initializeCodexSourceCapture, captureCodexSourceWindow } from "../src/functions/codex-source-capture.js";
 import { readCodexWindow } from "../src/replay/codex-window.js";
 import type { CompressedObservation, Session } from "../src/types.js";
@@ -148,7 +149,10 @@ async function fixture(label: string) {
       }
     }
   }
-  return { root, connect, restart, close, events, arm(predicate: NonNullable<typeof crashAt>) { crashAt = predicate; }, label };
+  return { root, connect, restart, close, events, get sdk(): ISdk {
+    if (!sdk) throw Error("Isolated engine SDK is not connected");
+    return sdk;
+  }, arm(predicate: NonNullable<typeof crashAt>) { crashAt = predicate; }, label };
 }
 
 describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
@@ -204,7 +208,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
   afterAll(async () => {
     if (process.env.AGENTMEMORY_ENGINE_TEST_REPORT) await writeFile(process.env.AGENTMEMORY_ENGINE_TEST_REPORT,
       JSON.stringify({ engineVersion: "0.11.2", engineSha256: expectedHash, nodeVersion: process.version,
-        accepted: report.length === 15, passedCases: report.length, expectedCases: 15, cases: report, runs }, null, 2));
+        accepted: report.length === 16, passedCases: report.length, expectedCases: 16, cases: report, runs }, null, 2));
   });
   it.each(["intent", "node", "completion", "intent-removal"])("recovers graph assignments after %s commit and physical engine exit", async boundary => {
     const f = await fixture("graph-" + boundary);
@@ -280,6 +284,57 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
     } finally { await f.close(); }
   }, 90_000);
 
+  it("reads a full original timeline window through bounded native pages", async () => {
+    expect(requireDurability).toBe(true);
+    const f = await fixture("timeline-full-window-pages");
+    try {
+      const kv = await f.connect();
+      expect(kv.usesManagedState).toBe(true);
+      await kv.set(KV.sessions, "timeline-session", {
+        id: "timeline-session", project: "timeline-project", cwd: f.root,
+        startedAt: "2026-09-29T00:00:00Z", status: "completed", observationCount: 8,
+      } satisfies Session);
+      const narrative = "한\"\\\n".repeat(70_000);
+      for (let index = 0; index < 8; index++) {
+        const id = "timeline-" + index;
+        await kv.set(KV.observations("timeline-session"), id, {
+          id, sessionId: "timeline-session",
+          timestamp: new Date(Date.parse("2026-09-29T00:00:00Z") + index * 1000).toISOString(),
+          type: "file_edit", title: index === 0 ? "timeline-anchor" : id,
+          narrative, facts: [], concepts: [], files: [], importance: 5,
+        } satisfies CompressedObservation);
+      }
+      registerTimelineFunction(f.sdk, kv);
+      let offset = 0;
+      const ids: string[] = [];
+      let pages = 0;
+      do {
+        const page = await f.sdk.trigger({
+          function_id: "mem::timeline",
+          payload: { anchor: "timeline-anchor", project: "timeline-project",
+            before: 0, after: 7, offset, trackAccess: false },
+        }) as { entries: Array<{ observation: CompressedObservation }>;
+          offset: number; total: number; nextOffset: number | null };
+        const mcpEnvelope = JSON.stringify({ status_code: 200, body: {
+          content: [{ type: "text", text: JSON.stringify(page, null, 2) }],
+        } });
+        expect(Buffer.byteLength(mcpEnvelope, "utf8")).toBeLessThanOrEqual(2 * 1024 * 1024);
+        expect(page.total).toBe(8);
+        expect(page.offset).toBe(offset);
+        for (const entry of page.entries) {
+          ids.push(entry.observation.id);
+          expect(entry.observation.narrative).toBe(narrative);
+        }
+        pages++;
+        if (page.nextOffset === null) break;
+        expect(page.nextOffset).toBeGreaterThan(offset);
+        offset = page.nextOffset;
+      } while (true);
+      expect(pages).toBeGreaterThan(1);
+      expect(ids).toEqual(Array.from({ length: 8 }, (_, index) => "timeline-" + index));
+      report.push({ case: f.label, passed: true, pages });
+    } finally { await f.close(); }
+  }, 90_000);
   it.each(["observation", "checkpoint"])("recaptures native messages after %s commit and physical engine exit", async boundary => {
     const f = await fixture("native-" + boundary);
     try {

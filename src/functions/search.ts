@@ -1,3 +1,4 @@
+import type { AutomaticRetrievalPolicy } from "../state/hybrid-search.js";
 import type { ISdk } from 'iii-sdk'
 import type { CompactSearchResult, CompressedObservation, Memory, SearchResult, Session } from '../types.js'
 import { KV } from '../state/schema.js'
@@ -30,6 +31,7 @@ type HybridRanker = (
   query: string,
   limit: number,
   selection?: SearchCandidateSelection,
+  policy?: AutomaticRetrievalPolicy,
 ) => Promise<Array<{ observation: CompressedObservation; sessionId: string; combinedScore: number }>>
 let hybridRanker: HybridRanker | null = null
 
@@ -43,7 +45,7 @@ export function setHybridRanker(fn: HybridRanker | null): void {
 // launch their own rebuild and saturate the engine invocation pool. The
 // first query with an empty index starts one rebuild and shares its
 // promise; concurrent queries await the same rebuild instead of spawning
-// duplicates. The boot-time rebuild in index.ts is unaffected.
+// duplicates. Boot-time and request rebuilds share the same candidate.
 let rebuildPromise: Promise<number> | null = null
 
 let memoryIndexReady = false
@@ -106,9 +108,9 @@ export function scheduleIndexSave(): void {
 // even when persistence fails — callers must not treat a failed
 // flush as a fatal error on the delete itself (the KV delete already
 // committed before this is invoked).
-export async function flushIndexSave(options: { requireSuccess?: boolean } = {}): Promise<void> {
+export async function flushIndexSave(options: { requireSuccess?: boolean; reportFailure?: boolean } = {}): Promise<void> {
   if (options.requireSuccess && !indexPersistence) throw new Error("Index persistence is not configured");
-  await indexPersistence?.save(options);
+  await indexPersistence?.save(options.reportFailure ? { requireSuccess: true } : options);
 }
 
 // Hard cap on embedding input length. Most providers cap input around
@@ -151,6 +153,7 @@ export async function vectorIndexAddGuarded(
       return false
     }
     vi.add(id, sessionId, embedding)
+    scheduleIndexSave()
     return true
   } catch (err) {
     logger.warn("vector-index add: embed failed — skipping", {
@@ -180,9 +183,10 @@ export async function vectorIndexAddBatchGuarded(
     text: string
     context: { kind: "memory" | "observation" | "synthetic"; logId: string }
   }>,
+  target?: { vector: VectorIndex | null; provider: EmbeddingProvider | null },
 ): Promise<{ ok: number; fail: number }> {
-  const vi = vectorIndex
-  const ep = currentEmbeddingProvider
+  const vi = target ? target.vector : vectorIndex
+  const ep = target ? target.provider : currentEmbeddingProvider
   if (!vi || !ep || items.length === 0) return { ok: 0, fail: 0 }
 
   let embeddings: Float32Array[]
@@ -266,9 +270,10 @@ function getRebuildEmbedBatchSize(): number {
 export async function indexRecords(
   observations: CompressedObservation[],
   memories: Memory[],
+  options: { schedulePersistence?: boolean; target?: { keyword: SearchIndex; vector: VectorIndex | null; provider: EmbeddingProvider | null } } = {},
 ): Promise<number> {
-  const idx = getSearchIndex()
-  const vectorEnabled = Boolean(vectorIndex && currentEmbeddingProvider)
+  const idx = options.target?.keyword ?? getSearchIndex()
+  const vectorEnabled = options.target ? Boolean(options.target.vector && options.target.provider) : Boolean(vectorIndex && currentEmbeddingProvider)
   const batchSize = getRebuildEmbedBatchSize()
   type EmbedJob = {
     id: string
@@ -279,7 +284,7 @@ export async function indexRecords(
   const pending: EmbedJob[] = []
   const flush = async (): Promise<void> => {
     if (pending.length === 0) return
-    await vectorIndexAddBatchGuarded(pending)
+    await vectorIndexAddBatchGuarded(pending, options.target)
     pending.length = 0
   }
   const enqueue = async (job: EmbedJob): Promise<void> => {
@@ -313,64 +318,50 @@ export async function indexRecords(
     count++
   }
   await flush()
+  if (count > 0 && options.schedulePersistence !== false) scheduleIndexSave()
   return count
 }
 
-export async function rebuildIndex(kv: StateKV): Promise<number> {
-  const idx = getSearchIndex()
-  idx.clear()
-  memoryIndexReady = false
+export function rebuildIndex(kv: StateKV, options: { reuseVectors?: boolean; signal?: AbortSignal } = {}): Promise<number> {
+  if (!rebuildPromise) {
+    rebuildPromise = buildIndexCandidate(kv, options).finally(() => { rebuildPromise = null });
+  }
+  return rebuildPromise;
+}
 
-  // BM25 clear above wipes stale doc entries; the vector index has the
-  // symmetric concern — memories/observations deleted between runs
-  // would leave orphan embeddings here forever. Clear both before the
-  // repopulation loops run, so BM25 and vector stay in sync.
-  vectorIndex?.clear()
-
-  // Memories live in their own KV scope outside per-session observation
-  // scopes, so they need a separate walk. Without this, mem::remember
-  // entries vanish from BM25 on every restart even after the live-write
-  // fix in remember.ts.
-  let memories: Memory[] = []
-  let memoriesLoaded = false
+async function buildIndexCandidate(kv: StateKV, options: { reuseVectors?: boolean; signal?: AbortSignal }): Promise<number> {
+  const live = getSearchIndex();
+  const liveVector = vectorIndex;
+  const provider = currentEmbeddingProvider;
+  const keyword = new SearchIndex();
+  const vector = liveVector ? new VectorIndex() : null;
+  const keywordChanges = live.captureChanges();
+  let vectorChanges: ReturnType<VectorIndex["captureChanges"]> | undefined;
   try {
-    memories = await kv.list<Memory>(KV.memories)
-    memoriesLoaded = true
-  } catch (err) {
-    logger.warn('rebuildIndex: failed to load memories', {
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
-
-  const sessions = await kv.list<Session>(KV.sessions)
-  const failedSessions: string[] = []
-  // Index each session chunk as it loads instead of accumulating every
-  // observation first, so peak memory stays bounded to one chunk.
-  let indexed = 0
-  for (let batch = 0; batch < sessions.length; batch += 10) {
-    const chunk = sessions.slice(batch, batch + 10)
-    const results = await Promise.all(
-      chunk.map(async (s) => {
-        try {
-          return await kv.list<CompressedObservation>(KV.observations(s.id))
-        } catch {
-          failedSessions.push(s.id)
-          return [] as CompressedObservation[]
-        }
-      })
-    )
-    const chunkObs = results.flat()
-    if (chunkObs.length > 0) {
-      indexed += await indexRecords(chunkObs, [])
+    vectorChanges = liveVector?.captureChanges();
+    options.signal?.throwIfAborted();
+    const memories = await kv.list<Memory>(KV.memories);
+    const sessions = await kv.list<Session>(KV.sessions);
+    let indexed = 0;
+    const target = { keyword, vector, provider: options.reuseVectors ? null : provider };
+    for (let batch = 0; batch < sessions.length; batch += 10) {
+      const rows = await Promise.all(sessions.slice(batch, batch + 10).map(session =>
+        kv.list<CompressedObservation>(KV.observations(session.id))));
+      indexed += await indexRecords(rows.flat(), [], { schedulePersistence: false, target });
     }
-  }
-  if (failedSessions.length > 0) {
-    logger.warn('rebuildIndex: failed to load observations for sessions', { failedSessions })
-  }
-
-  indexed += await indexRecords([], memories)
-  if (memoriesLoaded) memoryIndexReady = true
-  return indexed
+    indexed += await indexRecords([], memories, { schedulePersistence: false, target });
+    options.signal?.throwIfAborted();
+    if (vectorIndex !== liveVector || currentEmbeddingProvider !== provider) throw new Error("Search configuration changed during rebuild");
+    keywordChanges.applyTo(keyword);
+    if (vector && options.reuseVectors) liveVector!.copyMatchingTo(vector, id => keyword.has(id));
+    if (vector) vectorChanges?.applyTo(vector, id => keyword.has(id));
+    keywordChanges.stop(); vectorChanges?.stop();
+    live.restoreFrom(keyword);
+    if (liveVector && vector) liveVector.restoreFrom(vector);
+    memoryIndexReady = true;
+    scheduleIndexSave();
+    return indexed;
+  } finally { keywordChanges.stop(); vectorChanges?.stop(); }
 }
 
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
@@ -387,6 +378,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       trackAccess?: boolean
       sourceKind?: "user" | "assistant"
       searchMode?: "keyword" | "hybrid"
+      retrievalPolicy?: "automatic"
     }) => {
       const idx = getSearchIndex()
 
@@ -395,6 +387,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         throw new Error('mem::search: query must be a non-empty string')
       }
       const query = data.query.trim()
+      if (data.retrievalPolicy !== undefined && data.retrievalPolicy !== "automatic") throw new Error("mem::search: retrievalPolicy must be automatic")
+      const retrieval: Record<string, string> | undefined = data.retrievalPolicy === "automatic"
+        ? { keyword: "available", vector: "not-requested", graph: "skipped-automatic" } : undefined
       if (data.searchMode !== undefined && !["keyword", "hybrid"].includes(data.searchMode)) {
         throw new Error('mem::search: searchMode must be keyword or hybrid')
       }
@@ -460,28 +455,13 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         tokenBudget = data.token_budget
       }
 
-      if (idx.size === 0) {
-        // Share one rebuild across concurrent cold-start queries so they
-        // don't each walk the whole corpus and saturate the pool.
-        if (!rebuildPromise) {
-          rebuildPromise = rebuildIndex(kv)
-            .then((count) => {
-              logger.info('Search index rebuilt', { entries: count })
-              return count
-            })
-            .catch((err) => {
-              logger.warn('Index rebuild failed', {
-                error: err instanceof Error ? err.message : String(err),
-              })
-              return 0
-            })
-            .finally(() => {
-              rebuildPromise = null
-            })
-        }
-        await rebuildPromise
+      if (idx.size === 0 && !retrieval) {
+        await rebuildIndex(kv).catch(error => logger.warn("Index rebuild failed", {
+          error: error instanceof Error ? error.message : String(error),
+        }));
       }
 
+      if (retrieval && (idx.size === 0 || !memoryIndexReady)) retrieval.keyword = "index-not-ready"
       const selection = createSearchCandidateSelection(kv, { project: projectFilter, cwd: cwdFilter, agentId: filterAgentId, sourceKind: data.sourceKind })
       const fetchLimit = effectiveLimit
       // Hybrid results carry the observation the ranker already loaded,
@@ -493,9 +473,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         score: number
         observation?: CompressedObservation
       }>
+      if (retrieval && !hybridRanker && data.searchMode !== "keyword") retrieval.vector = "unavailable"
       if (hybridRanker && data.searchMode !== "keyword") {
         try {
-          const hybrid = await hybridRanker(query, fetchLimit, selection)
+          const hybrid = await hybridRanker(query, fetchLimit, selection, retrieval ? { maxVectorScan: 4096, channels: retrieval } : undefined)
           results = hybrid.map((r) => ({
             obsId: r.observation.id,
             sessionId: r.sessionId,
@@ -503,6 +484,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             observation: r.observation,
           }))
         } catch (err) {
+          if (retrieval) retrieval.vector = "failed"
           logger.warn("hybrid ranking failed, falling back to keyword search", {
             error: err instanceof Error ? err.message : String(err),
           })
@@ -595,12 +577,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         for (const item of items) {
           const itemTokens = estimateTokens(item)
           if (used + itemTokens > tokenBudget) {
-            return { items: selected, used, truncated: selected.length < items.length }
+            continue
           }
           selected.push(item)
           used += itemTokens
         }
-        return { items: selected, used, truncated: false }
+        return { items: selected, used, truncated: selected.length < items.length }
       }
 
       if (format === 'compact') {
@@ -612,6 +594,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           score: r.score,
           timestamp: r.observation.timestamp,
           project: r.project,
+          sourceKind: observationSourceKind(r.observation) ?? "derived",
         }))
         const packed = applyTokenBudget(compactResults)
         return {
@@ -620,6 +603,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           tokens_used: packed.used,
           tokens_budget: tokenBudget,
           truncated: packed.truncated,
+          ...(retrieval ? { retrieval } : {}),
         }
       }
 
@@ -644,6 +628,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           tokens_used: packed.used,
           tokens_budget: tokenBudget,
           truncated: packed.truncated,
+          ...(retrieval ? { retrieval } : {}),
         }
       }
 
@@ -662,6 +647,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         tokens_used: packed.used,
         tokens_budget: tokenBudget,
         truncated: packed.truncated,
+        ...(retrieval ? { retrieval } : {}),
       }
     }
   )

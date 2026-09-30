@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.11`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.12`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -91,12 +91,18 @@ The current evidence is deliberately narrower than a production guarantee:
   managed payload manifest; and
 - this remains a Technical Preview, not a general production-readiness claim.
 
+## Upstream update preparation
+
+Before integrating a new upstream release, consult the [fixed main comparison and
+selective backport decisions](UPSTREAM_REVIEW.md). It distinguishes source preparation
+from installed qualification and preserves the current engine/data contracts.
+
 ## Preview scope
 
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.11`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.12`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -187,7 +193,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.11 -OutputDirectory D:\staging\npm-preview11
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.12 -OutputDirectory D:\staging\npm-preview11
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -213,8 +219,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.11\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.11 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.12\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.12 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -920,41 +926,58 @@ reindexing preserves posting and tie order. Previous-shard cleanup remains
 sequential and records every attempted target and outcome in one grouped audit.
 This changes neither stored formats nor the canonical source/graph lifecycle.
 
-The managed user-prompt hook searches the exact current project first. When no
-local user-original candidate covers the concrete query terms, or the request
-asks for history, it requests user evidence with `sourceKind: "user"` and other
-records across `*` within the same time budget. Local lexical coverage remains a
-candidate test, never proof that all aliases/corrections were checked. It uses REST
-`searchMode: "keyword"`; the separate graph lookup
-already supplies graph context, so automatic recall does not repeat the full
-hybrid graph traversal. Omitted `searchMode` keeps ordinary hybrid search.
-This discovers requirements stored before project moves without assigning unrelated records to
-the current project or hard-coding aliases. A failed local read does not silently
-broaden scope; a failed historical lookup preserves local evidence and marks
-history unavailable. Graph lookup retains its current-project-first fallback,
-and graph succession expands through each node's exact source project.
-Automatic recall and graph context require a
-concrete topic, filename, or identifier shared with the effective request;
-product names, generic follow-ups, search score and project membership alone
-do not qualify. Recall reserves current-project evidence, then selects original
-user observations with newer source dates first; retrieved old text cannot
-override the current user request. It labels user versus derived excerpts,
-requires applicability/correction checks and original-source expansion before
-behavior changes, and preserves the source project, record ID and timestamp
-(or an explicit unknown time). Topic-matching paragraphs can be excerpted from
-longer messages. These are limited candidates, not a complete or authoritative
-requirements list; contradictory requirements still need source review.
-Repeated scoped record IDs are emitted once. Automatic candidate
-searches pass the existing `trackAccess: false` option through REST to StateModule
-search, so merely considering a result does not strengthen its access-based
-retention. Explicit searches retain their default access tracking.
-When a follow-up omits its topic, the hook uses the recent actual user task in
-the same session. New qualifiers are retained even alongside concrete identifiers.
-It first reads at most the last 1 MiB of the canonical host transcript, verifying
-the session header and source-root boundary. A small hook plan binds the query
-to the prior user prompt; incomplete/oversized plans cannot qualify for reuse.
-Without that plan, actual user prompts supply context, with at most two existing
-observation-page reads of 12 rows as a fallback (base 3,000 ms each).
+The managed user-prompt hook searches the exact current project first, then
+performs bounded user-history and general discovery across `*` when current
+evidence is inadequate or history is requested. Three or more distinct current
+user candidates with no truncated/degraded response and no historical request
+permit exact local expansion without repeating global discovery. This is a
+bounded adequacy heuristic, not semantic verification. It uses compact
+keyword results with source role, title, exact project, session and observation
+IDs under a 1,200 estimated-token discovery budget; full narratives do not
+consume that discovery budget. It selects at most eight source pairs and expands
+originals through authenticated `/smart-search` calls in each exact source
+project. `exactExpansion: true` requires observation/session pairs and never
+searches other sessions when one is missing. Automatic reads pass
+`trackAccess: false` through both REST search and expansion. Nothing rewrites or
+persists the recalled originals.
+
+When keyword discovery finds no user candidates or the request asks for history,
+the hook conditionally uses existing hybrid search with
+`retrievalPolicy: "automatic"`. This additive REST policy skips vector scans above
+4,096 indexed entries, graph traversal/expansion and provider reranking. It does
+not start embedding providers or Qwen; absent embeddings and provider failures
+leave lexical evidence usable while reporting unavailable/degraded channels.
+An automatic cold read does not initiate a full index rebuild. Omitted policies
+keep existing manual hybrid and expansion behavior.
+
+A failed current-project read does not silently broaden scope. Discovery,
+expansion, filtered/missing sources and skipped semantic channels are reported as
+partial coverage; successful originals from another source remain usable.
+No returned matches is a bounded result, never proof that no history exists.
+Keyword originals need a concrete topical match; semantic originals may remain
+labelled, unverified candidates without local word overlap. Source projects are
+never reassigned through fuzzy aliases. Selection gives user originals priority,
+retains established older requirements alongside later corrections, and spreads
+source projects before filling by relevance. Distinct user requirements do not
+share the derived-text cap of two per project. Current user instructions win;
+selection and source validation do not establish semantic applicability or a
+complete requirements list.
+
+Original narratives are emitted whole when they fit. A source that cannot fit
+receives an explicit `needs-expansion` pointer containing the exact project,
+observation and session IDs rather than a clipped sentence that could lose a
+negation or qualification. Derived reports remain labelled separately. Duplicate
+source pairs are emitted once. Graph lookup retains its current-project-first
+fallback and expands succession through each node's exact source project.
+When a follow-up gives only scope or an operation, the hook keeps the recent
+concrete user topic in the same session and retains intervening scope, history,
+status, and correction instructions. Generic service names and operational words
+alone do not qualify recalled text or graph nodes as topical evidence. It reads
+at most the last 1 MiB of the canonical host transcript, verifying the session
+header and source-root boundary. A small hook plan must bind to the prior user
+prompt and retain a concrete subject; a generic or incomplete plan falls back
+to actual user prompts, then to at most two existing observation-page reads of
+12 rows (base 3,000 ms each). Explicit new topics remain independent.
 
 Only full `expanded` observation results in tool outputs qualify as retained
 originals. User quotations, compact results, assistant summaries and compacted
@@ -968,15 +991,15 @@ No separate topic/evidence cache or model call is introduced. Data validation is
 not a guarantee that a model understood or correctly applied the originals.
 Explicit MCP recall remains available. Graph neighbors need their own topic
 match, except for explicit supersession links preserving a matched decision's
-replacement and historical status. Local and fallback candidate queries share
-a base 5,000 ms retrieval budget (at most 3,000 ms for the current project).
-Original-text recall runs before current input storage; graph and curation reads
-follow those two essential stages. Recall normally has up to 650 characters;
-two or more distinct topical user originals permit up to 1,150. Graph context
-stays at 500 and curation keeps its reserved budget. Total injected context is
-normally capped at 2,300 characters, or at 2,800 when the longer original-source
-excerpts actually use the extra room. Duplicate text and unrelated records do
-not justify expansion. These are character limits, not model-token counts.
+replacement and historical status. Local and fallback discovery and original expansion share a base 5,000 ms retrieval
+budget. Discovery reserves room for expansion within that budget and the shared
+hook deadline. Original recall runs before current input storage; graph and
+curation reads follow those two essential stages. Evidence uses the smallest
+adequate ceiling of 512, 1,024 or 2,048 estimated tokens (characters divided by
+three, labelled as an estimate). This is an adaptive allowance, not a fixed
+maximum body on every turn. The existing host limit is 7,600 characters including
+the turn wrapper, bounded plan, recall, graph and curation. Assembly preserves
+recall first and admits optional context only if the complete block fits.
 All prompt work shares one deadline defined in `config/hook-spec.json`.
 A lightweight `/graph/stats` read sets a scale of
 `max(1, (totalNodes + totalEdges) / 80000)`, capped at five. The 12-second base
@@ -1295,6 +1318,28 @@ The manifest records the Rust/Cargo, MSVC and Windows SDK versions and Cargo.loc
 hash used for the pinned binary. The package builder verifies the binary hash and
 normalized-LF patch hash and includes the patch and license in the payload. Source
 reconstruction is documented; bit-for-bit rebuild reproducibility is not claimed.
+
+#### Bounded timeline reads
+
+Managed timeline reads enumerate sessions and observation scopes through
+`state::list_page` with native offsets. The reader checks page keys and counts
+and fails if a page is unavailable or changes during traversal; it never
+substitutes a whole-scope list. Portable engines retain the existing list
+path. Matching and ordering use lightweight references, and selected original
+observations are fetched and checked before the response. This is not an
+atomic snapshot across requests.
+
+`memory_timeline` and `POST /agentmemory/timeline` accept non-negative safe
+integer `before`, `after`, and `offset` values. The defaults are 5, 5, and 0;
+zero is valid. The full requested before/after window is preserved. Each
+response returns at most 100 complete observations and stays within 2 MiB
+of serialized JSON, including the MCP text envelope. Continue at `nextOffset`
+until it is null; `total` is the full window count and `anchorIndex` is null
+on pages without the anchor. A single original too large for one response
+fails with its session and observation ID. Exact `project` values are trimmed,
+`*` intentionally spans projects, and omitting the field retains the existing
+all-project behavior. Page order is timestamp then stable ID; concurrent
+source changes can invalidate a traversal and require a new read.
 
 #### Bounded graph-index recovery
 

@@ -165,6 +165,12 @@ describe("access-tracker", () => {
     expect(kv.store.get("mem:access")?.has("mem_keep")).toBe(true);
   });
 
+  it("deleteAccessLog can expose a cleanup failure when explicitly requested", async () => {
+    const { deleteAccessLog } = await import("../src/functions/access-tracker.js");
+    const failing = { delete: async () => { throw Error("cleanup unavailable"); } };
+    await expect(deleteAccessLog(failing as never, "memory", { requireSuccess: true })).rejects.toThrow("cleanup unavailable");
+  });
+
   it("deleteAccessLog swallows kv.delete errors", async () => {
     const { deleteAccessLog } = await import(
       "../src/functions/access-tracker.js"

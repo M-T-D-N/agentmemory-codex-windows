@@ -86,8 +86,17 @@ export async function runPowerShell(script, named) {
   });
 }
 
-export function powershellEnvironment() {
-  return { ...process.env, PSModulePath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') };
+export function powershellEnvironment(base = process.env) {
+  const environment = {};
+  for (const [name, value] of Object.entries(base)) {
+    const key = name.toUpperCase();
+    if (Object.hasOwn(environment, key) && environment[key] !== value) {
+      throw Error(`Conflicting Windows environment key: ${key}`);
+    }
+    environment[key] = value;
+  }
+  environment.PSMODULEPATH = path.join(environment.SYSTEMROOT || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+  return environment;
 }
 
 export async function main(args = process.argv.slice(2)) {

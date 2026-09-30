@@ -7,6 +7,8 @@ vi.mock("../src/logger.js", () => ({
 import { registerTimelineFunction } from "../src/functions/timeline.js";
 import type { CompressedObservation, Session, TimelineEntry } from "../src/types.js";
 
+type TimelineResponse = { entries: TimelineEntry[]; anchorIndex: number | null; offset: number; total: number; nextOffset: number | null; truncated: boolean };
+
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
@@ -21,10 +23,21 @@ function mockKV() {
     delete: async (scope: string, key: string): Promise<void> => {
       store.get(scope)?.delete(key);
     },
-    list: async <T>(scope: string): Promise<T[]> => {
+    usesManagedState: false,
+    list: vi.fn(async <T>(scope: string): Promise<T[]> => {
       const entries = store.get(scope);
       return entries ? (Array.from(entries.values()) as T[]) : [];
-    },
+    }),
+    listPage: vi.fn(async <T>(scope: string, offset = 0): Promise<{
+      entries: Array<{ key: string; value: T }>;
+      total: number;
+      next_offset: number | null;
+    }> => {
+      const rows = Array.from(store.get(scope)?.entries() ?? []) as Array<[string, T]>;
+      const entries = rows.slice(offset, offset + 2).map(([key, value]) => ({ key, value }));
+      const next = offset + entries.length;
+      return { entries, total: rows.length, next_offset: next < rows.length ? next : null };
+    }),
   };
 }
 
@@ -191,5 +204,166 @@ describe("Timeline Function", () => {
     })) as { entries: TimelineEntry[] };
 
     expect(result.entries).toEqual([]);
+  });
+  it("accepts zero before and after and validates direct numeric inputs", async () => {
+    const result = await sdk.trigger("mem::timeline", {
+      anchor: "2026-02-01T12:00:00Z", before: 0, after: 0, trackAccess: false,
+    }) as TimelineResponse;
+    expect(result.entries.map(entry => entry.observation.id)).toEqual(["obs_3"]);
+    expect(result).toMatchObject({ anchorIndex: 0, offset: 0, total: 1, nextOffset: null, truncated: false });
+    for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0", null]) {
+      await expect(sdk.trigger("mem::timeline", { anchor: "Third", before: value }))
+        .rejects.toThrow("before must be a non-negative safe integer");
+    }
+  });
+
+  it("uses the exact latest keyword match when other rows share its timestamp", async () => {
+    await kv.set("mem:obs:ses_1", "obs_z", makeObs("obs_z", "2026-02-01T12:00:00Z", "Needle"));
+    await kv.set("mem:obs:ses_1", "obs_a", makeObs("obs_a", "2026-02-01T12:00:00Z", "Other"));
+    const result = await sdk.trigger("mem::timeline", {
+      anchor: "Needle", before: 1, after: 0, trackAccess: false,
+    }) as TimelineResponse;
+    expect(result.entries.map(entry => [entry.observation.id, entry.relativePosition]))
+      .toEqual([["obs_a", -1], ["obs_z", 0]]);
+    expect(result.anchorIndex).toBe(1);
+  });
+
+  it("walks the full window in count-bounded pages without lost, duplicate, or shortened observations", async () => {
+    for (let index = 0; index < 149; index++) {
+      const id = "later_" + String(index).padStart(3, "0");
+      await kv.set("mem:obs:ses_1", id, makeObs(id,
+        new Date(Date.parse("2026-02-02T00:00:00Z") + index * 1000).toISOString(), id));
+    }
+    kv.usesManagedState = true;
+    kv.list.mockImplementation(async () => { throw Error("managed full list forbidden"); });
+    const seen: string[] = [];
+    let offset = 0;
+    do {
+      const page = await sdk.trigger("mem::timeline", {
+        anchor: "2026-02-01T10:00:00Z", before: 0, after: 153, offset, trackAccess: false,
+      }) as TimelineResponse;
+      expect(page.total).toBe(154);
+      expect(page.offset).toBe(offset);
+      expect(page.entries.length).toBeLessThanOrEqual(100);
+      expect(page.anchorIndex).toBe(offset === 0 ? 0 : null);
+      expect(page.entries.map(entry => entry.relativePosition))
+        .toEqual(Array.from({ length: page.entries.length }, (_, index) => offset + index));
+      seen.push(...page.entries.map(entry => entry.observation.id));
+      if (page.nextOffset === null) break;
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+    } while (true);
+    expect(seen).toHaveLength(154);
+    expect(new Set(seen).size).toBe(154);
+    expect(seen[0]).toBe("obs_1");
+    expect(seen.at(-1)).toBe("later_148");
+    expect(kv.list).not.toHaveBeenCalled();
+    expect(kv.listPage).toHaveBeenCalled();
+  });
+
+  it("keeps UTF-8 and escape-heavy originals within the final serialized MCP response limit", async () => {
+    const narrative = "한\"\\\n".repeat(110_000);
+    for (let index = 0; index < 4; index++) {
+      const id = "large_" + index;
+      await kv.set("mem:obs:ses_1", id, {
+        ...makeObs(id, new Date(Date.parse("2026-02-03T00:00:00Z") + index * 1000).toISOString(), id),
+        narrative,
+      });
+    }
+    let offset = 0;
+    const seen: string[] = [];
+    do {
+      const page = await sdk.trigger("mem::timeline", {
+        anchor: "large_0", before: 0, after: 3, offset, trackAccess: false,
+      }) as TimelineResponse;
+      const serializedMcp = JSON.stringify({
+        status_code: 200, body: { content: [{ type: "text", text: JSON.stringify(page, null, 2) }] },
+      });
+      expect(Buffer.byteLength(serializedMcp, "utf8")).toBeLessThanOrEqual(2 * 1024 * 1024);
+      for (const entry of page.entries) {
+        seen.push(entry.observation.id);
+        expect(entry.observation.narrative).toBe(narrative);
+      }
+      if (page.nextOffset === null) break;
+      offset = page.nextOffset;
+    } while (true);
+    expect(seen).toEqual(["large_0", "large_1", "large_2", "large_3"]);
+  });
+
+  it("fails with the exact ID when one original cannot fit a response", async () => {
+    await kv.set("mem:obs:ses_1", "oversized", {
+      ...makeObs("oversized", "2026-02-03T00:00:00Z", "oversized"),
+      narrative: "\"".repeat(600_000),
+    });
+    await expect(sdk.trigger("mem::timeline", {
+      anchor: "oversized", before: 0, after: 0, trackAccess: false,
+    })).rejects.toThrow("Timeline entry exceeds the 2 MiB response limit: ses_1/oversized");
+  });
+
+  it("does not use a full-list fallback when managed pages fail or their count changes", async () => {
+    kv.usesManagedState = true;
+    kv.list.mockImplementation(async () => { throw Error("managed full list forbidden"); });
+    kv.listPage.mockImplementationOnce(async () => { throw Error("list page unavailable"); });
+    await expect(sdk.trigger("mem::timeline", { anchor: "Third", trackAccess: false }))
+      .rejects.toThrow("list page unavailable");
+    expect(kv.list).not.toHaveBeenCalled();
+
+    const actualPage = kv.listPage;
+    kv.listPage = vi.fn(async <T>(scope: string, offset = 0) => {
+      const page = await actualPage<T>(scope, offset);
+      return scope === "mem:obs:ses_1" && offset > 0
+        ? { ...page, total: page.total + 1 }
+        : page;
+    });
+    await expect(sdk.trigger("mem::timeline", { anchor: "Third", trackAccess: false }))
+      .rejects.toThrow("Timeline source changed during page read");
+    expect(kv.list).not.toHaveBeenCalled();
+  });
+
+  it("rejects selected rows changed after enumeration", async () => {
+    const originalGet = kv.get;
+    kv.get = async <T>(scope: string, key: string): Promise<T | null> => {
+      const row = await originalGet<T>(scope, key);
+      return scope === "mem:obs:ses_1" && key === "obs_3" && row
+        ? { ...(row as object), narrative: "changed" } as T : row;
+    };
+    await expect(sdk.trigger("mem::timeline", {
+      anchor: "Third", before: 0, after: 0, trackAccess: false,
+    })).rejects.toThrow("Timeline selected observation changed: ses_1/obs_3");
+  });
+
+  it("honors exact trimmed project, explicit all-project scope, and omitted scope", async () => {
+    await kv.set("mem:sessions", "ses_2", {
+      id: "ses_2", project: "other-project", cwd: "/other", startedAt: "2026-02-01T00:00:00Z",
+      status: "completed", observationCount: 1,
+    } satisfies Session);
+    await kv.set("mem:obs:ses_2", "other", {
+      ...makeObs("other", "2026-02-01T15:00:00Z", "Other project"),
+      sessionId: "ses_2",
+    });
+    const query = { anchor: "2026-02-01T12:00:00Z", before: 10, after: 10, trackAccess: false };
+    const exact = await sdk.trigger("mem::timeline", { ...query, project: " my-project " }) as TimelineResponse;
+    const all = await sdk.trigger("mem::timeline", { ...query, project: "*" }) as TimelineResponse;
+    const omitted = await sdk.trigger("mem::timeline", query) as TimelineResponse;
+    expect(exact.entries).toHaveLength(5);
+    expect(all.entries).toHaveLength(6);
+    expect(omitted.entries).toHaveLength(6);
+    await expect(sdk.trigger("mem::timeline", { ...query, project: " " }))
+      .rejects.toThrow("project must be a non-empty string");
+  });
+
+  it.each([false, true])("ignores session-end-only legacy rows without inventing a session (managed=%s)", async managed => {
+    kv.usesManagedState = managed;
+    await kv.set("mem:sessions", "ended-before-start", { status: "completed", endedAt: "2026-02-01T10:00:00Z" });
+    const result = await sdk.trigger("mem::timeline", { project: "my-project", anchor: "Third", before: 0, after: 0, trackAccess: false }) as TimelineResponse;
+    expect(result.entries.map(entry => entry.observation.id)).toEqual(["obs_3"]);
+    expect(await kv.get("mem:sessions", "ended-before-start")).toEqual({ status: "completed", endedAt: "2026-02-01T10:00:00Z" });
+  });
+
+  it("still rejects a managed session row whose declared identity conflicts with its key", async () => {
+    kv.usesManagedState = true;
+    await kv.set("mem:sessions", "conflicting-key", { id: "other-id", project: "my-project", status: "completed", endedAt: "2026-02-01T10:00:00Z" });
+    await expect(sdk.trigger("mem::timeline", { project: "my-project", anchor: "Third", trackAccess: false }))
+      .rejects.toThrow("Timeline source has an invalid or duplicate key");
   });
 });

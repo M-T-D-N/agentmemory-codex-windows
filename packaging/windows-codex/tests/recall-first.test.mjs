@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { recallRequestText, recallQuery, recallBypass, recallForTurn, retrievalPrompt, reuseRecall, boundedAdditionalContext, turnRecallContext } from "../hooks/codex-turn.mjs";
+import { formatRecallContext, recallRequestText, recallQuery, recallBypass, recallForTurn, retrievalPrompt, reuseRecall, boundedAdditionalContext, turnRecallContext } from "../hooks/codex-turn.mjs";
 import { parseRecallTranscript, readRecallTranscript, recallPlanContext, promptDigest } from "../hooks/codex-recall-evidence.mjs";
 
 const source = { obsId: "original-user", sessionId: "old-session", project: "billing", observation: {
@@ -107,7 +107,7 @@ test("transcript read is bounded and confined to the active canonical session", 
 
 test("required recall context survives optional graph and curation budget pressure", () => {
   const recall = "r".repeat(2400);
-  assert.equal(boundedAdditionalContext("c".repeat(1000), recall, "g".repeat(500)), recall);
+  assert.equal(boundedAdditionalContext("c".repeat(8000), recall, "g".repeat(8000)), recall);
 });
 
 test("identifier queries keep latest corrections and fresh plans invalidate earlier source eligibility", async () => {
@@ -130,7 +130,7 @@ test("oversized or escape-heavy plans abstain without truncating task identity o
     assert.ok(tag.length < 400);
     const recall = turnRecallContext({status:"candidates",context:"r".repeat(1150)},"billing","turn",long,long);
     const combined = boundedAdditionalContext("c".repeat(1000),recall,"g".repeat(500));
-    assert.ok(combined.length <= 2800);
+    assert.ok(combined.length <= 7600);
     assert.match(combined,/status="candidates"/);
   }
 });
@@ -144,32 +144,126 @@ test("an incomplete plan falls back to actual user text including intervening co
   assert.match(text, /행별 반올림/);
 });
 
-test("a relevant local original avoids unconditional cross-project searches", async () => {
+test("a relevant local original still performs bounded user history discovery", async () => {
   const original = globalThis.fetch, calls = [];
-  globalThis.fetch = async (_url, options) => {
-    calls.push(JSON.parse(options.body));
-    return new Response(JSON.stringify({ results: [{project: "billing", observation: {
-      id: "original", title: "prompt_submit", narrative: "Keep invoice rounding exact until the final total.",
-    }}] }));
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body); calls.push([String(url), body]);
+    return new Response(JSON.stringify(body.expandIds ? {mode: "expanded", results: [source], truncated: false}
+      : {format: "compact", results: [{project: "billing", obsId: source.obsId, sessionId: source.sessionId, title: "prompt_submit", sourceKind: "user"}], truncated: false}));
   };
   try {
     assert.equal((await recallForTurn("invoice rounding", "billing")).status, "candidates");
-    assert.equal(calls.length, 1);
+    assert.deepEqual(calls.filter(([url]) => url.endsWith("/search")).map(([, body]) => body.project), ["billing", "*", "*"]);
+    assert.deepEqual(calls.at(-1)[1].expandIds, [{obsId: source.obsId, sessionId: source.sessionId}]);
   } finally { globalThis.fetch = original; }
 });
 
 test("optional history failure is partial recall, not total unavailability", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async (_url, options) => {
-    if (JSON.parse(options.body).project === "*") throw Error("optional history offline");
-    return new Response(JSON.stringify({results: [{project: "billing", observation: {
-      id: "summary", title: "assistant_response", narrative: "Invoice rounding changed.",
-    }}]}));
+    const body = JSON.parse(options.body);
+    if (body.project === "*") throw Error("optional history offline");
+    return new Response(JSON.stringify(body.expandIds ? {mode: "expanded", results: [source], truncated: false}
+      : {format: "compact", results: [{project: "billing", obsId: source.obsId, sessionId: source.sessionId, title: "prompt_submit", sourceKind: "user"}], truncated: false}));
   };
   try {
     const result = await recallForTurn("invoice rounding", "billing");
     assert.equal(result.status, "partial");
-    assert.match(result.context, /summary/);
+    assert.match(result.context, /original-user/);
+  } finally { globalThis.fetch = original; }
+});
+
+test("scope-only followups keep the concrete user subject and intervening corrections", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => { throw Error("transcript context should avoid fallback reads"); };
+  const chain = [
+    "내가 욕하기 시작하는 순간을 에이전트메모리로 확인하고 사용자가 왜 그러는건지 생각",
+    "모든순간을 전부다 나열하고 분석 진행",
+    "과거의 문제에서 도출한 내용을 토대로 뭘 어떻게 수정해야할까?",
+    "권장안은?",
+    "현재 에이전트메모리 현황을 기반으로 재분석",
+    "권장안대로 골을 설정하고 작업 진행",
+  ];
+  try {
+    for (let index = 1; index < chain.length; index++) {
+      const prior = chain[index - 1];
+      const degradedPlan = messageRow("developer", recallPlanContext("billing", prior, prior));
+      const transcript = parseRecallTranscript([
+        ...chain.slice(0, index).map(prompt => messageRow("user", prompt)),
+        degradedPlan,
+      ], text => text);
+      const effective = await retrievalPrompt(chain[index], "billing", "session", transcript);
+      assert.match(effective, /욕하기/, chain[index]);
+      assert.match(effective, /사용자/, chain[index]);
+      if (index >= 3) assert.match(effective, /과거의 문제에서 도출한/, chain[index]);
+      if (index >= 4) assert.match(effective, /현재 에이전트메모리 현황을 기반으로 재분석/, chain[index]);
+    }
+    for (const prompt of ["추천안은?", "현재 현황을 기반으로 재분석해줘", "모든 순간을 나열해줘"]) {
+      const onlyTopic = parseRecallTranscript([messageRow("user", chain[0])], text => text);
+      const effective = await retrievalPrompt(prompt, "billing", "session", onlyTopic);
+      assert.match(effective, /욕하기/, prompt);
+    }
+    const contaminatedPlan = parseRecallTranscript([
+      messageRow("user", chain[0]),
+      messageRow("user", "권장안은?"),
+      messageRow("developer", recallPlanContext("billing",
+        "에이전트메모리 게임 GPU 욕하기 설정", "권장안은?")),
+    ], text => text);
+    const cleanQuery = await retrievalPrompt("현재 현황을 기반으로 재분석해줘", "billing", "session", contaminatedPlan);
+    assert.match(cleanQuery, /사용자가 왜 그러는건지/);
+    assert.doesNotMatch(cleanQuery, /게임 GPU/);
+    const corrected = parseRecallTranscript([
+      messageRow("user", "invoice rounding 정책을 검토해"),
+      messageRow("user", "이번 수정은 총합 대신 행별 반올림으로 바꿔"),
+      messageRow("user", "이번 수정은 세금 항목을 제외해"),
+      messageRow("developer", recallPlanContext("billing", "권장안은?", "이번 수정은 세금 항목을 제외해")),
+    ], text => text);
+    const query = await retrievalPrompt("권장안은?", "billing", "session", corrected);
+    assert.match(query, /invoice rounding/);
+    assert.match(query, /행별 반올림/);
+    assert.match(query, /세금 항목/);
+  } finally { globalThis.fetch = original; }
+});
+
+test("canonical fallback ignores host events and stored current-prompt whitespace", async () => {
+  const original = globalThis.fetch;
+  const prior = [
+    "내가 욕하기 시작하는 순간을 에이전트메모리로 확인하고 사용자가 왜 그러는건지 생각",
+    "모든순간을 전부다 나열하고 분석 진행",
+    "과거의 문제에서 도출한 내용을 토대로 뭘 어떻게 수정해야할까?",
+    "권장안은?",
+    "현재 에이전트메모리 현황을 기반으로 재분석",
+  ];
+  const current = "권장안대로 골을 설정하고 작업 진행";
+  const host = '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>';
+  const prompts = [...prior, host, current + "\n"];
+  const observations = prompts.map((narrative, index) => ({
+    id: "prompt-" + index, sessionId: "session", project: "billing", title: "prompt_submit",
+    narrative, timestamp: new Date(Date.parse("2026-09-27T00:00:00Z") + index * 1000).toISOString(),
+  }));
+  for (let index = 0; index < 4; index++) observations.push({
+    id: "assistant-" + index, sessionId: "session", project: "billing", title: "assistant_response",
+    narrative: "status", timestamp: new Date(Date.parse("2026-09-26T00:00:00Z") + index * 1000).toISOString(),
+  });
+  globalThis.fetch = async () => new Response(JSON.stringify({ total: 11, observations }));
+  try {
+    const query = await retrievalPrompt(current, "billing", "session", { users: [], plan: null });
+    assert.match(query, /욕하기/);
+    assert.match(query, /과거의 문제에서 도출한/);
+    assert.match(query, /현재 에이전트메모리 현황을 기반으로 재분석/);
+    assert.doesNotMatch(query, /external_codex_apps_open_page/);
+    assert.equal(query.split(current).length - 1, 1);
+  } finally { globalThis.fetch = original; }
+});
+test("new concrete topics stay independent and missing history preserves the current request", async () => {
+  const original = globalThis.fetch;
+  const transcript = parseRecallTranscript([messageRow("user", "invoice rounding 정책을 검토해")], text => text);
+  globalThis.fetch = async () => { throw Error("offline"); };
+  try {
+    for (const prompt of ["canvas labels 정책", "새 프로젝트 결제 오류 현황 분석", "Qwen GPU 메모리 사용량 분석"])
+      assert.equal(await retrievalPrompt(prompt, "billing", "session", transcript), prompt);
+    for (const prompt of ["권장안은?", "현재 에이전트메모리 현황을 기반으로 재분석"])
+      assert.equal(await retrievalPrompt(prompt, "billing", "session", {users: [], plan: null}), prompt);
   } finally { globalThis.fetch = original; }
 });
 
@@ -185,34 +279,34 @@ test("deictic followups inherit the real subject despite incidental topic words"
 });
 
 test("first-turn projectless questions retrieve source-labelled prior results across projects", async () => {
-  const original = globalThis.fetch;
-  const calls = [];
+  const original = globalThis.fetch, calls = [];
+  const entry = {project:"previous-project", obsId:"old-deployment", sessionId:"old-session", observation: {
+    id:"old-deployment", title:"assistant_response", timestamp:"2026-08-01", narrative:"Deployed https://preview.tenant-maple-427.example.test successfully."}};
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body); calls.push(body);
-    return new Response(JSON.stringify({ results: body.project === "*" && !body.sourceKind ? [{
-      project: "previous-project", score: 1, observation: {
-        id: "old-deployment", title: "assistant_response", timestamp: "2026-08-01",
-        narrative: "Deployed https://preview.tenant-maple-427.example.test successfully.",
-      },
-    }] : [] }));
+    return new Response(JSON.stringify(body.expandIds ? {mode:"expanded", results:[entry], truncated:false}
+      : {format:"compact", results:body.project === "*" && !body.sourceKind ? [{...entry, observation:undefined}] : [], truncated:false}));
   };
   try {
     const result = await recallForTurn("site 도구가 왜 tenant-maple-427 값을 반환하지? 넣은 적 없는데", "new-chat");
     assert.equal(result.status, "candidates");
     assert.match(result.context, /previous-project.*old-deployment.*derived:/s);
     assert.match(result.context, /Current user request wins/);
-    assert.equal(calls.length, 3);
-    assert.ok(calls.every(call => call.query.includes("tenant-maple-427") && call.trackAccess === false));
+    assert.equal(calls.filter(call=>!call.expandIds).length, 4);
+    assert.ok(calls.filter(call=>!call.expandIds).every(call=>call.query.includes("tenant-maple-427") && call.trackAccess === false));
     assert.ok(calls.some(call => call.sourceKind === "user"));
+    assert.deepEqual(calls.at(-1).expandIds, [{obsId:entry.obsId,sessionId:entry.sessionId}]);
   } finally { globalThis.fetch = original; }
 });
 
-test("empty results and failed reads remain distinct even on a short continuation", async () => {
+test("missing subjects, empty results and failed reads remain distinct", async () => {
   const original = globalThis.fetch; let calls = 0;
-  globalThis.fetch = async () => { calls++; return new Response(JSON.stringify({ results: [] })); };
+  globalThis.fetch = async () => { calls++; return new Response(JSON.stringify({format:"compact", results:[], truncated:false})); };
   try {
-    assert.equal((await recallForTurn("진행", "new-chat")).status, "no-match-in-results");
-    assert.equal(calls, 3);
+    assert.equal((await recallForTurn("진행", "new-chat")).status, "needs-query");
+    assert.equal(calls, 0);
+    assert.equal((await recallForTurn("invoice rounding", "new-chat")).status, "no-match-in-results");
+    assert.equal(calls, 4);
     globalThis.fetch = async () => { throw Error("offline"); };
     assert.equal((await recallForTurn("a concrete request", "new-chat")).status, "unavailable");
   } finally { globalThis.fetch = original; }
@@ -256,7 +350,7 @@ test("real prompt handler reports dependency-limited failure, permits no-match, 
     globalThis.fetch = async (url, options) => {
       calls.push(String(url));
       if (offline) throw Error("fixture offline");
-      return new Response(JSON.stringify(String(url).endsWith("/search") ? { results: [] }
+      return new Response(JSON.stringify(String(url).endsWith("/search") ? { format: "compact", results: [], truncated: false }
         : String(url).endsWith("/observe") ? { observationId: "fixture-capture" }
         : String(url).includes("/graph/stats") ? { totalNodes: 30_000, totalEdges: 50_000 }
         : { nodes: [], edges: [], truncated: false, sessions: [], total: 0, memories: [], lessons: [] }));
@@ -287,4 +381,67 @@ test("real prompt handler reports dependency-limited failure, permits no-match, 
     for (const key of keys) saved[key] === undefined ? delete process.env[key] : process.env[key] = saved[key];
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+
+test("short continuation keeps latest user GitHub and Qwen holds while a new topic stays independent", async () => {
+  const original=globalThis.fetch;globalThis.fetch=async()=>{throw Error("transcript subject should avoid state fallback");};
+  try {
+    const users=["AgentMemory invoice rounding recall 정책을 구현해", "이번 수정은 GitHub 업로드와 Qwen 시작을 하지 마. 로컬 검증만 진행해."];
+    const transcript={users,sources:[],plan:null};
+    const topic=await retrievalPrompt("진행","billing","session",transcript);
+    assert.match(topic,/invoice rounding/);assert.match(topic,/GitHub 업로드와 Qwen 시작을 하지 마/);assert.match(topic,/로컬 검증만/);
+    const next=await retrievalPrompt("canvas labels 디자인을 확인해","billing","session",transcript);
+    assert.equal(next,"canvas labels 디자인을 확인해");assert.doesNotMatch(next,/GitHub|Qwen|invoice/);
+    const changed=await retrievalPrompt("이번 수정은 행별 반올림으로 바꿔","billing","session",transcript);
+    assert.match(changed,/행별 반올림/);assert.match(changed,/하지 마/);
+  } finally {globalThis.fetch=original;}
+});
+
+
+test("full wrapper, plan, adaptive recall and optional context remain below the host ceiling", () => {
+  const results=Array.from({length:8},(_,i)=>({project:"billing",sessionId:"session",score:1,observation:{id:`original-${i}`,title:"prompt_submit",timestamp:`2026-09-${10+i}`,narrative:"Invoice rounding must remain exact. " + "Do not upload or start Qwen. ".repeat(90)}}));
+  const request="invoice rounding " + "<>".repeat(800);
+  const context=formatRecallContext(request,"billing",{results});
+  const wrapped=turnRecallContext({status:"candidates",context},"billing","turn-id",request,request);
+  const combined=boundedAdditionalContext("c".repeat(1146),wrapped,"g".repeat(500));
+  assert.match(context,/token_ceiling="2048"/);
+  assert.match(context,/needs-expansion/);
+  assert.match(combined,/agentmemory-turn-recall/);
+  assert.match(combined,/agentmemory-recall-plan/);
+  assert.ok(combined.length<=7600);
+  assert.ok(combined.includes(context));
+});
+
+
+test("demonstrative follow-ups locate the preceding final while preserving the latest user correction", async () => {
+  const rows=[messageRow("user","과거 회상 알고리즘 개선"),transcriptRow({type:"message",role:"assistant",phase:"final_answer",
+    content:[{type:"output_text",text:"두 잔여 기록: Exa mention 수집 중단과 Qwen ECONNREFUSED 보류 집계."}]}),messageRow("user","해당기록들 문제 발본색원")];
+  const transcript=parseRecallTranscript(rows,text=>text);
+  const query=await retrievalPrompt("해당기록들 문제 발본색원","memory","session",transcript);
+  assert.match(query,/Exa mention/);assert.match(query,/Qwen ECONNREFUSED/);assert.match(query,/해당기록들 문제 발본색원/);
+  const corrected=await retrievalPrompt("해당 기록 중 Qwen은 그대로 두고 파서만 수정","memory","session",parseRecallTranscript(rows.slice(0,-1),text=>text));
+  assert.match(corrected,/Qwen은 그대로 두고 파서만 수정/);
+  assert.equal(await reuseRecall("해당기록들 문제 발본색원",query,"memory",transcript),null);
+  assert.equal(await retrievalPrompt("이더리움 가격 조사","memory","session",transcript),"이더리움 가격 조사");
+  assert.equal(await retrievalPrompt("invoice rounding 정책","billing","session",transcript),"invoice rounding 정책");
+});
+test("commentary, old answers and compacted answers cannot define a follow-up referent", async () => {
+  const final=transcriptRow({type:"message",role:"assistant",phase:"final",content:[{type:"output_text",text:"OLD_ASSISTANT_ONLY"}]});
+  const rows=[messageRow("user","invoice rounding"),final,messageRow("user","canvas labels"),messageRow("user","해당기록들 확인")];
+  const stale=await retrievalPrompt("해당기록들 확인","billing","session",parseRecallTranscript(rows,text=>text));
+  assert.doesNotMatch(stale,/OLD_ASSISTANT_ONLY/);assert.match(stale,/canvas labels/);
+  assert.equal(parseRecallTranscript([messageRow("user","invoice"),final,JSON.stringify({type:"compacted"})],text=>text).referent,undefined);
+  assert.equal(parseRecallTranscript([messageRow("user","invoice"),final.replace('"final"','"commentary"')],text=>text).referent,undefined);
+});
+
+test("subjectless implementation requests use the report topic rather than matching generic commands elsewhere", async () => {
+  const prior="해당기록들 문제 발본색원";
+  const rows=[messageRow("user",prior),transcriptRow({type:"message",role:"assistant",phase:"final",content:[{type:"output_text",text:"Exa mention parser and Qwen background hold must be fixed."}]})];
+  const transcript=parseRecallTranscript(rows,text=>text);
+  for(const prompt of ["적절한 구현방안을 선정하고 작업진행","진행"]) {
+    const query=await retrievalPrompt(prompt,"memory","session",transcript);
+    assert.match(query,/Exa mention/);assert.match(query,/Qwen background hold/);assert.ok(query.startsWith(prompt));
+  }
+  assert.equal(await retrievalPrompt("신규 결제 모듈을 구현","memory","session",transcript),"신규 결제 모듈을 구현");
 });

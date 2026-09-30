@@ -8,6 +8,7 @@ vi.mock("../src/state/keyed-mutex.js", () => ({
   withKeyedLock: <T>(_key: string, fn: () => Promise<T>) => fn(),
 }));
 
+import { KV } from "../src/state/schema.js";
 import { codexTextDigest } from "../src/replay/codex-match.js";
 import { registerRememberFunction } from "../src/functions/remember.js";
 import {
@@ -151,6 +152,51 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const result = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "s", dryRun: true } }) as { success: boolean; error: string };
     expect(result).toMatchObject({ success: false, error: "reference read failed" });
     expect(await kv.get("mem:sessions", "s")).not.toBeNull();
+  });
+
+  it("reports image and access cleanup failures after confirmed memory deletion and still removes its index", async () => {
+    const kv = mockKV(), sdk = mockSdk(); registerRememberFunction(sdk as never, kv as never);
+    const memory = { id: "cleanup", title: "cleanup", content: "original evidence", concepts: [], files: [], sessionIds: [], createdAt: "2026-10-01T00:00:00Z", imageRef: "owned-image" } as unknown as Memory;
+    await kv.set("mem:memories", memory.id, memory); getSearchIndex().add(memoryToObservation(memory));
+    const get = kv.get.bind(kv), remove = kv.delete.bind(kv);
+    kv.get = async <T>(scope: string, key: string): Promise<T | null> => { if (scope === KV.imageRefs) throw Error("image cleanup failed"); return get<T>(scope, key); };
+    kv.delete = async (scope, key) => { if (scope === KV.accessLog) throw Error("access cleanup failed"); return remove(scope, key); };
+    const result = await sdk.trigger({ function_id: "mem::forget", payload: { memoryId: memory.id } }) as { deleted: number; cleanupFailures: Array<{ step: string }> };
+    expect(result.deleted).toBe(1); expect(await get("mem:memories", memory.id)).toBeNull(); expect(getSearchIndex().has(memory.id)).toBe(false);
+    expect(result.cleanupFailures.map(x => x.step)).toEqual(["image", "access"]);
+    const audit = await kv.list<{ targetIds: string[]; details: { cleanupFailed: number } }>("mem:audit");
+    expect(audit).toHaveLength(1); expect(audit[0].targetIds).toContain(memory.id); expect(audit[0].details.cleanupFailed).toBe(2);
+  });
+
+  it("finishes later observations and session deletion when image cleanup fails", async () => {
+    const kv = mockKV(), sdk = mockSdk(); registerRememberFunction(sdk as never, kv as never);
+    await kv.set("mem:sessions", "cleanup-session", { id: "cleanup-session", project: "p", observationCount: 2 });
+    await kv.set("mem:summaries", "cleanup-session", { id: "cleanup-session" });
+    await kv.set("mem:obs:cleanup-session", "a", { id: "a", imageRef: "owned-image" }); await kv.set("mem:obs:cleanup-session", "b", { id: "b" });
+    const get = kv.get.bind(kv); kv.get = async <T>(scope: string, key: string): Promise<T | null> => { if (scope === KV.imageRefs) throw Error("image cleanup failed"); return get<T>(scope, key); };
+    const result = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "cleanup-session" } }) as { deleted: number; cleanupFailed: number };
+    expect(result).toMatchObject({ deleted: 4, cleanupFailed: 1 }); expect(await kv.list("mem:obs:cleanup-session")).toEqual([]);
+    expect(await get("mem:sessions", "cleanup-session")).toBeNull(); expect(await get("mem:summaries", "cleanup-session")).toBeNull();
+    expect(await kv.list("mem:audit")).toHaveLength(1);
+  });
+
+  it("discloses failed persistence without falsely reporting the confirmed deletion as failed", async () => {
+    const kv = mockKV(), sdk = mockSdk(); registerRememberFunction(sdk as never, kv as never);
+    await kv.set("mem:memories", "cleanup", { id: "cleanup", content: "original" });
+    const save = vi.fn(async () => { throw Error("index storage failed"); }); setIndexPersistence({ scheduleSave: vi.fn(), save });
+    try {
+      const result = await sdk.trigger({ function_id: "mem::forget", payload: { memoryId: "cleanup" } });
+      expect(result).toMatchObject({ success: true, deleted: 1, cleanupFailed: 1, cleanupFailures: [{ step: "persistence" }] });
+      expect(save).toHaveBeenCalledOnce(); expect(save).toHaveBeenCalledWith({ requireSuccess: true }); expect(await kv.list("mem:audit")).toHaveLength(1);
+    } finally { setIndexPersistence(null); }
+  });
+
+  it("does not count a rejected primary deletion as confirmed", async () => {
+    const kv = mockKV(), sdk = mockSdk(); registerRememberFunction(sdk as never, kv as never);
+    await kv.set("mem:memories", "cleanup", { id: "cleanup", content: "original" });
+    kv.delete = async () => { throw Error("primary deletion failed"); };
+    await expect(sdk.trigger({ function_id: "mem::forget", payload: { memoryId: "cleanup" } })).rejects.toThrow("primary deletion failed");
+    expect(await kv.get("mem:memories", "cleanup")).not.toBeNull(); expect(await kv.list("mem:audit")).toHaveLength(0);
   });
 
   it("emits a single audit row when a memory is forgotten", async () => {

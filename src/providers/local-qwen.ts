@@ -5,6 +5,7 @@ import type {
   ProviderRuntimeInfo,
 } from "../types.js";
 import { getEnvVar } from "../config.js";
+import { localQwenBackgroundDeferral } from "./local-qwen-lifecycle.js";
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_MIN_CONTEXT_TOKENS = 8_192;
@@ -281,11 +282,18 @@ export class LocalQwenProvider implements MemoryProvider {
     return this.runtimeInfo ? { ...this.runtimeInfo } : null;
   }
 
+  private assertBackgroundAllowed(): void {
+    const reason = localQwenBackgroundDeferral();
+    if (reason) throw new Error(`local_qwen_deferred:${reason}`);
+  }
+
   async probe(): Promise<ProviderRuntimeInfo> {
+    this.assertBackgroundAllowed();
     return (await this.discover()).info;
   }
 
   async compress(systemPrompt: string, userPrompt: string): Promise<string> {
+    this.assertBackgroundAllowed();
     const release = await this.acquireBackgroundLease();
     try {
       const discovered = await this.discover();
@@ -392,6 +400,7 @@ export class LocalQwenProvider implements MemoryProvider {
     maxTokens: number,
     info: ProviderRuntimeInfo,
   ): Promise<string> {
+    this.assertBackgroundAllowed();
     const foregroundPath = join(this.coordinationDir, "foreground-request.json");
     if (await activeMarker(foregroundPath)) {
       throw new Error("local_qwen_deferred:foreground_requested");

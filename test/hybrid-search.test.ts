@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { SearchIndex } from "../src/state/search-index.js";
 import type { CompressedObservation, EmbeddingProvider } from "../src/types.js";
@@ -50,6 +50,39 @@ describe("HybridSearch", () => {
   beforeEach(() => {
     bm25 = new SearchIndex();
     kv = mockKV();
+  });
+
+  it.each(["no-vector", "provider-down", "large-index"])("bounds automatic hybrid and reports %s without graph traversal", async (mode) => {
+    const observation = makeObs(); bm25.add(observation); await kv.set("mem:obs:ses_1", observation.id, observation);
+    const list = vi.spyOn(kv, "list");
+    const embed = vi.fn(async () => { if (mode === "provider-down") throw Error("offline"); return new Float32Array([1,0]); });
+    const vectorSearch = vi.fn(() => [{obsId:observation.id,sessionId:observation.sessionId,score:1}]);
+    const vector = mode === "no-vector" ? null : {size:mode === "large-index" ? 4097 : 1,search:vectorSearch};
+    const channels: Record<string,string> = {};
+    const hybrid = new HybridSearch(bm25, vector as never, {embed} as never, kv as never);
+    const result = await hybrid.search("auth", 8, undefined, {maxVectorScan:4096,channels});
+    expect(result[0].observation.narrative).toBe(observation.narrative);
+    expect(channels.graph).toBe("skipped-automatic");
+    expect(channels.vector).toBe(mode === "no-vector" ? "unavailable" : mode === "provider-down" ? "failed" : "skipped-scan-bound");
+    expect(list).not.toHaveBeenCalled();
+    expect(vectorSearch).not.toHaveBeenCalled();
+    expect(embed).toHaveBeenCalledTimes(mode === "provider-down" ? 1 : 0);
+  });
+
+  it("retains labelled semantic candidates below the automatic vector scan cap and leaves manual vector behavior unchanged", async () => {
+    const observation = makeObs({narrative:"Preserve pennies until aggregation.",title:"Original user request"});
+    await kv.set("mem:obs:ses_1", observation.id, observation);
+    const embed = vi.fn(async () => new Float32Array([1,0]));
+    const vectorSearch = vi.fn(() => [{obsId:observation.id,sessionId:observation.sessionId,score:1}]);
+    const vector = {size:4096,search:vectorSearch};
+    const hybrid = new HybridSearch(bm25, vector as never, {embed} as never, kv as never);
+    const channels: Record<string,string> = {};
+    expect((await hybrid.search("invoice rounding",8,undefined,{maxVectorScan:4096,channels}))[0].observation.narrative).toBe(observation.narrative);
+    expect(channels.vector).toBe("available");
+    vector.size = 100000;
+    expect((await hybrid.search("invoice rounding",8))[0].observation.id).toBe(observation.id);
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect(vectorSearch).toHaveBeenCalledTimes(2);
   });
 
   it("returns BM25-only results when no vector index is provided", async () => {

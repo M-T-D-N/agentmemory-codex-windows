@@ -116,6 +116,7 @@ export interface Session {
   semanticGraphStatus?: "pending" | "complete" | "deferred" | "rejected";
   semanticGraphLastAttemptAt?: string;
   semanticGraphLastError?: string;
+  semanticGraphDeferredReason?: string;
   semanticGraphBootstrapSkipped?: number;
   semanticGraphBackfillThroughObservationId?: string;
 }
@@ -441,6 +442,7 @@ export interface HybridSearchResult {
 }
 
 export interface CompactSearchResult {
+  sourceKind?: "user" | "assistant" | "derived";
   obsId: string;
   sessionId: string;
   title: string;

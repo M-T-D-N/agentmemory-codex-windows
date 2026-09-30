@@ -20,6 +20,7 @@ import { LocalQwenProvider } from "../src/providers/local-qwen.js";
 const originalFetch = globalThis.fetch;
 const touchedEnv = [
   "AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR",
+  "AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT",
   "AGENTMEMORY_LOCAL_QWEN_MAX_INPUT_TOKENS",
   "AGENTMEMORY_LOCAL_QWEN_MAX_OUTPUT_TOKENS",
   "AGENTMEMORY_LOCAL_QWEN_MIN_CONTEXT_TOKENS",
@@ -131,6 +132,19 @@ describe("LocalQwenProvider", () => {
     }
     rmSync(coordinationDir, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it("blocks probe and direct extraction during a host hold without network or lease writes", async () => {
+    process.env.AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT = join(coordinationDir, "scripts", "Invoke-LocalAI.ps1");
+    writeFileSync(join(coordinationDir, "config.json"), JSON.stringify({qwen:{background_start_enabled:false}}));
+    const fetch = vi.fn(); globalThis.fetch = fetch;
+    const provider = new LocalQwenProvider("auto",2048,"http://127.0.0.1:8000");
+    await expect(provider.probe()).rejects.toThrow("local_qwen_deferred:background_held");
+    await expect(provider.compress("system","user")).rejects.toThrow("local_qwen_deferred:background_held");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(existsSync(join(coordinationDir,"background.lock"))).toBe(false);
+    writeFileSync(join(coordinationDir,"config.json"),JSON.stringify({qwen:{background_start_enabled:true}}));
+    installFetchMock(); await expect(provider.probe()).resolves.toMatchObject({provider:"local-qwen"});
   });
 
   it.each([

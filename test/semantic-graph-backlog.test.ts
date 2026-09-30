@@ -983,3 +983,27 @@ describe("semantic graph backlog", () => {
     scheduler.stop();
   });
 });
+
+
+it("does not call lifecycle startup or dispatch during an explicit provider background hold", async () => {
+  const trigger=vi.fn(), start=vi.fn(), release=vi.fn();
+  const scheduler=startSemanticGraphBacklogScheduler({trigger} as never,
+    {probe:async()=>{throw Error("local_qwen_deferred:background_held");}} as never,null,
+    {lifecycle:{start,release},readyGraceMs:60000});
+  try { await scheduler.tick();expect(start).not.toHaveBeenCalled();expect(trigger).not.toHaveBeenCalled(); }
+  finally { await scheduler.stop(); }
+});
+
+it("requires renewed stable readiness after a hold even when the model fingerprint is unchanged", async () => {
+  vi.useFakeTimers();
+  const runtime={fingerprint:"same",maxInputTokens:100000};let held=true;
+  const trigger=vi.fn(async()=>({success:true,skipped:"backlog_empty"}));
+  const scheduler=startSemanticGraphBacklogScheduler({trigger} as never,
+    {probe:async()=>{if(held)throw Error("local_qwen_deferred:background_held");return runtime;}} as never,runtime as never,
+    {readyGraceMs:0});
+  try {
+    await scheduler.tick();held=false;
+    await scheduler.tick();expect(trigger).not.toHaveBeenCalled();
+    await scheduler.tick();expect(trigger).toHaveBeenCalledOnce();
+  } finally {await scheduler.stop();vi.useRealTimers();}
+});

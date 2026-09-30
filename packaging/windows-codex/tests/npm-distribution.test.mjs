@@ -23,6 +23,17 @@ test('strict CLI input keeps paths as literal arguments and requires explicit ex
   assert.equal(args.at(-1), '-Execute');
 });
 
+test('PowerShell child environment normalizes Windows keys before overriding module paths', () => {
+  const base = { SystemRoot: 'C:\\Windows', PSMODULEPATH: 'parent modules', PSModulePath: 'parent modules', Temp: 'D:\\task', PATH: 'tools' };
+  const env = powershellEnvironment(base);
+  assert.deepEqual(Object.keys(env).filter(key => key.toUpperCase() === 'PSMODULEPATH'), ['PSMODULEPATH']);
+  assert.equal(env.PSMODULEPATH, path.join(base.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'));
+  assert.equal(env.TEMP, base.Temp);
+  assert.equal(env.PATH, base.PATH);
+  assert.equal(base.PSModulePath, 'parent modules');
+  assert.throws(() => powershellEnvironment({ PATH: 'first', Path: 'second' }), /Conflicting Windows environment key: PATH/);
+});
+
 test('descriptor pins the downstream repository, version, source and hashes', () => {
   const d = { schema_version: 1, product_id: 'agentmemory-codex-windows', version: '0.1.0-preview.4', source_commit: 'a'.repeat(40),
     archive_sha256: 'b'.repeat(64), manifest_sha256: 'c'.repeat(64), archive_bytes: 10,

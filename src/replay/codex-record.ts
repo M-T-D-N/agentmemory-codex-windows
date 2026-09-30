@@ -191,6 +191,9 @@ export function parseCodexRecord(
         const part = asRecord(rawPart);
         if (!part) return unknown("invalid_item_content");
         if (["input_image", "image", "image_url", "localImage", "local_image"].includes(String(part.type))) continue;
+        if (item.type === "UserMessage" && part.type === "mention" &&
+            identity(part.name) && typeof part.path === "string" && part.path.length <= 2048 &&
+            /^plugin:\/\/[^\s\u0000-\u001f]+$/u.test(part.path)) continue;
         if (!["Text", "text", "input_text", "output_text"].includes(String(part.type)) || typeof part.text !== "string") return unknown("unsupported_item_content");
         const text = item.type === "UserMessage" ? codexUserText(part.text) : stripPrivateData(part.text);
         if (text !== null && text.trim()) parts.push(text);

@@ -5,6 +5,7 @@ import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
 import { logger } from "../logger.js";
+import { localQwenBackgroundDeferral } from "../providers/local-qwen-lifecycle.js";
 import { readCodexThreadIndex } from "./codex-source-index.js";
 import { discoverCodexSession, existingCodexDiscoveryStatus } from "./codex-source-discovery.js";
 import { projectFor, readProjectRegistry } from "../../packaging/windows-codex/hooks/codex-project.mjs";
@@ -86,11 +87,14 @@ export function registerCodexSourceBacklog(sdk: ISdk, kv: StateKV, agentId: () =
       (session.codexNativeCapture.checkedAt === undefined || typeof session.codexNativeCapture.checkedAt === "string" && Number.isFinite(Date.parse(session.codexNativeCapture.checkedAt))))
       .sort((a, b) => a.id.localeCompare(b.id));
     const remaining = eligible.filter(session => captureAfterId === undefined || session.id.localeCompare(captureAfterId) > 0);
+    const backgroundHeld = localQwenBackgroundDeferral() === "background_held";
+    const heldTransport = (session: Session) => backgroundHeld && /^local_qwen_transport_failed:ECONNREFUSED(?::|$)/.test(session.semanticGraphLastError ?? "");
     const result = { sourceHolds: sessions.reduce((sum, row) => sum + (row.codexNativeCapture?.sourceHolds?.length ?? 0), 0), unresolvedCaptures: sessions.reduce((sum, row) => sum + (row.codexNativeCapture?.unresolvedCaptures?.length ?? 0), 0), initializedSessions: sessions.length, requiresReconciliation: sessions.length - eligible.length,
       scannedSessions: 0, windows: 0, inserted: 0, unknown: discovery.unknown ?? 0, discovery, captureCycleComplete: false, moreCaptureWork: false,
       captureUnknown: sessions.filter(session => session.codexNativeCapture?.status === "unknown").length,
       graphFailures: sessions.filter(session => session.semanticGraphStatus === "deferred" && session.semanticGraphLastError &&
-        !session.semanticGraphLastError.startsWith("local_qwen_deferred:")).length,
+        !session.semanticGraphLastError.startsWith("local_qwen_deferred:") && !heldTransport(session)).length,
+      graphHeldTransportHistory: sessions.filter(session => session.semanticGraphStatus === "deferred" && heldTransport(session)).length,
       failures: [] as Array<{ sessionId: string; error: string }> };
     for (const session of remaining.slice(0, 8)) {
       result.scannedSessions++;

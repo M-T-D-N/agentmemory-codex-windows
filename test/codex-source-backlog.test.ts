@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { registerCodexSourceBacklog, startCodexSourceScheduler } from "../src/functions/codex-source-backlog.js";
+import * as qwenLifecycle from "../src/providers/local-qwen-lifecycle.js";
 import { KV } from "../src/state/schema.js";
 import type { Session } from "../src/types.js";
 
@@ -9,7 +10,7 @@ const session = (id: string) => ({ id, project: "p", agentId: "mine", status: "a
 } });
 const drain = (overrides: object = {}) => ({ unknown: 0, captureUnknown: 0, requiresReconciliation: 0, graphFailures: 0, failures: [],
   discovery: { unknown: 0, reconcileRequired: 0, cycleComplete: false }, ...overrides });
-afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("bounded native source backlog", () => {
   it("finishes a large native sweep without waiting one minute per batch or being reordered by hooks", async () => {
@@ -221,4 +222,21 @@ describe("bounded native source backlog", () => {
     registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
     expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ graphFailures: 1 });
   });
+});
+
+
+it("separates held connection-refused history from current graph faults without mutating records", async () => {
+  vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT","C:/native");
+  const policy=vi.spyOn(qwenLifecycle,"localQwenBackgroundDeferral").mockReturnValue("background_held");
+  const sdk=mockSdk(),kv=mockKV();
+  for (const [id,error] of [["off","local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000"],
+    ["reset","local_qwen_transport_failed:ECONNRESET:127.0.0.1:8000"],["xml","invalid_graph_xml"]]) {
+    await kv.set(KV.sessions,id!,{...session(id!),semanticGraphStatus:"deferred",semanticGraphLastError:error});
+  }
+  sdk.registerFunction("mem::codex-source-capture",async()=>({status:"caught_up",inserted:0,bytesReadThrough:100,snapshotBytes:100}));
+  registerCodexSourceBacklog(sdk as never,kv as never,()=>"mine");
+  expect(await sdk.trigger("mem::codex-source-drain",{})).toMatchObject({graphFailures:2,graphHeldTransportHistory:1});
+  expect(await kv.get(KV.sessions,"off")).toMatchObject({semanticGraphLastError:"local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000"});
+  policy.mockReturnValue(undefined);
+  expect(await sdk.trigger("mem::codex-source-drain",{})).toMatchObject({graphFailures:3,graphHeldTransportHistory:0});
 });

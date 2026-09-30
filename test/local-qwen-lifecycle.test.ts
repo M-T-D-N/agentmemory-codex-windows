@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLocalQwenLifecycle, localQwenChildEnvironment } from "../src/providers/local-qwen-lifecycle.js";
+import { createLocalQwenLifecycle, localQwenChildEnvironment, localQwenBackgroundDeferral } from "../src/providers/local-qwen-lifecycle.js";
 
 const config = {
   platform: "win32", script: "D:\\Workspace\\projects\\local-ai\\scripts\\Invoke-LocalAI.ps1",
@@ -76,5 +76,17 @@ describe("host Qwen lifecycle", () => {
       status: "ready_owned", started_by_request: true,
     }) })!;
     await expect(host.start()).rejects.toThrow("local_qwen_missing_start_identity");
+  });
+});
+
+
+describe("read-only host background admission", () => {
+  it("reads only the host config and follows its strict boolean contract", () => {
+    for (const value of [false, undefined, "true", 1]) expect(localQwenBackgroundDeferral({script:config.script,
+      read: path => { expect(path).toBe("D:\\Workspace\\projects\\local-ai\\config.json"); return JSON.stringify({qwen:{background_start_enabled:value}}); }
+    })).toBe("background_held");
+    expect(localQwenBackgroundDeferral({script:config.script,read:()=>'{"qwen":{"background_start_enabled":true}}'})).toBeUndefined();
+    expect(localQwenBackgroundDeferral({script:config.script,read:()=>{throw Error("read failed");}})).toBe("background_policy_unknown");
+    expect(localQwenBackgroundDeferral({script:"relative.ps1"})).toBe("background_policy_unknown");
   });
 });

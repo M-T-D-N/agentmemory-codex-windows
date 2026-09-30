@@ -3235,3 +3235,17 @@ describe("Graph Functions", () => {
     });
   });
 });
+
+
+it("preserves historical faults separately when direct extraction yields to a current hold", async () => {
+  const sdk=mockSdk(),kv=mockKV();
+  await kv.set("mem:sessions","ses_1",{id:"ses_1",project:"/project-a",status:"completed",semanticGraphThroughObservationId:"old",
+    semanticGraphLastError:"local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000"});
+  await kv.set("mem:obs:ses_1","obs_1",testObs);
+  const compress=vi.fn(async()=>{throw Error("local_qwen_deferred:background_held");});
+  registerGraphFunction(sdk as never,kv as never,{name:"local-qwen",compress,summarize:vi.fn()} as never);
+  const result=await sdk.trigger("mem::graph-extract",{project:"/project-a",sessionId:"ses_1",observations:[testObs]});
+  expect(result).toMatchObject({semanticCompleted:false,processingCompleted:false});
+  expect(await kv.get("mem:sessions","ses_1")).toMatchObject({semanticGraphStatus:"deferred",semanticGraphThroughObservationId:"old",
+    semanticGraphLastError:"local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000",semanticGraphDeferredReason:"local_qwen_deferred:background_held"});
+});

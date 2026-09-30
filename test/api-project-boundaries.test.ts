@@ -46,6 +46,16 @@ describe("REST exact-project and provenance boundaries", () => {
     registerApiTriggers(sdk as never, kv as never, readContext);
   });
 
+  it("whitelists automatic retrieval policy and non-reinforcing exact original expansion", async () => {
+    expect(await sdk.trigger("api::search", {body:{query:"rounding",project:"billing",retrievalPolicy:"automatic",arbitrary:"drop"}})).toMatchObject({status_code:200});
+    expect(sdk.downstream.at(-1)).toMatchObject({payload:{retrievalPolicy:"automatic"}});
+    expect(sdk.downstream.at(-1)?.payload).not.toHaveProperty("arbitrary");
+    expect(await sdk.trigger("api::search", {body:{query:"rounding",project:"billing",retrievalPolicy:"unbounded"}})).toMatchObject({status_code:400});
+    expect(await sdk.trigger("api::smart-search", {body:{project:"billing",expandIds:[{obsId:"obs",sessionId:"session"}],exactExpansion:true,trackAccess:false}})).toMatchObject({status_code:200});
+    expect(sdk.downstream.at(-1)).toMatchObject({payload:{exactExpansion:true,trackAccess:false,project:"billing"}});
+    expect(await sdk.trigger("api::smart-search", {body:{project:"billing",expandIds:["obs"],trackAccess:"false"}})).toMatchObject({status_code:400});
+  });
+
   it("forwards explicit source-kind selection and rejects an invalid selector before search", async () => {
     expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", sourceKind: "user", searchMode: "keyword" } })).toMatchObject({ status_code: 200 });
     expect(sdk.downstream.at(-1)).toMatchObject({ functionId: "mem::search", payload: { sourceKind: "user", project: "*", searchMode: "keyword" } });
@@ -64,6 +74,38 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(sdk.downstream).toHaveLength(count);
   });
 
+  it("whitelists timeline payload, forwards zero and offset, and rejects unsafe page inputs", async () => {
+    const response = await sdk.trigger("api::timeline", { body: {
+      anchor: "needle", project: " project-a ", before: 0, after: 0, offset: 100,
+      trackAccess: false, ignored: "must not reach mem::timeline",
+    } });
+    expect(response).toMatchObject({ status_code: 200 });
+    expect(sdk.downstream.at(-1)).toEqual({
+      functionId: "mem::timeline",
+      payload: { anchor: "needle", project: "project-a", before: 0, after: 0,
+        offset: 100, trackAccess: false },
+    });
+    const count = sdk.downstream.length;
+    for (const name of ["before", "after", "offset"]) {
+      for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0", null]) {
+        const bad = await sdk.trigger("api::timeline", {
+          body: { anchor: "needle", [name]: value },
+        });
+        expect(bad).toMatchObject({ status_code: 400 });
+      }
+    }
+    expect(await sdk.trigger("api::timeline", {
+      body: { anchor: "needle", trackAccess: "false" },
+    })).toMatchObject({ status_code: 400 });
+    expect(await sdk.trigger("api::timeline", {
+      body: { anchor: "needle", project: " " },
+    })).toMatchObject({ status_code: 400 });
+    expect(sdk.downstream).toHaveLength(count);
+    await sdk.trigger("api::timeline", { body: { anchor: "needle", project: "*" } });
+    expect(sdk.downstream.at(-1)).toMatchObject({
+      functionId: "mem::timeline", payload: { project: "*" },
+    });
+  });
   it("emits native warnings on aggregate state changes without consuming ordinary health reads", async () => {
     const protectedSdk = apiSdk();
     let source = { status: "attention", captureIssues: 1, consecutiveFailures: 1, lastAttemptAt: "first" };

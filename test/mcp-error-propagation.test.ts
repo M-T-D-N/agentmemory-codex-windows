@@ -235,6 +235,34 @@ describe("MCP error propagation", () => {
     expect(payloads.get("mem::timeline")?.trackAccess).toBe(false);
   });
 
+  it("forwards zero ranges and page offset, and rejects unsafe timeline numbers", async () => {
+    let captured: Record<string, unknown> | null = null;
+    sdk.overrideTrigger("mem::timeline", async (payload: Record<string, unknown>) => {
+      captured = payload;
+      return { entries: [], offset: payload.offset };
+    });
+    const invoke = (args: Record<string, unknown>) =>
+      sdk.getFunction("mcp::tools::call")!(request("memory_timeline", args));
+    const good = await invoke({
+      anchor: "needle", project: " project-a ", before: 0, after: 0, offset: 100,
+      trackAccess: false,
+    });
+    expect(good.status_code).toBe(200);
+    expect(captured).toMatchObject({
+      project: "project-a", before: 0, after: 0, offset: 100, trackAccess: false,
+    });
+    const beforeCount = captured;
+    for (const name of ["before", "after", "offset"]) {
+      for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0", null]) {
+        const response = await invoke({ anchor: "needle", [name]: value });
+        expect(response).toEqual({
+          status_code: 400, body: { error: name + " must be a non-negative safe integer" },
+        });
+      }
+    }
+    expect(await invoke({ anchor: "needle", project: " " })).toMatchObject({ status_code: 400 });
+    expect(captured).toBe(beforeCount);
+  });
   it("rejects non-boolean trackAccess values", async () => {
     const calls = [
       ["memory_recall", { query: "needle", project: "project-a", trackAccess: "false" }],

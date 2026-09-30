@@ -381,6 +381,23 @@ async function readSnapshot(kv: StateKV): Promise<GraphSnapshot | null> {
   }
 }
 
+async function readSnapshotStrict(kv: StateKV): Promise<GraphSnapshot | null> {
+  let raw: unknown;
+  try {
+    raw = await kv.get<unknown>(KV.graphSnapshot, SNAPSHOT_KEY);
+  } catch (error) {
+    logger.warn("Graph snapshot read failed, retrying once", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    raw = await kv.get<unknown>(KV.graphSnapshot, SNAPSHOT_KEY);
+  }
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "object" && (raw as { version?: unknown }).version === 1) {
+    return raw as GraphSnapshot;
+  }
+  throw new Error("Graph snapshot has unknown schema version");
+}
+
 function buildSnapshotFromArrays(
   nodes: GraphNode[],
   edges: GraphEdge[],
@@ -2369,7 +2386,7 @@ async function upsertManualGraph(
       throw new Error("every sources entry must be referenced by at least one sourceIndexes array");
     }
 
-    const snap = (await readSnapshot(kv)) ?? emptySnapshot();
+    const snap = (await readSnapshotStrict(kv)) ?? emptySnapshot();
     const storedManifest = await readGraphQueryIndexManifest(kv);
     const queryIndexManifest = queryIndexMatchesSnapshot(storedManifest, snap) ? storedManifest : null;
     const capturedAt = new Date().toISOString();
@@ -2944,7 +2961,7 @@ export async function persistGraphDelta(
   _obsIds: string[],
   context: GraphPersistenceContext = {},
 ): Promise<{ newNodeCount: number; newEdgeCount: number }> {
-  const snap = (await readSnapshot(kv)) ?? emptySnapshot();
+  const snap = (await readSnapshotStrict(kv)) ?? emptySnapshot();
   const queryIndexManifest = await prepareGraphQueryIndexUpdate(kv, snap);
   const capturedAt = new Date().toISOString();
   let newNodeCount = 0;
@@ -3301,7 +3318,8 @@ export function registerGraphFunction(
           semanticCompleted = true;
         } catch (err) {
           llmError = err instanceof Error ? err.message : String(err);
-          logger.error("LLM graph extraction failed", { error: llmError });
+          if (llmError.startsWith("local_qwen_deferred:")) logger.info("Semantic graph extraction deferred", { reason: llmError });
+          else logger.error("LLM graph extraction failed", { error: llmError });
         }
       }
 
@@ -3385,6 +3403,7 @@ export function registerGraphFunction(
                   value: onlyApprovalReviews ? "deterministic:codex-approval-review-skip" : runtime?.fingerprint ?? provider.name,
                 },
                 { type: "set", path: "semanticGraphLastError", value: "" },
+                { type: "set", path: "semanticGraphDeferredReason", value: "" },
               ];
               if (completion || cursorMode === "bootstrap_backfill" && data.semanticBootstrapDone) {
                 updates.push({
@@ -3410,11 +3429,14 @@ export function registerGraphFunction(
               await kv.update(KV.sessions, sessionId, updates);
             } else {
               await kv.update(KV.sessions, sessionId, [
+                { type: "set", path: "semanticGraphDeferredReason", value: llmError?.startsWith("local_qwen_deferred:") ? llmError : "" },
                 { type: "set", path: "semanticGraphStatus", value: "deferred" },
                 {
                   type: "set",
                   path: "semanticGraphLastError",
-                  value: (llmError ?? "semantic graph extraction did not complete").slice(0, 1000),
+                  value: (llmError?.startsWith("local_qwen_deferred:") && currentSession.semanticGraphLastError
+                    ? currentSession.semanticGraphLastError
+                    : llmError ?? "semantic graph extraction did not complete").slice(0, 1000),
                 },
               ]);
             }
