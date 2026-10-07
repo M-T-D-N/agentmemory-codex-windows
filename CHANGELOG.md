@@ -6,6 +6,8 @@ The upstream AgentMemory release history remains in the
 
 ## 0.1.0-preview.14
 
+- Skip nonimproving repeated node paths and construct winning context lazily once, preserving the strongest-candidate rule without repeated observation allocations.
+
 - Retain the strongest complete candidate per observation across graph entity and chunk seeds. A weak first path no longer suppresses a later direct match or shorter expansion; context and provenance follow the winning candidate. Input-chunk exclusion and canonical project/visibility guards remain unchanged.
 - Add focused regression cases for both seed orders, direct/shorter matches, provenance/context replacement, deduplication and result limits.
 - Expand English, Korean and Japanese descriptions of retrieval, filtering, derived indexes, Qwen scope and validation limits. Correct stale prebuilt installation links and Japanese tool/endpoint counts.

@@ -38,13 +38,32 @@ export interface GraphRetrievalResult {
   pathLength: number;
 }
 
-function retainStrongestCandidate(
+function retainStrongestNodeCandidates(
   results: Map<string, GraphRetrievalResult>,
-  candidate: GraphRetrievalResult,
+  nodeScores: Map<string, number>,
+  node: GraphNode,
+  score: number,
+  pathLength: number,
+  path?: Array<{ node: GraphNode; edge?: GraphEdge }>,
+  excludedObs?: Set<string>,
 ): void {
-  const existing = results.get(candidate.obsId);
-  if (!existing || candidate.score > existing.score) {
-    results.set(candidate.obsId, candidate);
+  const previousNodeScore = nodeScores.get(node.id);
+  if (previousNodeScore !== undefined && !(score > previousNodeScore)) return;
+  nodeScores.set(node.id, score);
+  let graphContext: string | undefined;
+  for (const obsId of node.sourceObservationIds) {
+    if (excludedObs?.has(obsId)) continue;
+    const existing = results.get(obsId);
+    if (existing && !(score > existing.score)) continue;
+    graphContext ??= path ? buildGraphContext(path) : `[${node.type}] ${node.name}`;
+    results.set(obsId, {
+      obsId,
+      sessionId: "",
+      score,
+      graphContext,
+      ...(node.sourceSessionIds ? { sourceSessionIds: node.sourceSessionIds } : {}),
+      pathLength,
+    });
   }
 }
 
@@ -104,6 +123,7 @@ export class GraphRetrieval {
     if (matchingNodes.length === 0) return [];
 
     const results = new Map<string, GraphRetrievalResult>();
+    const nodeScores = new Map<string, number>();
     const graph = prepareTraversal(allNodes, allEdges);
     let lastYield = performance.now();
 
@@ -120,38 +140,19 @@ export class GraphRetrieval {
 
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
-        for (const obsId of lastNode.sourceObservationIds) {
-          const pathLength = path.length;
-          const edgeWeights = path
-            .filter((s) => s.edge)
-            .map((s) => s.edge!.weight);
-          const avgWeight =
-            edgeWeights.length > 0
-              ? edgeWeights.reduce((a, b) => a + b, 0) / edgeWeights.length
-              : 0.5;
-          const score = avgWeight * (1 / pathLength);
-
-          retainStrongestCandidate(results, {
-            obsId,
-            sessionId: "",
-            score,
-            graphContext: buildGraphContext(path),
-            ...(lastNode.sourceSessionIds ? { sourceSessionIds: lastNode.sourceSessionIds } : {}),
-            pathLength,
-          });
-        }
+        const pathLength = path.length;
+        const edgeWeights = path
+          .filter((s) => s.edge)
+          .map((s) => s.edge!.weight);
+        const avgWeight =
+          edgeWeights.length > 0
+            ? edgeWeights.reduce((a, b) => a + b, 0) / edgeWeights.length
+            : 0.5;
+        const score = avgWeight * (1 / pathLength);
+        retainStrongestNodeCandidates(results, nodeScores, lastNode, score, pathLength, path);
       }
 
-      for (const obsId of startNode.sourceObservationIds) {
-        retainStrongestCandidate(results, {
-          obsId,
-          sessionId: "",
-          score: 1.0,
-          graphContext: `[${startNode.type}] ${startNode.name}`,
-          ...(startNode.sourceSessionIds ? { sourceSessionIds: startNode.sourceSessionIds } : {}),
-          pathLength: 0,
-        });
-      }
+      retainStrongestNodeCandidates(results, nodeScores, startNode, 1.0, 0);
     }
 
     return Array.from(results.values()).sort((a, b) => b.score - a.score).slice(0, maxResults);
@@ -176,6 +177,7 @@ export class GraphRetrieval {
     );
 
     const results = new Map<string, GraphRetrievalResult>();
+    const nodeScores = new Map<string, number>();
     const excludedObs = new Set<string>(obsIds);
     const graph = prepareTraversal(allNodes, allEdges);
     let lastYield = performance.now();
@@ -188,21 +190,9 @@ export class GraphRetrieval {
       const paths = this.dijkstraTraversal(node, graph, maxDepth);
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
-        for (const obsId of lastNode.sourceObservationIds) {
-          if (excludedObs.has(obsId)) continue;
-
-          const pathLength = path.length;
-          const score = 0.5 * (1 / (pathLength + 1));
-
-          retainStrongestCandidate(results, {
-            obsId,
-            sessionId: "",
-            score,
-          graphContext: buildGraphContext(path),
-          ...(lastNode.sourceSessionIds ? { sourceSessionIds: lastNode.sourceSessionIds } : {}),
-            pathLength,
-          });
-        }
+        const pathLength = path.length;
+        const score = 0.5 * (1 / (pathLength + 1));
+        retainStrongestNodeCandidates(results, nodeScores, lastNode, score, pathLength, path, excludedObs);
       }
     }
 
