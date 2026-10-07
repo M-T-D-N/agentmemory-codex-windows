@@ -64,6 +64,6 @@ uses a previously downloaded ZIP, with exactly the same pinned hash check.
 `--help` describes the options without downloading anything.
 
 The launcher and adapter use Apache-2.0. The separate downloaded iii engine uses
-Elastic License 2.0; see THIRD-PARTY-NOTICES.md and iii-LICENSE_ELv2. Most downstream
+Elastic License 2.0; see [third-party notices](../licenses/THIRD-PARTY-NOTICES.md) and [the engine license](../licenses/iii-LICENSE_ELv2). Most downstream
 changes were produced with OpenAI Codex. This preview has automated and selected
 local validation, not an independent security audit or broad Windows certification.

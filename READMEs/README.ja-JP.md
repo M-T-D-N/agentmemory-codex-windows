@@ -24,6 +24,12 @@ AgentMemory ダウンストリームです。
 開発注記: このダウンストリームは AI 生成・ユーザーテスト済みです。[開示
 全文](#ai-開発に関する開示)を参照してください。
 
+## はじめに
+
+1. Windows x64、Node.js 24+、Windows PowerShell 5.1、Codex desktop を確認し、[固定バージョンのインストールガイド](../packaging/windows-codex/npm/README.md)に従ってください。ビルド済みランタイムを配布しており、ソースビルドは任意です。
+2. 準備 → 有効化 → サービスの確認 → Codex MCP 接続の順で進めます。
+3. 失敗した場合は[サポート案内](../SUPPORT.md)に従い、バージョン・失敗した段階・機密情報を除いた短いエラーを報告してください。メモリデータベースや認証情報は添付しないでください。
+
 ## このプレビューで提供するもの
 
 - `SessionStart`、`UserPromptSubmit`、`Stop`、`SessionEnd` の4つの管理対象

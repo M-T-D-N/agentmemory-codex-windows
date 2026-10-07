@@ -28,6 +28,12 @@ and Codex CLI.
 Development note: this downstream is AI-generated and user-tested; [read the
 full disclosure](#ai-development-disclosure).
 
+## Start here
+
+1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
+2. Follow preparation, activation and MCP connection in order. Validate the service before connecting Codex; see the guide for the expected result.
+3. If a step fails, use [support and recovery guidance](SUPPORT.md). Report the release and failing phase with a short redacted error; do not attach memory databases or credentials.
+
 ## What this preview does
 
 AgentMemory preserves useful context across Codex tasks while keeping the

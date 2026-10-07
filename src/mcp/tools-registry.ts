@@ -173,7 +173,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_sessions",
     description:
-      "List recent sessions in an explicit project, newest first. Use '*' only for deliberate cross-project reads; follow nextOffset for more.",
+      "Read stored session metadata in an explicit project, newest startedAt first. Returns {sessions,total,limit,offset,nextOffset}; no matches returns an empty sessions array and nextOffset:null. limit defaults to 20 (max 500); follow nextOffset with offset to continue. sessionId selects one session; agentId defaults to configured read scope and '*' reads across agents. project:'*' permits a deliberate cross-project read. Archived and excluded ambient sessions are hidden; includeExcluded:true requires exact project and sessionId and still hides archived sessions. Invalid filters return an error. Use memory_timeline for observations within a session.",
     inputSchema: {
       type: "object",
       properties: {
@@ -312,7 +312,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_commit_lookup",
     description:
-      "Look up the agent session(s) that produced a specific git commit, given its SHA. Returns the commit metadata and linked sessions.",
+      "Read the stored commit/session link for one full git commit SHA. Returns {commit,sessions}, where commit contains recorded metadata and visible sessionIds, and sessions contains their stored session records. Missing or excluded ambient sessions are omitted. An unrecorded SHA returns {commit:null,sessions:[]}; a missing or empty sha returns an error. This read does not scan Git repositories or prove who authored a commit. Use memory_commits to discover recorded links by branch or remote repo URL, or memory_timeline to read a linked session's observations.",
     inputSchema: {
       type: "object",
       properties: {
@@ -519,7 +519,7 @@ export const V040_TOOLS: McpToolDef[] = [
   {
     name: "memory_graph_provenance_reconcile",
     description:
-      "Reconcile exact graph provenance or reversibly retire/restore exact edges. Detach preserves a final source. Retire/restore preserve original provenance and require expectedUpdatedAt plus separate canonical review evidence. Edge history is unchanged.",
+      "Correct exact graph targets in one project with a required audit reason and validated session/observation sources. action defaults to detach: remove selected node/edge source references while retaining a final source observation. retire/restore changes only exact edge visibility, preserves original provenance and edge history, and requires expectedUpdatedAt plus canonical review evidence in sources. restore also requires live same-project endpoints and valid original provenance. dryRun:true previews without mutation; otherwise changed targets update graph/index state and create an audit entry. Returns {success,action,project,dryRun,changedTargets,results} with per-target before/after provenance and removed IDs; applied changes also return auditId. Unchanged targets have changed:false. Invalid, missing, stale, wrong-project or conflicting targets return {success:false,error}. Use memory_graph_query to inspect targets and memory_graph_upsert to add supported relationships; memory_graph_purge physically deletes a project graph.",
     inputSchema: {
       type: "object",
       properties: {
@@ -587,7 +587,7 @@ export const V040_TOOLS: McpToolDef[] = [
   {
     name: "memory_graph_purge",
     description:
-      "Physically delete one explicit project's complete bounded live graph after an exact node/edge inventory. Preserves sessions, observations, memories, and lessons; refuses partial or oversized snapshots.",
+      "Irreversibly purge graph records for one exact project with a required audit reason. First obtain the complete live nodeIds/edgeIds inventory using memory_graph_query; a clean snapshot covering at most 500 nodes and 1000 edges across the graph is required. Inventories must match exactly; an empty project, partial/dirty/reset snapshot, changed records or oversized physical project fails with {success:false,error}. There is no dry run. Deletes project nodes including stale rows, incident/project edges, their edge history, indexes and archive metadata; preserves sessions, observations, memories and lessons. Returns {success,project,auditId,nodesDeleted,edgesDeleted,liveNodesDeleted,liveEdgesDeleted,archiveStatesRemoved,nodeIds,edgeIds,remainingNodes,remainingEdges}. Physical counts may exceed supplied live counts. Use memory_graph_provenance_reconcile for selective provenance correction or reversible edge retirement.",
     inputSchema: {
       type: "object",
       properties: {
@@ -622,13 +622,13 @@ export const V040_TOOLS: McpToolDef[] = [
   {
     name: "memory_consolidate",
     description:
-      "Run the LLM-backed 4-tier memory consolidation pipeline. Disabled in zero-LLM/noop mode; use curated memory/lesson/graph writes instead.",
+      "Run the configured LLM-backed consolidation pipeline, mutating stored semantic/procedural memory, reflection insights and decay strengths with an audit entry. Omit tier for all, or select semantic, reflect, procedural or decay; episodic is not implemented. This tool exposes no project filter. Returns {success:true,results} with per-tier counts, skipped reasons or errors; success:true can include tier failures. Semantic needs at least 5 summaries, procedural at least 2 recurring patterns. Disabled configuration returns {success:false,skipped:true,reason}; the MCP handler reports this or a thrown pipeline failure as unavailable. Optional OBSIDIAN_AUTO_EXPORT also writes an export. Disabled by default in zero-LLM/noop and managed local-qwen modes; use memory_save, memory_lesson_save or memory_graph_upsert for curated writes.",
     inputSchema: {
       type: "object",
       properties: {
         tier: {
           type: "string",
-          description: "Target tier: episodic, semantic, or procedural",
+          description: "Target tier: all, semantic, reflect, procedural, or decay; defaults to all when omitted",
         },
       },
     },
@@ -1084,7 +1084,7 @@ export const V061_TOOLS: McpToolDef[] = [
   {
     name: "memory_verify",
     description:
-      "Verify a memory or observation by tracing its citation chain back to source observations and session context. Returns provenance information including confidence scores.",
+      "Read stored provenance for one memory or observation ID in an explicit project; use '*' only for deliberate cross-project verification. For a memory, returns {success:true,type:'memory',memory,citations,citationCount} with version/strength metadata and visible source observation/session metadata, including recorded confidence. For an observation, returns {success:true,type:'observation',observation,session,citations:[],citationCount:0}, with session:null if unavailable. Missing or out-of-scope IDs return {success:false,error:'not found'}; missing id/project returns an error. This read checks available citation records, not factual truth or completeness, and does not change confidence or access counts. Use memory_smart_search expandIds or memory_timeline to read source content.",
     inputSchema: {
       type: "object",
       properties: {

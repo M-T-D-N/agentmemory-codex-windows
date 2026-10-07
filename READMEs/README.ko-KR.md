@@ -21,6 +21,12 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 개발 안내: 이 다운스트림은 AI가 생성하고 사용자가 시험했습니다. [전체
 고지](#ai-개발-고지)를 확인하세요.
 
+## 처음 시작하기
+
+1. Windows x64, Node.js 24+, Windows PowerShell 5.1과 Codex desktop을 확인하고 [고정 버전 설치 가이드](../packaging/windows-codex/npm/README.md)를 따르세요. 빌드된 실행본이 제공되므로 소스 빌드는 선택 사항입니다.
+2. 준비 → 활성화 → 서비스 확인 → Codex MCP 연결 순서로 진행하세요.
+3. 실패하면 [지원 안내](../SUPPORT.md)에 따라 버전과 실패 단계, 민감정보를 지운 짧은 오류를 알려주세요. 기억 데이터베이스나 인증정보는 첨부하지 마세요.
+
 ## 이 공개판이 제공하는 것
 
 - `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` 네 개의 관리형
