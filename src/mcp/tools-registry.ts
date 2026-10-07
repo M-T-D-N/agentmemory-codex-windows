@@ -36,7 +36,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_recall",
     description:
-      "Search past observations and memories inside an explicit project. Use sourceKind='user' for original user requirements. Pass '*' for deliberate historical cross-project discovery when the actual work may have moved; retain source labels and verify relevance.",
+      "Search project-scoped observations and durable memories before continuing work or checking earlier decisions. Returns ranked results in full or compact form, or narrative text; token_budget can truncate the response. sourceKind filters original user or assistant observations. Use '*' only for deliberate cross-project discovery. Returned items record retention access by default; set trackAccess=false for analysis. Use memory_smart_search for compact search followed by ID expansion.",
     inputSchema: {
       type: "object",
       properties: {
@@ -82,7 +82,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_compress_file",
     description:
-      "Compress a markdown file to reduce token usage while preserving headings, URLs, and code blocks. Creates a .original.md backup before writing.",
+      "Shorten prose in an existing .md file using the configured LLM, validating that headings, URLs and fenced code blocks survive. Requires an enabled LLM provider; noop mode returns disabled. Rejects symlinks and sensitive-looking paths. After validation, writes a sibling backup, normally .original.md (overwriting an existing backup), and replaces the source. Returns source/backup paths and character counts, or a validation/error result. Use for file compression, not durable memory consolidation.",
     inputSchema: {
       type: "object",
       properties: {
@@ -97,7 +97,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_save",
     description:
-      "Save a project-scoped durable insight, decision, or pattern with optional official observation provenance.",
+      "Persist a verified insight, decision or preference in an exact project; '*' is rejected for writes. Optional sourceObservationIds must resolve to official observations in that project. Similar content may supersede an existing memory, so repeated calls can create new versions. Returns the saved memory and, when present, an advisory similarTo match. Use memory_lesson_save for reusable lessons with confidence and reinforcement.",
     inputSchema: {
       type: "object",
       properties: {
@@ -144,7 +144,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_file_history",
-    description: "Get past observations about specific files.",
+    description: "Retrieve context for comma-separated file paths before editing or investigating them. Searches up to 15 recent visible sessions and includes up to five important observations per file; sessionId excludes the current session. Omit project or use '*' to search across projects. Returns a context string containing an agentmemory-file-context block, or an empty string. Matching observations record retention access; use memory_recall for general topic searches.",
     inputSchema: {
       type: "object",
       properties: {
@@ -161,7 +161,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_patterns",
-    description: "Detect recurring patterns across sessions.",
+    description: "Detect repeated file co-changes and error titles in visible, non-archived session observations without an LLM. File pairs need at least three sessions; error titles need at least two occurrences. Returns up to 20 frequency-ranked patterns with type, description, files, frequency and source session IDs. Omit project or use '*' for all projects; agentId preserves the configured read scope. Use memory_profile for a project overview or memory_reflect to create synthesized insights.",
     inputSchema: {
       type: "object",
       properties: {
@@ -190,7 +190,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_smart_search",
     description:
-      "Hybrid semantic+keyword search with progressive disclosure inside an explicit project. Pass '*' only for a deliberate cross-project read.",
+      "Search an explicit project with hybrid keyword/semantic ranking, returning compact results with observation IDs for progressive disclosure. Supply comma-separated expandIds to retrieve up to 20 full observations; expansion takes precedence over query and reports truncation. Use '*' only for deliberate cross-project reads. Search and expansion record retention access unless trackAccess=false. Use memory_recall when you need full, compact or narrative results in one call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -221,7 +221,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_vision_search",
     description:
-      "Cross-modal image search via CLIP embeddings. Pass queryText to find screenshots matching a description, or queryImageBase64/queryImageRef to find similar images. Requires AGENTMEMORY_IMAGE_EMBEDDINGS=true.",
+      "Find stored image embeddings by text description or image similarity. Requires AGENTMEMORY_IMAGE_EMBEDDINGS=true and its image provider. Supply queryText, queryImageBase64 or queryImageRef; precedence is text, base64, then file reference. File references must be registered under the managed image store. Returns similarity-ranked image references with scores and session/observation IDs, plus total candidates; sessionId narrows scope. Use memory_smart_search for textual observations.",
     inputSchema: {
       type: "object",
       properties: {
@@ -235,7 +235,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_timeline",
-    description: "Chronological observations around an anchor point. Read the whole requested window using offset and nextOffset; each page has at most 100 entries and 2 MiB of serialized response.",
+    description: "Retrieve a chronological observation window around an ISO timestamp or keyword to reconstruct nearby activity. before and after define the full window; follow nextOffset with offset until null. Returns observations and pagination metadata, bounded to 100 entries and 2 MiB per page. Omitted project searches all projects; specify an exact project to narrow it. Records retention access unless trackAccess=false. Use memory_smart_search for relevance-ranked discovery.",
     inputSchema: {
       type: "object",
       properties: {
@@ -268,7 +268,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_profile",
-    description: "User/project profile with top concepts and file patterns.",
+    description: "Get a project overview from its 20 most recent visible sessions: top concepts/files, conventions, errors and recent activity. Returns {profile,cached}, or {profile:null,reason:'no_sessions'}. A current cache is reused for up to one hour; refresh='true' forces recomputation. Recomputing persists the profile cache and an audit entry. Supply the exact project identifier; agentId preserves configured scope. Use memory_patterns to inspect recurring co-changes or errors.",
     inputSchema: {
       type: "object",
       properties: {
@@ -284,12 +284,12 @@ export const CORE_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_export",
-    description: "Export all memory data as JSON.",
+    description: "Return a versioned JSON export of stored AgentMemory data, including sessions, observations, memories, graph and derived collections. Use for backup or transfer; this tool returns data rather than writing an export file. It has no project filter and may expose a large cross-project payload. Oversized responses report a transport-limit error. Use memory_obsidian_export for Markdown files or memory_snapshot_create for a local Git snapshot.",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "memory_relations",
-    description: "Query the memory relationship graph.",
+    description: "Follow stored memory-to-memory relations, related IDs, supersession and parent links from memoryId. Returns confidence-ranked results containing memory, hop and confidence; the starting memory is excluded. maxHops defaults to two and is capped at five, with at most 500 visited memories. Returned memories record retention access. Use memory_graph_query for the separate entity/concept graph rather than memory relationships.",
     inputSchema: {
       type: "object",
       properties: {
@@ -324,7 +324,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_commits",
     description:
-      "List recent commits linked to agent sessions, optionally filtered by branch or repo.",
+      "List recorded Git commit/session links, newest linkedAt first, with optional exact branch and remote repo URL filters. Returns {commits}; limit defaults to 100 and is capped at 500. Excluded ambient sessions are removed from session links. This queries stored links rather than scanning Git repositories. Use memory_commit_lookup when you already know a commit SHA.",
     inputSchema: {
       type: "object",
       properties: {
@@ -340,7 +340,7 @@ export const V040_TOOLS: McpToolDef[] = [
   {
     name: "memory_claude_bridge_sync",
     description:
-      "Sync memory state to/from Claude Code's native MEMORY.md file.",
+      "Exchange data with the configured Claude Code MEMORY.md bridge. direction='read' reads and parses the file, storing a last-read snapshot and audit entry; it does not create durable memories. direction='write' overwrites MEMORY.md with visible latest memories under the configured line budget and returns its path and line count. Requires an enabled bridge and configured file path. Use memory_export for a complete JSON backup.",
     inputSchema: {
       type: "object",
       properties: {
@@ -356,7 +356,7 @@ export const V040_TOOLS: McpToolDef[] = [
   {
     name: "memory_graph_query",
     description:
-      "Query AgentMemory's stored knowledge graph inside an explicit project. Use '*' only for a deliberate cross-project read. Automatic graph extraction is not required.",
+      "Read stored entity/concept graph nodes and edges in an explicit project, or '*' for deliberate cross-project reads; no automatic extraction is required. startNodeId selects bounded traversal, while query and nodeType filter nodes. Returns nodes, page-local edges, depth, totals and pagination/truncation metadata. edgeLimit/edgeOffset opt into an independent exact edge inventory page. Inspect warnings and totalsExact before treating totals as complete. Use memory_relations for memory-to-memory links.",
     inputSchema: {
       type: "object",
       properties: {
@@ -399,7 +399,7 @@ export const V040_TOOLS: McpToolDef[] = [
   {
     name: "memory_graph_upsert",
     description:
-      "Durably upsert Codex-authored zero-LLM graph nodes and relationships into AgentMemory's official graph store with exact source provenance.",
+      "Create or merge manually authored graph nodes and edges in an exact project without an LLM. Official session/observation sources must belong to that project. Node keys are request-local edge endpoints; sourceIndexes selects supporting source groups, or sharedSources=true explicitly shares all groups. existingNodeId targets one validated live node. Writes provenance and audit records; returns node-key-to-ID mappings and node/edge created/merged counts. Use memory_graph_query to inspect existing graph records first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -635,7 +635,7 @@ export const V040_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_team_share",
-    description: "Share a memory or observation with team members.",
+    description: "Publish an existing memory or pattern into the configured team's shared feed, returning {success,sharedItem}. Requires TEAM_ID and USER_ID; repeated calls create additional shared items and audit entries. The observation itemType currently fails because its required sessionId is not exposed by this MCP tool. Use memory_team_feed to inspect shared items, and share only content approved for that team.",
     inputSchema: {
       type: "object",
       properties: {
@@ -653,7 +653,7 @@ export const V040_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_team_feed",
-    description: "Get recent shared items from all team members.",
+    description: "Read the configured team's shared memory, pattern and observation feed, newest sharedAt first. Returns {items,total}; limit bounds returned items (default 20), while total counts all shared entries. Requires TEAM_ID and USER_ID; an unavailable team backend returns a setup message. Use memory_team_share to publish an item; this feed does not retrieve unshared personal memories.",
     inputSchema: {
       type: "object",
       properties: {
@@ -663,7 +663,7 @@ export const V040_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_audit",
-    description: "View the audit trail of memory operations.",
+    description: "Inspect recorded memory operations to explain a change or verify its history. Returns audit entries newest first, optionally filtered by exact operation name; limit defaults to 50. Entries include timestamps, affected IDs and operation details. This queries existing audit records rather than checking subsystem health; use memory_diagnose for current consistency checks. Query failures return an error result.",
     inputSchema: {
       type: "object",
       properties: {
@@ -674,7 +674,7 @@ export const V040_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_governance_delete",
-    description: "Delete specific memories with audit trail. Supply the exact project for archive targets; deleted originals' archive metadata is removed after deletion.",
+    description: "Permanently delete the comma-separated memoryIds and their access/search-index entries, recording an audit reason. Use memory_archive for reversible hiding. Supply the exact project for archived targets; when supplied, every selected existing memory must belong to it. Deleted originals' archive metadata is removed. Returns success, deleted count and requested total, plus archiveStatesRemoved when applicable; missing IDs are skipped. This does not delete sessions or observations.",
     inputSchema: {
       type: "object",
       properties: {
@@ -690,7 +690,7 @@ export const V040_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_snapshot_create",
-    description: "Create a git-versioned snapshot of current memory state.",
+    description: "Capture current exported memory state in the configured local snapshot directory, write state.json and commit it in that directory's Git repository. Requires Git and writable snapshot storage. Returns snapshot ID, commit hash, timestamp, message and counts, or a successful no-op message for an overlapping/no-change snapshot. This mutates local files and Git state; use memory_export when you only need returned JSON.",
     inputSchema: {
       type: "object",
       properties: {
@@ -704,7 +704,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_action_create",
     description:
-      "Create an actionable work item with typed dependencies. Actions track what agents need to do and how work items relate to each other.",
+      "Persist a work item and optional dependency edges, returning {success,action,edges}. title is required; parentId and comma-separated requires IDs must name existing actions. Any requires edge creates the action as blocked; otherwise it starts pending. Priority defaults to five and is clamped to 1-10. Each call creates a new action and audit entry. Use memory_action_update for an existing action or memory_routine_run for a stored workflow.",
     inputSchema: {
       type: "object",
       properties: {
@@ -738,7 +738,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_action_update",
     description:
-      "Update an action's status, priority, or details. Set status to 'done' to complete it and unblock dependent actions.",
+      "Change an existing action's status, result or priority, returning the updated action and recording an audit entry. status='done' can return blocked dependents to pending when their required actions are done; this propagation does not recheck checkpoint gates. Missing actions return an error; priority is clamped to 1-10. Use memory_action_create for new work and memory_lease to claim execution rather than merely changing status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -759,7 +759,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_frontier",
     description:
-      "Get all unblocked actions ranked by priority and urgency. Returns the frontier of actionable work with no unsatisfied dependencies.",
+      "Rank unfinished actions with no detected dependency, checkpoint or active-conflict blockers. Returns frontier items with action, score and lease state, plus totalActions and totalUnblocked; project filters the set. Supply agentId to exclude actions leased by others. This suggests candidates without acquiring leases or changing status. Use memory_next for a single suggestion and memory_lease to claim an action.",
     inputSchema: {
       type: "object",
       properties: {
@@ -775,7 +775,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_next",
     description:
-      "Get the single most important next action to work on. Combines dependency resolution, priority, and recency into a score.",
+      "Suggest the highest-ranked action from memory_frontier for the optional project and agentId. Returns suggestion with action ID, title, priority and score plus counts, or suggestion:null when no actionable work is found. Supplying agentId accounts for leases held by other agents. It does not claim the action or start work; use memory_lease to acquire it, or memory_frontier to compare several candidates.",
     inputSchema: {
       type: "object",
       properties: {
@@ -787,7 +787,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_lease",
     description:
-      "Acquire, release, or renew an exclusive lease on an action. Prevents multiple agents from working on the same thing.",
+      "Acquire, renew or release an action lease for agentId. Acquire requires an unfinished, unblocked action and marks it active/assigned; another holder returns a conflict. Renew requires this agent's live lease. Release with a nonempty result marks the assigned action done; otherwise it returns to pending. Release does not propagate dependent completion; use memory_action_update for that transition. Writes lease/action/audit state and returns lease details or released:true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -812,7 +812,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_routine_run",
     description:
-      "Instantiate a frozen workflow routine, creating actions for each step with proper dependencies.",
+      "Start a new run of an existing routineId, creating an action for each stored workflow step and requires edges between dependent steps. Returns {success,run,actionsCreated}; missing routines return an error. project supplies context for created actions and initiatedBy records the initiator. Each call creates a fresh run and audit entry; it does not execute the work. Use memory_action_create for a single work item.",
     inputSchema: {
       type: "object",
       properties: {
@@ -826,7 +826,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_signal_send",
     description:
-      "Send a message to another agent or broadcast. Supports threading, typed messages, and TTL expiration.",
+      "Store a typed message for another AgentMemory agent, or broadcast by omitting to, returning {success,signal}. Requires nonempty from and content. replyTo reuses an existing parent signal's thread when found; otherwise a new thread is created. Writes message and audit state. This MCP surface exposes no TTL parameter. Use memory_signal_read to retrieve messages; sending requires authorization for the recipient and content.",
     inputSchema: {
       type: "object",
       properties: {
@@ -851,7 +851,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_signal_read",
     description:
-      "Read messages for an agent. Marks delivered messages as read.",
+      "Read non-expired signals visible to agentId, newest first, returning {success,signals}. threadId narrows a conversation; unreadOnly='true' selects unread messages addressed directly to this agent, excluding broadcasts. Returned unread direct messages are marked read and audited; sent messages and broadcasts are visible in ordinary reads. limit defaults to 50. Use memory_signal_send to create a message.",
     inputSchema: {
       type: "object",
       properties: {
@@ -872,7 +872,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_checkpoint",
     description:
-      "Create or resolve an external checkpoint (CI result, approval, deploy status) that gates action progress.",
+      "Manage a recorded external gate rather than performing a CI, approval or deploy check itself. operation='create' requires name and optionally gates existing linkedActionIds; 'resolve' requires checkpointId and passed/failed status. Passing can unblock actions when all requirements/gates are met; resolving a non-pending checkpoint fails. 'list' reads stored checkpoints. Returns checkpoint and unblock count, or a checkpoint list. Create/resolve persist state and audit entries; use sentinels for event-driven conditions.",
     inputSchema: {
       type: "object",
       properties: {
@@ -905,7 +905,7 @@ export const V050_TOOLS: McpToolDef[] = [
   {
     name: "memory_mesh_sync",
     description:
-      "Sync memories and actions with peer agentmemory instances for multi-agent collaboration.",
+      "Exchange configured shared collections with registered peer AgentMemory instances. Requires AGENTMEMORY_SECRET and reachable permitted peer URLs. peerId selects one peer; omission selects all, with direction push, pull or both (default both). Push sends local data; pull merges received records. Updates local peer/audit state and returns per-peer pushed/pulled counts and errors, even when some peers fail. Use only for authorized peer transfers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -926,7 +926,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_sentinel_create",
     description:
-      "Create an event-driven sentinel that watches for conditions (webhook, timer, threshold, pattern, approval) and auto-unblocks gated actions when triggered.",
+      "Persist a watching sentinel and optional gates on existing linkedActionIds. Supply config as JSON: timer needs positive durationMs; threshold needs metric, operator gt/lt/eq and numeric value; pattern needs a pattern string; webhook needs a path. Timers schedule a local callback; other types rely on checks or external triggering. Returns {success,sentinel} and records audit state. Use memory_checkpoint for a manually resolved external gate.",
     inputSchema: {
       type: "object",
       properties: {
@@ -951,7 +951,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_sentinel_trigger",
     description:
-      "Externally fire a sentinel, providing an optional result payload. Unblocks any gated actions.",
+      "Fire an existing watching sentinel by ID, optionally attaching a JSON result payload. Stores triggered status/time, records an audit entry and can return linked blocked actions to pending when their gates pass; this does not recheck required action dependencies. Returns {success,sentinel,unblockedCount}; missing or non-watching sentinels return an error. Use memory_sentinel_create to register a condition or memory_checkpoint to resolve a recorded external check.",
     inputSchema: {
       type: "object",
       properties: {
@@ -979,7 +979,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_sketch_promote",
     description:
-      "Promote a sketch's ephemeral actions to permanent actions. Makes the exploratory work official.",
+      "Promote the existing actions of an active sketchId into regular work items by removing their sketch association; optional project changes their project. Marks the sketch promoted and records audit entries, returning {success,promotedIds}. Missing or non-active sketches fail. An empty sketch promotes no actions. Use after exploratory work is accepted; memory_action_create directly creates regular work items.",
     inputSchema: {
       type: "object",
       properties: {
@@ -992,7 +992,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_crystallize",
     description:
-      "Compress completed action chains into compact crystal digests using LLM summarization. Extracts narrative, key outcomes, files affected, and lessons.",
+      "Summarize the specified done or cancelled actions and their links using the configured LLM. Stores a crystal digest, attempts to save extracted lessons and links source actions to the crystal; returns {success,crystal}. Missing or unfinished action IDs fail. actionIds is comma-separated; project/sessionId annotate the digest. Use for a completed work chain, not general recall; zero-LLM workflows should save curated lessons directly with memory_lesson_save.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1009,7 +1009,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_diagnose",
     description:
-      "Run health checks across all subsystems (actions, leases, sentinels, sketches, signals, sessions, memories, mesh). Identifies stuck, orphaned, and inconsistent state.",
+      "Inspect current subsystem consistency, returning {success,checks,summary} with pass/warn/fail and fixable counts. categories is comma-separated; omission checks all supported categories, and unknown names are ignored. Checks cover action dependencies, leases, sentinels, sketches, signals, sessions, memory and derived data, and mesh state. Does not apply repairs. Review the findings before using memory_heal; use memory_audit for historical operations.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1023,7 +1023,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_heal",
     description:
-      "Auto-fix all fixable issues found by diagnostics. Unblocks stuck actions, expires stale leases, cleans up orphaned data.",
+      "Apply supported repairs for selected diagnostic categories: action dependency state, expired/orphaned leases, sentinels, sketch actions, signals and superseded memories. This can delete orphaned or expired records and changes state with audit entries. dryRun='true' reports proposed fixes without applying them; default applies repairs. Returns {success,fixed,skipped,details}. Run memory_diagnose first and review which issues are fixable; not every diagnostic has an automatic repair.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1041,7 +1041,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_facet_tag",
     description:
-      "Attach a structured tag (dimension:value) to an action, memory, or observation for multi-dimensional categorization.",
+      "Store a dimension:value facet on an action, memory or observation ID for later filtering with memory_facet_query. Returns {success,facet}; a matching targetId/dimension/value already present returns skipped:true without adding another facet. dimension and value must be nonempty. This stores categorization metadata and does not update the target's content or status; use memory_action_update to change an action's state.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1059,7 +1059,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_facet_query",
     description:
-      "Query targets by facet tags with AND/OR logic. Find all actions tagged priority:urgent AND team:backend.",
+      "Find IDs categorized by stored dimension:value facets. Supply at least one comma-separated matchAll (AND) or matchAny (OR) list; when both are present, both conditions must pass. targetType optionally narrows action, memory or observation matches. Returns up to 50 results with targetId, targetType and matchedFacets, not full target records. Use memory_facet_tag to add facets or memory_recall for content-based retrieval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1106,7 +1106,7 @@ export const V070_TOOLS: McpToolDef[] = [
   {
     name: "memory_lesson_save",
     description:
-      "Save a lesson learned from this session. Lessons have confidence scores that strengthen when reinforced and decay when not used. Duplicate content auto-strengthens the existing lesson.",
+      "Persist a reusable lesson in an exact project with context, confidence and optional official observation provenance. sources pairs are preferred; sourceIds supplies comma-separated observation IDs, all validated in that project. Matching normalized content strengthens the existing lesson and merges support/tags; otherwise creates one. Returns {success,action,lesson}, with action created or strengthened. Use memory_save for decisions/preferences, and memory_lesson_recall before applying earlier lessons.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1154,7 +1154,7 @@ export const V070_TOOLS: McpToolDef[] = [
   {
     name: "memory_lesson_recall",
     description:
-      "Search lessons by query. Returns lessons sorted by confidence and recency. Use to check what the agent has learned before making decisions.",
+      "Search saved lessons by keywords in an explicit project; '*' deliberately searches across projects. Excludes deleted/archived lessons and those below minConfidence. Returns {success,lessons} with scores ranked by relevance, confidence and recency, bounded by limit. It retrieves existing lessons without generating or reinforcing them. Use before choosing an approach; memory_recall also searches ordinary observations and durable memories.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1185,7 +1185,7 @@ export const V070_TOOLS: McpToolDef[] = [
   {
     name: "memory_obsidian_export",
     description:
-      "Export memories, lessons, and crystals as Obsidian-compatible Markdown files with YAML frontmatter and wikilinks for graph view.",
+      "Write Obsidian Markdown notes and MOC.md for selected memories, lessons, crystals and sessions, with frontmatter and wikilinks. types is comma-separated; omission exports all four collections. vaultDir must stay under AGENTMEMORY_EXPORT_ROOT (default ~/.agentmemory). Creates directories and overwrites matching generated filenames; records an audit entry. Returns per-type exported counts, vaultDir and any per-file errors. Use memory_export for returned JSON instead of filesystem output.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1206,7 +1206,7 @@ export const V073_TOOLS: McpToolDef[] = [
   {
     name: "memory_reflect",
     description:
-      "Traverse the knowledge graph, group related memories by concept clusters, and synthesize higher-order insights via LLM. Returns new and reinforced insights.",
+      "Synthesize new insights or reinforce existing ones from project concept clusters using an enabled LLM. Requires an exact project and rejects '*' or noop-provider mode. Uses stored graph clusters or a similarity fallback over facts/lessons; persists insights and audit state. Returns newInsights, reinforced, clustersProcessed, clustersSkipped and usedFallback. Use memory_insight_list to read existing insights or memory_patterns for deterministic recurring file/error patterns.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1222,7 +1222,7 @@ export const V073_TOOLS: McpToolDef[] = [
   {
     name: "memory_insight_list",
     description:
-      "List synthesized insights — higher-order observations derived from patterns across memories, lessons, and crystals.",
+      "Read existing synthesized insights, excluding deleted entries and filtering by optional exact project and minConfidence. Returns {success,insights}, highest confidence first and bounded by limit (default 50). Omitted project lists insights across projects. This does not generate new insights; use memory_reflect for LLM synthesis or memory_lesson_recall for learned procedures and lessons.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1241,12 +1241,12 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   {
     name: "memory_slot_list",
     description:
-      "List all memory slots (pinned + project + global). Slots are editable, size-limited memory units the agent can read and modify across sessions.",
+      "List effective editable memory slots, sorted by label, returning {success,slots} with content, size limits, pinning and scope. Project-scope slots shadow global slots with the same label; unpinned and empty slots are included. Use to inspect current context before creating or editing a slot, or memory_slot_get when you know its label. Slots are fixed-size context units rather than relevance-ranked memories.",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "memory_slot_get",
-    description: "Read a single slot by label.",
+    description: "Read the effective slot named by label, returning {success,slot,scope} with its content and metadata. A project-scope slot takes precedence over a global slot with the same label. Invalid labels or missing slots return success:false. Use memory_slot_list to discover labels, and memory_slot_replace or memory_slot_append to edit the retrieved context unit.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1257,7 +1257,7 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_slot_create",
-    description: "Create a new slot. Reject if a slot with the same label already exists.",
+    description: "Persist a new size-limited context slot, returning {success,slot}. label is lowercase, starts with a letter, uses letters/digits/underscores and is at most 64 characters. sizeLimit is an integer from 1 to 20000; content must fit. Rejects duplicate labels within the selected scope; a project slot can shadow a global one. Pinned slots participate in context injection. Use memory_slot_replace for existing content; creation records an audit entry.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1274,7 +1274,7 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   {
     name: "memory_slot_append",
     description:
-      "Append text to an existing slot. Fails with 413 if the append would exceed the slot's sizeLimit — agent must compact via memory_slot_replace first.",
+      "Append text to an existing effective slot, inserting a newline when needed, and record an audit entry. Returns the updated slot and size, or success:false for a missing/read-only slot or sizeLimit overflow. Overflow leaves the content unchanged; use memory_slot_replace to compact it first. Project slots shadow global slots with the same label. Repeated calls append again; use memory_slot_create when the label does not exist.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1286,7 +1286,7 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_slot_replace",
-    description: "Replace slot content in place. Fails if content exceeds sizeLimit.",
+    description: "Replace the complete content of an existing effective slot, preserving its metadata and size limit. Empty content clears the slot. Returns {success,slot,size}; missing/read-only slots or oversized content fail without replacement. Project slots take precedence over global slots with the same label. Records an audit entry. Use memory_slot_append to add text or memory_slot_create for a new label.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1298,7 +1298,7 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_slot_delete",
-    description: "Delete a slot. Seeded default slots can be deleted unless marked readOnly.",
+    description: "Delete the effective slot and record an audit entry, returning {success:true}. Missing or read-only slots fail; seeded default slots are deletable when writable. With duplicate labels, deletes the project slot first, revealing the global slot on later reads. This removes the context unit rather than clearing its content; use memory_slot_replace with empty content to retain it.",
     inputSchema: {
       type: "object",
       properties: {
