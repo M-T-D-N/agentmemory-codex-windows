@@ -1,9 +1,15 @@
 # Windows용 Codex AgentMemory
 
+<p align="center">
+  <img src="../assets/readme-banner.svg" alt="AgentMemory for Codex on Windows" width="1120" />
+</p>
+
 OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMemory
 다운스트림입니다.
 
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
+
+[빌드 없이 설치](#빌드-없이-설치하기) · [운영 가이드](../packaging/windows-codex/README.md) · [검증 범위](#검색필터인덱스의-동작과-검증-범위) · [릴리스 변경](../CHANGELOG.md)
 
 > [!IMPORTANT]
 > 이 저장소는 독립 Technical Preview `0.1.0-preview.14`입니다.

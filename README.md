@@ -1,5 +1,9 @@
 # AgentMemory for Codex on Windows
 
+<p align="center">
+  <img src="assets/readme-banner.svg" alt="AgentMemory — independent memory for Codex on Windows, with managed capture, project-scoped recall and provenance" width="1120" />
+</p>
+
 Independent, Windows-native AgentMemory downstream for OpenAI Codex Desktop
 and Codex CLI.
 
@@ -7,9 +11,11 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.13-orange" alt="0.1.0-preview.14" />
+  <img src="https://img.shields.io/badge/status-Technical_Preview-286b85" alt="Technical Preview" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
+
+[Install without building](#install-without-building) · [Operating guide](packaging/windows-codex/README.md) · [Validation and limits](#validation-scope-and-known-limitations) · [Release notes](CHANGELOG.md)
 
 > [!IMPORTANT]
 > This is an independent Technical Preview. It is based on
