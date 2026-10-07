@@ -1456,7 +1456,10 @@ async function apiFetch<T = unknown>(base: string, path: string, timeoutMs = 500
       signal: AbortSignal.timeout(timeoutMs),
       headers,
     });
-    return (await res.json()) as T;
+    if (!res.ok) return null;
+    const payload = await res.json();
+    if (payload && typeof payload === "object" && ("error" in payload || payload.success === false)) return null;
+    return payload as T;
   } catch {
     return null;
   }
@@ -1476,9 +1479,9 @@ async function runStatus() {
   try {
     const [healthRes, sessionsRes, graphRes, memoriesRes, flagsRes, followupRes] = await Promise.all([
       apiFetch<any>(base, "health"),
-      apiFetch<any>(base, "sessions"),
+      apiFetch<any>(base, "sessions?project=*"),
       apiFetch<any>(base, "graph/stats"),
-      apiFetch<any>(base, "memories?count=true"),
+      apiFetch<any>(base, "memories?count=true&project=*"),
       apiFetch<any>(base, "config/flags"),
       apiFetch<any>(base, "diagnostics/followup"),
     ]);
@@ -1489,44 +1492,43 @@ async function runStatus() {
     const h = healthRes?.health;
     const status = healthRes?.status || "unknown";
     const version = healthRes?.version || "?";
-    const sessionList = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : [];
-    const sessions = sessionList.length;
-    const nodes = Number(graphRes?.totalNodes ?? graphRes?.nodes ?? graphRes?.nodeCount ?? 0);
-    const edges = Number(graphRes?.totalEdges ?? graphRes?.edges ?? graphRes?.edgeCount ?? 0);
-    const cb = healthRes?.circuitBreaker?.state || "closed";
-    const heapMB = h?.memory ? Math.round(h.memory.heapUsed / 1048576) : 0;
-    const uptime = h?.uptimeSeconds ? Math.round(h.uptimeSeconds) : 0;
+    const statusNumber = (value: unknown): number | null => {
+      if ((typeof value !== "number" && typeof value !== "string") ||
+          (typeof value === "string" && !value.trim())) return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    const sessionList: any[] | null = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : null;
+    const sessions = statusNumber(sessionsRes?.total);
+    const nodes = statusNumber(graphRes?.totalNodes ?? graphRes?.nodes ?? graphRes?.nodeCount);
+    const edges = statusNumber(graphRes?.totalEdges ?? graphRes?.edges ?? graphRes?.edgeCount);
+    const cb = healthRes?.circuitBreaker?.state || "unavailable";
+    const heapBytes = statusNumber(h?.memory?.heapUsed);
+    const heapMB = heapBytes === null ? null : Math.round(heapBytes / 1048576);
+    const uptimeSeconds = statusNumber(h?.uptimeSeconds);
+    const uptime = uptimeSeconds === null ? null : Math.round(uptimeSeconds);
 
-    const obsCount = sessionList.reduce(
-      (sum: number, s: any) => sum + (Number(s?.observationCount) || 0),
-      0,
-    );
-    const memCount = Number(memoriesRes?.latestCount ?? memoriesRes?.total ?? 0) || 0;
-    const estFullTokens = obsCount * 80;
-    const estInjectedTokens = Math.min(obsCount, 50) * 38;
-    const tokensSaved = estFullTokens - estInjectedTokens;
-    const pctSaved = estFullTokens > 0 ? Math.round((tokensSaved / estFullTokens) * 100) : 0;
+    const obsCount = sessionList?.reduce<number | null>((sum, session) => {
+      const count = statusNumber(session?.observationCount);
+      return sum === null || count === null ? null : sum + count;
+    }, 0) ?? null;
+    const observations = obsCount === null ? "unavailable" : `${obsCount} (returned session page)`;
+    const memCount = statusNumber(memoriesRes?.latestCount ?? memoriesRes?.total);
 
     p.log.success(`Connected — v${version} at ${base}`);
 
     const lines = [
       `Health:       ${status === "healthy" ? pc.green("✓ healthy") : pc.yellow(status)}`,
-      `Sessions:     ${sessions}`,
-      `Observations: ${obsCount}`,
-      `Memories:     ${memCount}`,
-      `Graph:        ${nodes} nodes, ${edges} edges`,
+      "Memory scope: all projects; current configured agent scope",
+      `Sessions:     ${sessions ?? "unavailable"}`,
+      `Observations: ${observations}`,
+      `Memories:     ${memCount ?? "unavailable"}`,
+      `Graph:        ${nodes ?? "unavailable"} nodes, ${edges ?? "unavailable"} edges`,
       `Circuit:      ${cb}`,
-      `Heap:         ${heapMB} MB`,
-      `Uptime:       ${uptime}s`,
+      `Heap:         ${heapMB === null ? "unavailable" : `${heapMB} MB`}`,
+      `Uptime:       ${uptime === null ? "unavailable" : `${uptime}s`}`,
       `Viewer:       ${c.url(getViewerUrl())}`,
     ];
-
-    if (obsCount > 0) {
-      lines.push("");
-      lines.push(`Token savings: ~${tokensSaved.toLocaleString()} tokens saved (${pctSaved}% reduction)`);
-      lines.push(`  Full context: ~${estFullTokens.toLocaleString()} tokens`);
-      lines.push(`  Injected:     ~${estInjectedTokens.toLocaleString()} tokens`);
-    }
 
     if (flagsRes) {
       const provider = flagsRes.provider === "llm" ? pc.green("✓ llm") : pc.yellow("✗ noop (no key)");
@@ -1544,10 +1546,10 @@ async function runStatus() {
     if (followupRes && Number.isFinite(followupRes.agentInitiatedSearches)) {
       const total = Number(followupRes.agentInitiatedSearches) || 0;
       const hits = Number(followupRes.followupWithinWindow) || 0;
-      const pct = total > 0 ? Math.round((hits / total) * 100) : 0;
+      const rate = total > 0 ? `${Math.round((hits / total) * 100)}%` : "unavailable: no searches yet";
       lines.push("");
       lines.push(
-        `Followup rate: ${hits}/${total} (${pct}%) within ${followupRes.windowSeconds}s — directional, may overcount on refinement`,
+        `Followup rate: ${hits}/${total} (${rate}) within ${followupRes.windowSeconds}s — directional, may overcount on refinement`,
       );
     }
 

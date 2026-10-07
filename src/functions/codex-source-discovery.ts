@@ -18,20 +18,19 @@ import { initializeCodexSourceCapture } from "./codex-source-capture.js";
 const exact = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
   value.length <= 512 && value.trim() === value && value !== "*";
 
-function matchesIndexedCwd(session: Session, candidate: CodexThreadCandidate, currentCwd = session.codexNativeCapture?.cursor?.parser?.cwd) {
+function matchesCaptureScope(session: Session, candidate: CodexThreadCandidate) {
   const canonical = canonicalCodexCwd(session.cwd!);
-  if (canonical === candidate.cwd) return true;
   const capture = session.codexNativeCapture;
-  return Boolean(capture && (capture.cursor?.ordinal ?? 0) > 0 &&
+  if (!capture) return canonical === candidate.cwd;
+  return Boolean(capture &&
     capture.source.sessionId === session.id && capture.source.source === candidate.source &&
-    canonicalCodexCwd(capture.captureCwd ?? capture.source.cwd) === canonical &&
-    currentCwd === candidate.cwd);
+    canonicalCodexCwd(capture.captureCwd ?? capture.source.cwd) === canonical);
 }
 
 export function existingCodexDiscoveryStatus(session: Session, candidate: CodexThreadCandidate, agentId: string) {
   if (isExcludedCodexAmbientSession(session)) return "excluded" as const;
   if (session.id !== candidate.sessionId || session.agentId !== agentId || !exact(session.project) || typeof session.cwd !== "string") return "reconcile_required" as const;
-  try { if (!matchesIndexedCwd(session, candidate)) return "reconcile_required" as const; }
+  try { if (!matchesCaptureScope(session, candidate)) return "reconcile_required" as const; }
   catch { return "reconcile_required" as const; }
   if (!session.codexNativeCapture) return "inspect" as const;
   if (session.codexNativeCapture.source?.sessionId !== session.id || session.codexNativeCapture.source?.source !== candidate.source) return "reconcile_required" as const;
@@ -55,7 +54,7 @@ async function relocateCodexSource(kv: StateKV, candidate: CodexThreadCandidate,
       sessionId: session.id, cursor: state.cursor, sourceHolds: state.sourceHolds, maxBytes: 1, maxMessages: 1 });
     if (verified.source.source !== candidate.source ||
         (state.captureCwd !== undefined && typeof state.captureCwd !== "string") ||
-        !matchesIndexedCwd(session, candidate, verified.cursor.parser.cwd) ||
+        !matchesCaptureScope(session, candidate) ||
         !isDeepStrictEqual({ ...state.source, relativePath: verified.source.relativePath }, verified.source)) {
       return { status: "reconcile_required" as const, reason: "relocated_source_identity_changed" };
     }

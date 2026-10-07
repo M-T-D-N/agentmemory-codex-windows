@@ -179,8 +179,9 @@ async function main() {
     !localQwenGraphOnly && fallbackConfig.providers.length > 0
       ? createFallbackProvider(generalProviderConfig, fallbackConfig)
       : createProvider(generalProviderConfig);
+  const graphShutdown = new AbortController();
   const graphProvider = localQwenGraphOnly
-    ? createProvider(config.provider)
+    ? createProvider(config.provider, graphShutdown.signal)
     : provider;
 
   let graphProviderRuntime: ProviderRuntimeInfo | null = null;
@@ -442,7 +443,7 @@ async function main() {
 
   const hybridRanker = (query: string, limit: number, selection?: import("./functions/search-candidates.js").SearchCandidateSelection, policy?: import("./state/hybrid-search.js").AutomaticRetrievalPolicy) =>
     hybridSearch.search(query, limit, selection, policy);
-  registerSmartSearchFunction(sdk, kv, hybridRanker);
+  registerSmartSearchFunction(sdk, kv, hybridRanker, id => bm25Index.getSessionId(id));
   setHybridRanker(hybridRanker);
   registerRecentSearchesSweepFunction(sdk, kv);
 
@@ -652,6 +653,7 @@ async function main() {
 
   const shutdown = async () => {
     console.log(`\n[agentmemory] Shutting down...`);
+    graphShutdown.abort();
     indexReconciliation.abort();
     clearTimeout(indexRetry);
     await nativeSourceScheduler?.stop();

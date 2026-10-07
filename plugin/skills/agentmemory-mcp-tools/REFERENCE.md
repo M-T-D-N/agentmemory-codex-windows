@@ -22,7 +22,7 @@ agentmemory exposes 58 MCP tools. 8 are in the lean core set (`--tools core` or 
 | `memory_export` |  | none | Export all memory data as JSON. |
 | `memory_facet_query` |  | `matchAll`: string, `matchAny`: string, `targetType`: string | Query targets by facet tags with AND/OR logic. Find all actions tagged priority:urgent AND team:backend. |
 | `memory_facet_tag` |  | `targetId`*: string, `targetType`*: string, `dimension`*: string, `value`*: string | Attach a structured tag (dimension:value) to an action, memory, or observation for multi-dimensional categorization. |
-| `memory_file_history` |  | `files`*: string, `sessionId`: string | Get past observations about specific files. |
+| `memory_file_history` |  | `project`: string, `agentId`: string, `files`*: string, `sessionId`: string | Get past observations about specific files. |
 | `memory_frontier` |  | `project`: string, `agentId`: string, `limit`: number | Get all unblocked actions ranked by priority and urgency. Returns the frontier of actionable work with no unsatisfied dependencies. |
 | `memory_governance_delete` |  | `memoryIds`*: string, `reason`: string, `project`: string | Delete specific memories with audit trail. Supply the exact project for archive targets; deleted originals' archive metadata is removed after deletion. |
 | `memory_graph_provenance_reconcile` |  | `action`: string, `project`*: string, `targets`*: array, `reason`*: string, `dryRun`: boolean | Reconcile exact graph provenance or reversibly retire/restore exact edges. Detach preserves a final source. Retire/restore preserve original provenance and require expectedUpdatedAt plus separate canonical review evidence. Edge history is unchanged. |
@@ -38,8 +38,8 @@ agentmemory exposes 58 MCP tools. 8 are in the lean core set (`--tools core` or 
 | `memory_mesh_sync` |  | `peerId`: string, `direction`: string | Sync memories and actions with peer agentmemory instances for multi-agent collaboration. |
 | `memory_next` |  | `project`: string, `agentId`: string | Get the single most important next action to work on. Combines dependency resolution, priority, and recency into a score. |
 | `memory_obsidian_export` |  | `vaultDir`: string, `types`: string | Export memories, lessons, and crystals as Obsidian-compatible Markdown files with YAML frontmatter and wikilinks for graph view. |
-| `memory_patterns` |  | `project`: string | Detect recurring patterns across sessions. |
-| `memory_profile` |  | `project`*: string, `refresh`: string | User/project profile with top concepts and file patterns. |
+| `memory_patterns` |  | `agentId`: string, `project`: string | Detect recurring patterns across sessions. |
+| `memory_profile` |  | `agentId`: string, `project`*: string, `refresh`: string | User/project profile with top concepts and file patterns. |
 | `memory_recall` | yes | `query`*: string, `sourceKind`: string, `agentId`: string, `project`*: string, `limit`: number, `format`: string, `token_budget`: number, `trackAccess`: boolean | Search past observations and memories inside an explicit project. Use sourceKind='user' for original user requirements. Pass '*' for deliberate historical cross-project discovery when the actual work may have moved; retain source labels and verify relevance. |
 | `memory_reflect` | yes | `project`*: string, `maxClusters`: number | Traverse the knowledge graph, group related memories by concept clusters, and synthesize higher-order insights via LLM. Returns new and reinforced insights. |
 | `memory_relations` |  | `memoryId`*: string, `maxHops`: number, `minConfidence`: number | Query the memory relationship graph. |
@@ -58,11 +58,11 @@ agentmemory exposes 58 MCP tools. 8 are in the lean core set (`--tools core` or 
 | `memory_slot_get` |  | `label`*: string | Read a single slot by label. |
 | `memory_slot_list` |  | none | List all memory slots (pinned + project + global). Slots are editable, size-limited memory units the agent can read and modify across sessions. |
 | `memory_slot_replace` |  | `label`*: string, `content`*: string | Replace slot content in place. Fails if content exceeds sizeLimit. |
-| `memory_smart_search` | yes | `query`*: string, `agentId`: string, `project`*: string, `expandIds`: string, `limit`: number, `trackAccess`: boolean | Hybrid semantic+keyword search with progressive disclosure inside an explicit project. Pass '*' only for a deliberate cross-project read. |
+| `memory_smart_search` | yes | `query`: string, `agentId`: string, `project`*: string, `expandIds`: string, `limit`: number, `trackAccess`: boolean | Hybrid semantic+keyword search with progressive disclosure inside an explicit project. Pass '*' only for a deliberate cross-project read. |
 | `memory_snapshot_create` |  | `message`: string | Create a git-versioned snapshot of current memory state. |
 | `memory_team_feed` |  | `limit`: number | Get recent shared items from all team members. |
 | `memory_team_share` |  | `itemId`*: string, `itemType`*: string | Share a memory or observation with team members. |
-| `memory_timeline` |  | `anchor`*: string, `project`: string, `before`: integer, `after`: integer, `offset`: integer, `trackAccess`: boolean | Chronological observations around an anchor point. Read the whole requested window using offset and nextOffset; each page has at most 100 entries and 2 MiB of serialized response. |
+| `memory_timeline` |  | `agentId`: string, `anchor`*: string, `project`: string, `before`: integer, `after`: integer, `offset`: integer, `trackAccess`: boolean | Chronological observations around an anchor point. Read the whole requested window using offset and nextOffset; each page has at most 100 entries and 2 MiB of serialized response. |
 | `memory_verify` |  | `id`*: string, `project`*: string | Verify a memory or observation by tracing its citation chain back to source observations and session context. Returns provenance information including confidence scores. |
 | `memory_vision_search` |  | `queryText`: string, `queryImageRef`: string, `queryImageBase64`: string, `topK`: number, `sessionId`: string | Cross-modal image search via CLIP embeddings. Pass queryText to find screenshots matching a description, or queryImageBase64/queryImageRef to find similar images. Requires AGENTMEMORY_IMAGE_EMBEDDINGS=true. |
 

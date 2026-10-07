@@ -70,8 +70,6 @@ export const DIAGNOSTIC_IDS = [
   "iii-on-path-not-local-bin",
 ] as const;
 
-export type DiagnosticId = (typeof DIAGNOSTIC_IDS)[number];
-
 // Pure helpers (no I/O) — exported for direct unit testing.
 // ---------------------------------------------------------------------------
 
@@ -335,24 +333,6 @@ export function buildDiagnostics(effects: DoctorEffects): Diagnostic[] {
         })),
     },
   ];
-}
-
-export type DoctorRunMode = "interactive" | "all" | "dry-run";
-
-/**
- * Run all diagnostics and return their initial status (no fixes applied).
- * Useful for tests and for `--dry-run` mode.
- */
-export async function runAllChecks(
-  ctx: DoctorContext,
-  diagnostics: Diagnostic[],
-): Promise<Array<{ diagnostic: Diagnostic; status: DiagnosticStatus }>> {
-  const results: Array<{ diagnostic: Diagnostic; status: DiagnosticStatus }> = [];
-  for (const d of diagnostics) {
-    const status = await d.check(ctx);
-    results.push({ diagnostic: d, status });
-  }
-  return results;
 }
 
 /**

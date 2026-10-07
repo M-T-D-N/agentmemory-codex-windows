@@ -146,3 +146,43 @@ describe("archive-aware graph query and traversal", () => {
     expect(scopes).toEqual([KV.archiveStates, KV.archiveStates]);
   });
 });
+
+ it("hides graphs sourced only by internal evaluation across indexed, snapshot, walk and retrieval reads", async () => {
+   const f=await fixture();
+   const firstPrompt=JSON.stringify({instructions:"You are an independent reasoning-effort evaluator, not the task executor. Return only the supplied JSON schema.", question:"Which reasoning effort is sufficient for the NEXT generation of state.model?", state:{coverage:{source:"native DecisionContext + local projectEvidence"}}}).slice(0,200);
+   await f.kv.set(KV.sessions,"internal",{id:"internal",project:"p",firstPrompt});
+   const original=await f.kv.get<any>(KV.graphNodes,"b");
+   await f.kv.set(KV.graphNodes,"b",{...original,sourceSessionIds:["internal"]});
+   const edge=await f.kv.get<any>(KV.graphEdges,"ab");
+   await f.kv.set(KV.graphEdges,"ab",{...edge,sourceSessionIds:["internal"]});
+   const mixed=await f.kv.get<any>(KV.graphNodes,"c");
+   await f.kv.set(KV.graphNodes,"c",{...mixed,sourceSessionIds:["internal","s"]});
+   await f.sdk.trigger("mem::graph-snapshot-rebuild",{force:true});
+   const before=structuredClone([await f.kv.list(KV.graphNodes),await f.kv.list(KV.graphEdges)]);
+   for (const input of [{project:"p"},{project:"p",query:"Concept",edgeLimit:20},{startNodeId:"b",project:"p"},{}]) {
+     const result=await f.query(input);
+     expect(result.nodes.map(n=>n.id)).not.toContain("b");
+     expect(result.edges.some(e=>e.sourceNodeId==="b"||e.targetNodeId==="b")).toBe(false);
+     expect(result.edgeInventory?.some(e=>e.sourceNodeId==="b"||e.targetNodeId==="b")).not.toBe(true);
+   }
+   const indexed=await f.query({project:"p"});
+   expect(indexed.totalNodes).toBe(2);expect(indexed.nodes.map(n=>n.id)).toContain("c");
+   expect((await new GraphRetrieval(f.kv as never).temporalQuery("Concept b")).entity).toBeNull();
+   await f.kv.delete(KV.graphQueryManifest,"current");
+   expect((await f.query({project:"p",query:"Concept"})).nodes.map(n=>n.id)).not.toContain("b");
+   expect([await f.kv.list(KV.graphNodes),await f.kv.list(KV.graphEdges)]).toEqual(before);
+ });
+
+ it("invalidates exact edge inventory when source visibility changes during hydration", async () => {
+   const f=await fixture();
+   await f.kv.set(KV.sessions,"s",{id:"s",project:"p",firstPrompt:"Normal human request"});
+   const originalGet=f.kv.get; let changed=false;
+   f.kv.get=async (scope,key) => {
+     if (scope===KV.graphEdges) changed=true;
+     if (scope===KV.sessions && key==="s" && changed) return {id:"s",project:"p",captureExcluded:true} as any;
+     return originalGet(scope,key);
+   };
+   const result=await f.query({project:"p",query:"Concept",edgeLimit:20});
+   expect(result.edgeInventoryExact).toBe(false);
+   expect(result.warning).toContain("Graph changed during exact edge pagination");
+ });

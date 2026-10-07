@@ -104,3 +104,28 @@ describe("Audit Functions", () => {
     expect(entries.length).toBe(3);
   });
 });
+
+
+describe("managed audit paging", () => {
+  it("keeps exact newest filtered results across pages without a whole-scope RPC", async () => {
+    const rows = Array.from({ length: 300 }, (_, index) => ({
+      id: `aud_${index}`, timestamp: new Date(1700000000000 + (index % 91) * 1000).toISOString(),
+      operation: index % 2 ? "delete" : "observe", functionId: "test", targetIds: [], details: {},
+    }));
+    const managed = {
+      usesManagedState: true,
+      list: vi.fn(() => { throw Error("Whole audit scope read is forbidden"); }),
+      listPage: vi.fn(async (_scope: string, offset: number) => ({
+        entries: rows.slice(offset, offset + 128).map(value => ({ key: value.id, value })),
+        total: rows.length, next_offset: offset + 128 < rows.length ? offset + 128 : null,
+      })),
+    };
+    const filter = { operation: "delete" as const, limit: 7,
+      dateFrom: new Date(1700000030000).toISOString(), dateTo: new Date(1700000080000).toISOString() };
+    const expected = rows.filter(row => row.operation === filter.operation && row.timestamp >= filter.dateFrom && row.timestamp <= filter.dateTo)
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, filter.limit);
+    expect(await queryAudit(managed as never, filter)).toEqual(expected);
+    expect(managed.list).not.toHaveBeenCalled();
+    expect(managed.listPage.mock.calls.map(call => call[1])).toEqual([0, 128, 256]);
+  });
+});

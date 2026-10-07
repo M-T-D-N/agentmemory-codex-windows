@@ -230,6 +230,22 @@ describe("Lessons", () => {
       expect(result.lessons[0].content).toContain("Database indexing");
     });
 
+    it("keeps repeated recall read-only while preserving existing mutation audits", async () => {
+      const audits = await kv.list("mem:audit");
+      const lessons = await kv.list("mem:lessons");
+      for (let repeat = 0; repeat < 2; repeat++) {
+        const result = await sdk.trigger("mem::lesson-recall", {
+          query: "database performance",
+          project: "/app",
+        }) as { success: boolean; lessons: Lesson[] };
+        expect(result.success).toBe(true);
+        expect(result.lessons[0]?.content).toContain("Database indexing");
+      }
+      expect(await kv.list("mem:audit")).toEqual(audits);
+      expect(await kv.list("mem:lessons")).toEqual(lessons);
+      expect(audits).toHaveLength(3);
+    });
+
     it("filters by project", async () => {
       const result = (await sdk.trigger("mem::lesson-recall", {
         query: "type safety typescript",

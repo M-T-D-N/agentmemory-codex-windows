@@ -1,3 +1,4 @@
+import { summarySourceDigest, SUMMARY_VISIBILITY_REVISION } from "./summary-visibility.js";
 import type { ISdk } from "iii-sdk";
 import type {
   CompressedObservation,
@@ -368,6 +369,8 @@ export function registerSummarizeFunction(
 
         const qualityScore = scoreSummary(summaryForValidation);
 
+        summary.visibilityRevision = SUMMARY_VISIBILITY_REVISION;
+        summary.sourceDigest = summarySourceDigest(compressed);
         await kv.set(KV.summaries, sessionId, summary);
         await safeAudit(kv, "compress", "mem::summarize", [sessionId], {
           title: summary.title,

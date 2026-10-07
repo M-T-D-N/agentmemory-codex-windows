@@ -83,3 +83,26 @@ describe("CPU capacity in managed health checks", () => {
     } finally { monitor.stop(); }
   });
 });
+
+it("retries a busy graph repair at the next health cycle instead of queuing it or declaring failure", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+  const samples: HealthSnapshot[] = [];
+  let ready = false;
+  const snapshot = { dirty: false, stats: { totalNodes: 1, totalEdges: 0 }, updatedAt: "fixture" };
+  const kv = { usesManagedState: true, get: async (scope: string) => scope === "mem:graph:snapshot" ? snapshot
+    : scope === "mem:graph:query-manifest" ? { version: 1, shardCount: 64, totalNodes: 1, totalEdges: 0, updatedAt: "fixture", dirty: !ready } : null,
+    set: async (_scope: string, key: string, value: unknown) => { if (key === "latest") samples.push(value as HealthSnapshot); } };
+  const repairs = vi.fn().mockImplementationOnce(async () => ({ success: true, skipped: "graph_writer_busy" }))
+    .mockImplementation(async () => { ready = true; return { success: true }; });
+  const sdk = { trigger: async (input: { function_id: string }) => input.function_id === "mem::graph-snapshot-rebuild" ? repairs() : { workers: [] } };
+  const drain = () => new Promise<void>(resolve => setImmediate(resolve));
+  const monitor = registerHealthMonitor(sdk as never, kv as never, { maintainGraphQueryIndex: true });
+  try {
+    await drain(); expect(repairs).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30_000); await drain();
+    expect(repairs).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(30_000); await drain();
+    expect(samples.at(-1)?.graphQueryIndex).toEqual({ status: "ready" });
+    expect(samples.at(-1)?.alerts).not.toContain("graph_query_index_error");
+  } finally { monitor.stop(); }
+});

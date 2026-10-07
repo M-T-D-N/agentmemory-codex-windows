@@ -177,3 +177,16 @@ describe("Claude Bridge Functions", () => {
     expect(result.error).toContain("not configured");
   });
 });
+
+it("omits unproved legacy profile summaries and scopes its existing memory projection", async () => {
+ const kv=mockKV(), sdk=mockSdk(); registerClaudeBridgeFunction(sdk as never,kv as never,enabledConfig);
+ await kv.set("mem:profiles", enabledConfig.projectPath, { summary:"The following is the Codex agent history whose request action you are assessing. stale-secret" });
+ vi.stubEnv("AGENTMEMORY_AGENT_SCOPE","isolated"); vi.stubEnv("AGENT_ID","A");
+ try {
+  await kv.set("mem:memories","a",{id:"a",agentId:"A",title:"visible",content:'<agentmemory-ambient-ui-state>ambient-secret</agentmemory-ambient-ui-state>normal-a',strength:5,isLatest:true,sessionIds:[],concepts:[],files:[],type:"pattern",createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),version:1});
+  await kv.set("mem:memories","b",{id:"b",agentId:"B",title:"hidden",content:"other-b",strength:5,isLatest:true,sessionIds:[],concepts:[],files:[],type:"pattern",createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),version:1});
+  expect(await sdk.trigger("mem::claude-bridge-sync",{})).toMatchObject({success:true});
+  const text=vi.mocked(writeFileSync).mock.calls.at(-1)![1]; expect(text).toContain("normal-a"); expect(text).not.toMatch(/stale-secret|other-b|ambient-secret/);
+  expect(await kv.get("mem:memories","a")).toMatchObject({content:'<agentmemory-ambient-ui-state>ambient-secret</agentmemory-ambient-ui-state>normal-a'});
+ } finally { vi.unstubAllEnvs(); }
+});

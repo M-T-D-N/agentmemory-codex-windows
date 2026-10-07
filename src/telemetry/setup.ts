@@ -69,7 +69,6 @@ type Meter = {
 };
 
 let counters: Counters | null = null;
-let histograms: Histograms | null = null;
 
 const NOOP_COUNTER: Counter = { add: () => {} };
 const NOOP_HISTOGRAM: Histogram = { record: () => {} };
@@ -107,22 +106,15 @@ const HISTOGRAM_NAMES: Array<[keyof Histograms, string]> = [
   ["vectorSearchLatency", "vector_search.latency_ms"],
 ];
 
-// Accessors so functions outside `initMetrics`'s closure can record into
-// the same counter / histogram instances after init. Before init both
-// return no-op fallbacks so call sites stay safe in tests and during
+// Accessor so functions outside `initMetrics`'s closure can record into
+// the same counter instances after init. Before init it
+// returns no-op fallbacks so call sites stay safe in tests and during
 // the boot window.
 export function getCounters(): Counters {
   if (counters) return counters;
   return Object.fromEntries(
     COUNTER_NAMES.map(([key]) => [key, NOOP_COUNTER]),
   ) as unknown as Counters;
-}
-
-export function getHistograms(): Histograms {
-  if (histograms) return histograms;
-  return Object.fromEntries(
-    HISTOGRAM_NAMES.map(([key]) => [key, NOOP_HISTOGRAM]),
-  ) as unknown as Histograms;
 }
 
 export function initMetrics(getMeter?: (name: string) => Meter): {
@@ -138,7 +130,7 @@ export function initMetrics(getMeter?: (name: string) => Meter): {
     ]),
   ) as unknown as Counters;
 
-  histograms = Object.fromEntries(
+  const histograms = Object.fromEntries(
     HISTOGRAM_NAMES.map(([key, name]) => [
       key,
       meter ? meter.createHistogram(name) : NOOP_HISTOGRAM,

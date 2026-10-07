@@ -33,6 +33,94 @@ describe("SearchIndex", () => {
     expect(index.size).toBe(0);
   });
 
+  it("tracks content mutations without revising unchanged records or empty removals", () => {
+    expect(index.revision).toBe(0);
+    index.remove("missing"); index.clear();
+    expect(index.revision).toBe(0);
+    const observation = makeObs();
+    index.add(observation);
+    const added = index.revision;
+    expect(added).toBeGreaterThan(0);
+    index.add({ ...observation, importance: 9, timestamp: "2026-10-03T00:00:00Z" });
+    index.remove("missing");
+    expect(index.revision).toBe(added);
+    index.add({ ...observation, sessionId: "new-owner" });
+    expect(index.revision).toBeGreaterThan(added);
+    const changed = index.revision;
+    index.remove(observation.id);
+    expect(index.revision).toBeGreaterThan(changed);
+    const removed = index.revision;
+    index.clear(); index.remove(observation.id);
+    expect(index.revision).toBe(removed);
+    const restored = new SearchIndex(); restored.add(observation);
+    index.restoreFrom(restored);
+    expect(index.revision).toBeGreaterThan(removed);
+    const snapshot = JSON.parse(index.serialize());
+    expect(snapshot.v).toBe(3);
+    expect(snapshot).not.toHaveProperty("revision");
+    const beforeClear = index.revision;
+    index.clear();
+    expect(index.revision).toBeGreaterThan(beforeClear);
+  });
+
+  it("revises targets when captured changes insert or remove their postings", () => {
+    const capture = index.captureChanges();
+    index.add(makeObs());
+    const target = new SearchIndex();
+    capture.applyTo(target);
+    expect(target.revision).toBeGreaterThan(0);
+    expect(target.search("auth")[0]?.obsId).toBe("obs_1");
+    const inserted = target.revision;
+    index.remove("obs_1");
+    capture.applyTo(target);
+    expect(target.revision).toBeGreaterThan(inserted);
+    expect(target.size).toBe(0);
+    capture.stop();
+  });
+
+  it("detects an empty live clear during rebuild even though its revision is unchanged", () => {
+    const capture = index.captureChanges();
+    const target = new SearchIndex(); target.add(makeObs());
+    index.clear();
+    expect(index.revision).toBe(0);
+    expect(() => capture.applyTo(target)).toThrow("Search index reset during rebuild");
+    capture.stop();
+  });
+
+  it("reads v2 snapshots and preserves their posting order and scores in compact snapshots", () => {
+    const legacy = JSON.stringify({
+      v: 2,
+      entries: [
+        ["a", { obsId: "a", sessionId: "first", termCount: 2 }],
+        ["b", { obsId: "b", sessionId: "second", termCount: 2 }],
+      ],
+      inverted: [["auth", ["b", "a"]], ["작업한", ["a", "b"]]],
+      docTerms: [["b", [["작업한", 1], ["auth", 1]]], ["a", [["auth", 1], ["작업한", 1]]]],
+      totalDocLength: 4,
+    });
+    const original = SearchIndex.deserialize(legacy);
+    const compact = original.serialize();
+    const restored = SearchIndex.deserialize(compact);
+    expect(restored.size).toBe(2);
+    for (const query of ["auth", "작업", "auth 작업"]) {
+      expect(restored.search(query)).toEqual(original.search(query));
+    }
+    expect(restored.search("auth").map(row => row.obsId)).toEqual(["b", "a"]);
+    expect(restored.serialize()).toBe(compact);
+    restored.remove("b");
+    expect(restored.search("auth").map(row => row.obsId)).toEqual(["a"]);
+  });
+
+  it.each(["postings", "docTerms"])("rejects invalid compact %s references without exposing a partial index", field => {
+    index.add(makeObs());
+    const snapshot = JSON.parse(index.serialize());
+    if (field === "postings") snapshot.postings[0][0] = snapshot.documents.length;
+    else snapshot.docTerms[0][1][0][0] = snapshot.terms.length;
+    const restored = SearchIndex.deserialize(JSON.stringify(snapshot));
+    expect(restored.size).toBe(0);
+    expect(restored.search("auth")).toEqual([]);
+  });
+
   it("adds and finds observations", () => {
     index.add(makeObs());
     expect(index.size).toBe(1);
@@ -44,6 +132,33 @@ describe("SearchIndex", () => {
   it("returns empty for no matches", () => {
     index.add(makeObs());
     expect(index.search("database")).toEqual([]);
+  });
+
+  it("finds escaped Markdown identifiers using their displayed spelling", () => {
+    for (const [id, narrative] of [
+      ["escaped", "qwen\\_only"],
+      ["escaped-code", "\\`qwen\\_only\\`"],
+      ["plain", "qwen_only"],
+    ]) {
+      index.add(makeObs({ id, title: "", subtitle: "", facts: [], concepts: [], files: [], narrative }));
+    }
+    expect(index.search("qwen_only").map(row => row.obsId).sort()).toEqual(["escaped", "escaped-code", "plain"]);
+    expect(index.search("qwen\\_only").map(row => row.obsId).sort()).toEqual(["escaped", "escaped-code", "plain"]);
+    expect(SearchIndex.deserialize(index.serialize()).search("qwen_only")).toHaveLength(3);
+  });
+
+  it("keeps drive, UNC and relative Windows underscore path queries searchable", () => {
+    for (const [id, narrative] of [
+      ["drive", String.raw`D:\_private\qwen_only`],
+      ["drive-root", String.raw`D:\_private`],
+      ["unc", String.raw`\\server\_private`],
+      ["relative", String.raw`folder\_private`],
+    ]) {
+      index.add(makeObs({ id, title: "", subtitle: "", facts: [], concepts: [], files: [], narrative }));
+      expect(index.search(narrative).map(row => row.obsId)).toContain(id);
+    }
+    expect(index.search("server_private")).toEqual([]);
+    expect(index.search("_private")).toEqual([]);
   });
 
   it("keeps scores stable when the same canonical observations are indexed again", () => {
@@ -107,6 +222,48 @@ describe("SearchIndex", () => {
     expect(exact).toBeDefined();
     expect(prefix).toBeDefined();
     expect(exact!.score).toBeGreaterThanOrEqual(prefix!.score);
+  });
+
+
+  it("bounds distinct prefix variants while accumulating different query terms", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [], type: "other" as const };
+    const suffixes = Array.from("가나다라마바사아자차카타파하");
+    const variants = suffixes.flatMap(suffix => ["작업" + suffix, "추론" + suffix]);
+    index.add(makeObs({ ...clean, id: "exact", narrative: "작업 추론" }));
+    index.add(makeObs({ ...clean, id: "variants", narrative: variants.join(" ") + " 작업하 작업하" }));
+
+    expect(index.search("작업", 1)[0].obsId).toBe("exact");
+    expect(index.search("작업 추론", 1)[0].obsId).toBe("exact");
+    const variantScore = (query: string) => index.search(query).find(row => row.obsId === "variants")!.score;
+    expect(variantScore("작업")).toBeCloseTo(variantScore("작업하") * 0.5, 12);
+    index.add(makeObs({ ...clean, id: "one-term", narrative: "작업" }));
+    const combined = index.search("작업 추론").map(row => row.obsId);
+    expect(combined.indexOf("variants")).toBeLessThan(combined.indexOf("one-term"));
+    expect(SearchIndex.deserialize(index.serialize()).search("작업 추론")).toEqual(index.search("작업 추론"));
+  });
+
+  it("does not add prefix variants to a document with an exact query term", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [], type: "other" as const };
+    const variants = Array.from("가나다라마바사아자차카타파하", suffix => "작업" + suffix);
+    index.add(makeObs({ ...clean, id: "with-variants", narrative: "작업 " + variants.join(" ") }));
+    index.add(makeObs({ ...clean, id: "exact-only", narrative: "작업 " + Array(variants.length).fill("무관").join(" ") }));
+    const results = index.search("작업");
+    expect(results).toHaveLength(2);
+    expect(results.find(row => row.obsId === "with-variants")!.score).toBeCloseTo(
+      results.find(row => row.obsId === "exact-only")!.score, 12,
+    );
+  });
+
+  it("matches numeric query terms exactly while retaining word prefixes", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [] };
+    index.add(makeObs({ ...clean, id: "ordinal", narrative: "2차 MVP" }));
+    index.add(makeObs({ ...clean, id: "number", narrative: "20" }));
+    index.add(makeObs({ ...clean, id: "dates", narrative: "2026.01 2026.02 2026.03 2026.04" }));
+    index.add(makeObs({ ...clean, id: "word", narrative: "redistool" }));
+    expect(index.search("20").map(row => row.obsId)).toEqual(["number"]);
+    expect(index.search("2차").map(row => row.obsId)).toEqual(["ordinal"]);
+    expect(index.search("redis").map(row => row.obsId)).toEqual(["word"]);
+    expect(SearchIndex.deserialize(index.serialize()).search("2차").map(row => row.obsId)).toEqual(["ordinal"]);
   });
 
   it("respects limit", () => {
@@ -312,6 +469,66 @@ describe("SearchIndex", () => {
     expect(hit!.score).toBeGreaterThan(0);
   });
 
+  it("retrieves Korean inflections through shared syllable bigrams without replacing exact words", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [], type: "other" as const };
+    index.add(makeObs({ ...clean, id: "inflected", narrative: "추론모델은 어떤 일에 적합하지" }));
+    index.add(makeObs({ ...clean, id: "exact", narrative: "추론모델 적합한 작업" }));
+    index.add(makeObs({ ...clean, id: "unrelated", narrative: "불합리한 모델의 수정 작업" }));
+    const results = index.search("적합한");
+    expect(results.map(row => row.obsId)).toEqual(["exact", "inflected"]);
+    expect(index.search("론모델").map(row => row.obsId)).toContain("inflected");
+    expect(index.search("리")).toEqual([]);
+  });
+
+  it("does not reward a rare prefix variant over the original search word", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [], type: "other" as const };
+    for (let i = 0; i < 12; i++) index.add(makeObs({ ...clean, id: "exact-" + i, narrative: "release" }));
+    index.add(makeObs({ ...clean, id: "variant", narrative: "releaseVariant" }));
+    expect(index.search("release")[0].obsId).not.toBe("variant");
+  });
+
+  it("combines Korean word and syllable evidence without rewriting stored terms", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [], type: "other" as const };
+    index.add(makeObs({ ...clean, id: "target", narrative: "추론모델은 뭘할때 적합하지" }));
+    for (let i = 0; i < 200; i++) index.add(makeObs({ ...clean, id: "other-" + i, narrative: "추론모델 작업" }));
+    const snapshot = index.serialize();
+    expect(index.search("추론모델 적합한 작업", 100).map(row => row.obsId)).toContain("target");
+    expect(index.serialize()).toBe(snapshot);
+    index.add(makeObs({ ...clean, id: "target", narrative: "다른 내용" }));
+    expect(index.search("추론모델 적합한 작업", 100).map(row => row.obsId)).not.toContain("target");
+    const restored = SearchIndex.deserialize(snapshot);
+    expect(restored.search("추론모델 적합한 작업", 100).map(row => row.obsId)).toContain("target");
+    restored.remove("target");
+    expect(restored.search("추론모델 적합한 작업", 100).map(row => row.obsId)).not.toContain("target");
+  });
+
+  it("derives Korean matches from old snapshots and refreshes them after replacement, removal and rebuild", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [] };
+    index.add(makeObs({ ...clean, id: "old", narrative: "적합하지" }));
+    const serialized = index.serialize();
+    const restored = SearchIndex.deserialize(serialized);
+    expect(restored.search("적합한").map(row => row.obsId)).toEqual(["old"]);
+    expect(restored.serialize()).toBe(serialized);
+    restored.add(makeObs({ ...clean, id: "old", narrative: "진행되었습니다" }));
+    expect(restored.search("적합한")).toEqual([]);
+    expect(restored.search("진행한").map(row => row.obsId)).toEqual(["old"]);
+    restored.remove("old");
+    expect(restored.search("진행한")).toEqual([]);
+    restored.restoreFrom(index);
+    expect(restored.search("적합한").map(row => row.obsId)).toEqual(["old"]);
+    restored.clear();
+    expect(restored.search("적합한")).toEqual([]);
+  });
+
+  it("keeps a long exact Korean result above a short bigram-only result", () => {
+    const clean = { title: "", subtitle: "", facts: [], concepts: [], files: [], type: "other" as const };
+    index.add(makeObs({ ...clean, id: "exact", narrative: "적합한 진행한 검색한 " + "unrelated ".repeat(100) }));
+    index.add(makeObs({ ...clean, id: "partial", narrative: "적합하지 진행하지 검색하지" }));
+    for (let i = 0; i < 100; i++) index.add(makeObs({ ...clean, id: `noise${i}`, narrative: "무관한 내용" }));
+    expect(index.search("적합한", 1)[0].obsId).toBe("exact");
+    expect(index.search("적합한 진행한 검색한", 1)[0].obsId).toBe("exact");
+  });
+
   it("preserves source order across mixed CJK and non-CJK runs", () => {
     expect(segmentCjk("hello 项目 world")).toEqual(["hello", "项目", "world"]);
     expect(segmentCjk("abc 메모리 def 项目 ghi")).toEqual([
@@ -324,4 +541,27 @@ describe("SearchIndex", () => {
     expect(segmentCjk("leading 项目")).toEqual(["leading", "项目"]);
     expect(segmentCjk("项目 trailing")).toEqual(["项目", "trailing"]);
   });
+  it("keeps warmed Korean ranks identical to a fresh snapshot across index changes", () => {
+    const query = "추론모델 적합한 작업";
+    const a = makeObs({ id: "a", narrative: "추론모델은 적합하지" });
+    const b = makeObs({ id: "b", narrative: "추론모델 작업" });
+    index.add(a);
+    index.add(b);
+    const target = SearchIndex.deserialize(index.serialize());
+    const capture = index.captureChanges();
+    target.search(query);
+    index.search(query);
+    const verify = () => expect(index.search(query)).toEqual(SearchIndex.deserialize(index.serialize()).search(query));
+    index.add(makeObs({ id: "a", narrative: "다른 작업을 검토한" }));
+    verify();
+    index.remove("b");
+    index.add(makeObs({ id: "c", narrative: "추론모델 적합한 작업" }));
+    verify();
+    capture.applyTo(target);
+    expect(target.search(query)).toEqual(index.search(query));
+    capture.stop();
+    target.restoreFrom(SearchIndex.deserialize(index.serialize()));
+    expect(target.search(query)).toEqual(index.search(query));
+  });
+
 });

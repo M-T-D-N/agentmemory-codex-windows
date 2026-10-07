@@ -199,7 +199,7 @@ describe("Profile Function", () => {
     })) as { profile: ProjectProfile; cached: boolean };
 
     expect(result.cached).toBe(false);
-    expect(result.profile.visibilityRevision).toBe(1);
+    expect(result.profile.visibilityRevision).toBe(2);
     expect(result.profile.sessionCount).toBe(1);
     expect(result.profile.totalObservations).toBe(3);
     expect(result.profile.topConcepts.some((item) => item.concept === "internal-marker")).toBe(false);

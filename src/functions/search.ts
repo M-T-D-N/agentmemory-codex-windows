@@ -11,11 +11,7 @@ import { recordAccessBatch } from './access-tracker.js'
 import { logger } from "../logger.js";
 import { createSearchCandidateSelection, type SearchCandidateSelection } from "./search-candidates.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
-import {
-  isExcludedCodexAmbientSession,
-  sanitizeCodexAmbientObservation,
-  observationSourceKind,
-} from "./observation-visibility.js";
+import { observationSourceKind } from "./observation-visibility.js";
 
 let index: SearchIndex | null = null
 let vectorIndex: VectorIndex | null = null
@@ -68,10 +64,6 @@ export function getVectorIndex(): VectorIndex | null {
 
 export function setEmbeddingProvider(provider: EmbeddingProvider | null): void {
   currentEmbeddingProvider = provider
-}
-
-export function getEmbeddingProvider(): EmbeddingProvider | null {
-  return currentEmbeddingProvider
 }
 
 export function vectorIndexRemove(id: string): void {
@@ -464,14 +456,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       if (retrieval && (idx.size === 0 || !memoryIndexReady)) retrieval.keyword = "index-not-ready"
       const selection = createSearchCandidateSelection(kv, { project: projectFilter, cwd: cwdFilter, agentId: filterAgentId, sourceKind: data.sourceKind })
       const fetchLimit = effectiveLimit
-      // Hybrid results carry the observation the ranker already loaded,
-      // so the load pass below doesn't refetch every record it just
-      // enriched.
       let results: Array<{
         obsId: string
         sessionId: string
         score: number
-        observation?: CompressedObservation
       }>
       if (retrieval && !hybridRanker && data.searchMode !== "keyword") retrieval.vector = "unavailable"
       if (hybridRanker && data.searchMode !== "keyword") {
@@ -481,7 +469,6 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             obsId: r.observation.id,
             sessionId: r.sessionId,
             score: r.combinedScore,
-            observation: r.observation,
           }))
         } catch (err) {
           if (retrieval) retrieval.vector = "failed"
@@ -494,66 +481,20 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         results = await selection.select(idx.search(query, idx.size), fetchLimit)
       }
 
-      // Resolve session -> project/cwd once per sessionId we touch.
-      const sessionCache = new Map<string, Session | null>()
-      const loadSession = async (sessionId: string): Promise<Session | null> => {
-        if (sessionCache.has(sessionId)) return sessionCache.get(sessionId)!
-        const s = await kv.get<Session>(KV.sessions, sessionId)
-        sessionCache.set(sessionId, s ?? null)
-        return s ?? null
-      }
-
-      // A memory's source session can belong to a different project. Resolve
-      // the canonical record before project filtering and final truncation.
-      const earlyCap = fetchLimit
-      const candidates: typeof results = []
-      for (const r of results) {
-        if (candidates.length >= earlyCap) break
-        const session = await loadSession(r.sessionId)
-        if (isExcludedCodexAmbientSession(session)) continue
-        if (cwdFilter && session?.cwd !== cwdFilter) continue
-        candidates.push(r)
-      }
-
-      // Second pass: load observations in parallel. Fall back to
-      // KV.memories when the observation lookup misses — entries indexed
-      // via mem::remember live in the memories scope under a synthetic
-      // sessionId, so the observation key never exists (#265).
-      const obsResults: Array<{ observation: CompressedObservation; project?: string } | null> = []
-      for (let offset = 0; offset < candidates.length; offset += 8) {
-        obsResults.push(...await Promise.all(candidates.slice(offset, offset + 8).map(async (r) => {
-          const obs = await kv
-            .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
-            .catch(() => null)
-          const sessionProject = sessionCache.get(r.sessionId)?.project
-          if (obs) return { observation: obs, project: sessionProject }
-          const mem = await kv
-            .get<Memory>(KV.memories, r.obsId)
-            .catch(() => null)
-          return mem && mem.isLatest !== false
-            ? { observation: memoryToObservation(mem), project: mem.project ?? sessionProject }
-            : null
-        })))
-      }
       const enriched: SearchResult[] = []
-      for (let i = 0; i < candidates.length; i++) {
-        const obs = sanitizeCodexAmbientObservation(obsResults[i]?.observation)
-        if (!obs) continue
-        const project = obsResults[i]?.project
-        if (projectFilter && project !== projectFilter) continue
-        // #817: enforce agent-scope after the observation/memory is
-        // loaded. The BM25 index doesn't carry agentId so the filter
-        // happens post-lookup. Wildcard ("*") and no-isolation paths
-        // resolved filterAgentId=undefined upstream and pass through.
-        if (filterAgentId !== undefined && obs.agentId !== filterAgentId) continue
-        if (data.sourceKind && observationSourceKind(obs) !== data.sourceKind) continue
-        if (enriched.length >= effectiveLimit) break
-        enriched.push({
-          observation: obs,
-          score: candidates[i].score,
-          sessionId: candidates[i].sessionId,
-          ...(project ? { project } : {}),
-        })
+      for (let offset = 0; offset < results.length && enriched.length < effectiveLimit; offset += 8) {
+        const batch = results.slice(offset, offset + 8)
+        const resolved = await Promise.all(batch.map(r => selection.resolve(r)))
+        for (let i = 0; i < batch.length && enriched.length < effectiveLimit; i++) {
+          const canonical = resolved[i]
+          if (!canonical) continue
+          enriched.push({
+            observation: canonical.observation,
+            score: batch[i].score,
+            sessionId: canonical.observation.sessionId,
+            ...(canonical.project ? { project: canonical.project } : {}),
+          })
+        }
       }
 
       if (data.trackAccess !== false) {

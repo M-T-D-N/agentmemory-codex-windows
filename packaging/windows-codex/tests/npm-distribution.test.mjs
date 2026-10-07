@@ -73,12 +73,15 @@ async function fixture(dataContractVersion) {
   await writeFile(path.join(workspace, 'projects.json'), '{"schema_version":2,"projects":[]}');
   for (const name of ['Install-WindowsCodex.ps1', 'Initialize-WindowsCodex.ps1']) await copyFile(path.join(packaging, name), path.join(release, name));
   for (const name of ['hook-spec.json', 'mcp-launcher-environment.json']) await copyFile(path.join(packaging, 'config', name), path.join(release, 'payload/config', name));
+  await mkdir(path.join(release, 'payload/scripts'));
+  await copyFile(path.join(packaging, 'powershell/agentmemory-lifecycle.ps1'), path.join(release, 'payload/scripts/agentmemory-lifecycle.ps1'));
   const manifest = { schema_version: 1, product: 'AgentMemory for Codex on Windows', product_id: 'agentmemory-codex-windows',
     downstream_version: '0.1.0-preview.4', agentmemory_version: '0.9.29', release_revision: 'r84', source_commit: 'a'.repeat(40),
     package_relative_path: 'runtime/0.9.29-codex-r84/agentmemory', release_files: [], immutable_files: [] };
   if (dataContractVersion !== undefined) manifest.data_contract_version = dataContractVersion;
   for (const name of ['Install-WindowsCodex.ps1', 'Initialize-WindowsCodex.ps1']) manifest.release_files.push({ path: name, sha256: await sha256(path.join(release, name)) });
   for (const name of ['hook-spec.json', 'mcp-launcher-environment.json']) manifest.immutable_files.push({ path: `config/${name}`, sha256: await sha256(path.join(release, 'payload/config', name)) });
+  manifest.immutable_files.push({ path: 'scripts/agentmemory-lifecycle.ps1', sha256: await sha256(path.join(release, 'payload/scripts/agentmemory-lifecycle.ps1')) });
   await writeFile(path.join(release, 'release-manifest.json'), JSON.stringify(manifest));
   return { dir, release, workspace, root };
 }
@@ -166,12 +169,26 @@ for (const currentContract of [1, 2]) test(`failed candidate start preserves wri
     installed.installation_status = 'activated'; installed.data_contract_version = currentContract;
     await writeFile(installedPath, JSON.stringify(installed));
     await writeFile(path.join(f.root, 'src/iii-0.11.2-state-flush.patch'), 'predecessor patch');
+    await writeFile(path.join(f.root, 'data/runtime-state.json'), JSON.stringify({ daemon: { pid: 41, creation_date: '2026-10-01T00:00:00.0000000Z' } }));
     const harness = path.join(f.dir, 'cutover-mocked.ps1');
     await writeFile(harness, `param($Release,$Root,$Workspace,$Node)
 $ErrorActionPreference='Stop'
 function Import-Module { param($Name,$ErrorAction) }
-function Stop-ScheduledTask { param($TaskPath,$TaskName,$ErrorAction) }
-function Start-ScheduledTask { param($TaskPath,$TaskName,$ErrorAction)
+function Get-Process { param($Id,$ErrorAction)
+  $errorRecord=New-Object Management.Automation.ErrorRecord ([ArgumentException]::new('Fixture process absent')),'NoProcessFoundForGivenId',([Management.Automation.ErrorCategory]::ObjectNotFound),$Id
+  throw $errorRecord
+}
+function Get-ScheduledTask { param($TaskPath,$TaskName,$ErrorAction)
+  $name=if ($TaskName -like '*-Watchdog-*') {'watchdog-task-registration.json'} else {'task-registration.json'}
+  $registration=Get-Content -Raw -LiteralPath (Join-Path $Root "config/$name")|ConvertFrom-Json
+  return [pscustomobject]@{TaskName=$TaskName;TaskPath=$TaskPath;Description=$registration.description
+    Actions=@([pscustomobject]@{Execute=$registration.execute;Arguments=$registration.arguments;WorkingDirectory=$registration.working_directory})
+    Principal=[pscustomobject]@{UserId=$registration.owner_sid;LogonType='Interactive';RunLevel='Limited'}
+    Settings=[pscustomobject]@{MultipleInstances='IgnoreNew';ExecutionTimeLimit='PT0S';RestartCount=3;RestartInterval='PT1M';AllowDemandStart=$true}
+    Triggers=$(if ($name -eq 'watchdog-task-registration.json') {@([pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskLogonTrigger'};UserId=$registration.owner_sid})} else {@()})}
+}
+function Stop-ScheduledTask { param($InputObject,$ErrorAction) }
+function Start-ScheduledTask { param($InputObject,$ErrorAction)
   $probe=$null
   try { $probe=[IO.File]::Open((Join-Path $Root 'data/startup.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) } catch [IO.IOException] {}
   if ($probe) { $probe.Dispose(); throw 'Installer did not hold the startup lock' }
@@ -447,52 +464,245 @@ for (const scenario of ['roundtrip', 'collision', 'outside', 'junction', 'cleanu
 }
 
 
-test('cutover confirms partial starts with absent worker identities and rejects live or untracked runs', { skip: !windows }, async () => {
+test('native task ownership shares daemon checks and rejects replaced installer tasks before mutation', { skip: !windows }, async () => {
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), 'am-task-ownership-')));
+  try {
+    await mkdir(path.join(dir, 'config'));
+    await mkdir(path.join(dir, 'data'));
+    await writeFile(path.join(dir, 'data/runtime-state.json'), JSON.stringify({ daemon: { pid: 41, creation_date: '2026-10-01T00:00:00.0000000Z' } }));
+    const harness = path.join(dir, 'task-ownership.ps1');
+    await writeFile(harness, `param($Packaging,$Root)
+$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
+function Load-Functions {param($Path,$Names)
+  $tokens=$null; $errors=$null
+  $ast=[Management.Automation.Language.Parser]::ParseFile($Path,[ref]$tokens,[ref]$errors)
+  if ($errors.Count) {throw 'Source parse failed'}
+  foreach ($name in $Names) {
+    $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
+    if (!$definition) {throw "Missing function: $name"}
+    . ([scriptblock]::Create('function script:'+$definition.Name+' '+$definition.Body.Extent.Text))
+  }
+}
+Load-Functions (Join-Path $Packaging 'powershell/agentmemory-lifecycle.ps1') @('Get-AgentMemoryTaskSidSuffix','Resolve-AgentMemoryTaskPrincipalSid','Assert-AgentMemoryTaskRegistration','Assert-AgentMemoryScheduledTaskOwnership','Test-AgentMemoryRecordedRunExited')
+Load-Functions (Join-Path $Packaging 'Initialize-WindowsCodex.ps1') @('New-InstallTaskRegistration')
+Load-Functions (Join-Path $Packaging 'Install-WindowsCodex.ps1') @('Get-OwnedTaskForCutover','Start-OwnedTasks','Stop-OwnedRuntimeForCutover')
+Load-Functions (Join-Path $Packaging 'powershell/agentmemory-mcp.ps1') @('Get-OwnedScheduledTask')
+Load-Functions (Join-Path $Packaging 'powershell/agentmemory-watch.ps1') @('Get-OwnedDaemonTask')
+function Import-Module {param($Name,$ErrorAction)}
+function Get-ScheduledTask {param($TaskPath,$TaskName,$ErrorAction) return $script:tasks[$TaskName]}
+function Start-ScheduledTask {param($InputObject,$ErrorAction) $script:mutations+=('start:'+$InputObject.TaskName)}
+function Stop-ScheduledTask {param($InputObject,$ErrorAction) $script:mutations+=('stop:'+$InputObject.TaskName)}
+function Get-AgentMemoryProcessIdentity {param($ProcessId) return [pscustomobject]@{state='absent'}}
+function Clone-Task {param($Task) return ($Task|ConvertTo-Json -Depth 12|ConvertFrom-Json)}
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$nonce=[Guid]::NewGuid().ToString('N')
+$resolvedRoot=$Root; $ownerMarkerPath=Join-Path $Root '.agentmemory-install-owner.json'
+$taskRegistrationPath=Join-Path $Root 'config/task-registration.json'
+@{install_nonce=$nonce}|ConvertTo-Json|Set-Content -LiteralPath $ownerMarkerPath
+$daemon=New-InstallTaskRegistration -Root $Root -Sid $sid -Nonce $nonce
+$watchdog=New-InstallTaskRegistration -Root $Root -Sid $sid -Nonce $nonce -Watchdog
+$daemon|ConvertTo-Json|Set-Content -LiteralPath $taskRegistrationPath
+$watchdog|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $Root 'config/watchdog-task-registration.json')
+$script:tasks=@{}; $script:mutations=@()
+foreach ($registration in @($daemon,$watchdog)) {
+  $script:tasks[$registration.task_name]=[pscustomobject]@{
+    TaskPath='\\'; TaskName=$registration.task_name; Description=$registration.description
+    Actions=@([pscustomobject]@{Execute=$registration.execute;Arguments=$registration.arguments;WorkingDirectory=$Root})
+    Principal=[pscustomobject]@{UserId=$sid;LogonType='InteractiveToken';RunLevel='LeastPrivilege'}
+    Settings=[pscustomobject]@{MultipleInstances='IgnoreNew';ExecutionTimeLimit='PT0S';RestartCount=3;RestartInterval='PT1M';AllowDemandStart=$true}
+    Triggers=$(if ($registration.arguments -eq 'watch') {@([pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskLogonTrigger'};UserId=$sid})} else {@()})
+  }
+}
+$entries=@([pscustomobject]@{Name='task-registration.json'},[pscustomobject]@{Name='watchdog-task-registration.json'})
+Start-OwnedTasks -Root $Root -Registrations $entries
+Stop-OwnedRuntimeForCutover -Root $Root -Registrations $entries
+if ($script:mutations.Count -ne 4) {throw 'Matching tasks did not reach exactly four mocked mutations'}
+if (![Object]::ReferenceEquals((Get-OwnedScheduledTask),$script:tasks[$daemon.task_name])) {throw 'MCP did not retain the verified task object'}
+if (![Object]::ReferenceEquals((Get-OwnedDaemonTask),$script:tasks[$daemon.task_name])) {throw 'Watchdog did not retain the verified task object'}
+$validDaemon=Clone-Task $script:tasks[$daemon.task_name]
+$validWatchdog=Clone-Task $script:tasks[$watchdog.task_name]
+$daemonChanges=@(
+  {$script:tasks[$daemon.task_name].Actions[0].Execute=Join-Path $Root 'other.exe'},
+  {$script:tasks[$daemon.task_name].Actions[0].Arguments='other'},
+  {$script:tasks[$daemon.task_name].Actions[0].WorkingDirectory=Join-Path $Root 'other'},
+  {$script:tasks[$daemon.task_name].Principal.UserId='S-1-5-18'},
+  {$script:tasks[$daemon.task_name].Principal.RunLevel='Highest'},
+  {$script:tasks[$daemon.task_name].Description='replaced task'},
+  {$script:tasks[$daemon.task_name].Settings.RestartCount=0},
+  {$script:tasks[$daemon.task_name].Settings.RestartInterval='PT2M'},
+  {$script:tasks[$daemon.task_name].Triggers=@([pscustomobject]@{})}
+)
+foreach ($change in $daemonChanges) {
+  $script:tasks[$daemon.task_name]=Clone-Task $validDaemon
+  & $change
+  foreach ($operation in @(
+    {Start-OwnedTasks -Root $Root -Registrations @($entries[0])},
+    {Stop-OwnedRuntimeForCutover -Root $Root -Registrations @($entries[0])},
+    {$null=Get-OwnedScheduledTask},
+    {$null=Get-OwnedDaemonTask}
+  )) {
+    $rejected=$false
+    try {& $operation} catch {$rejected=$true}
+    if (!$rejected -or $script:mutations.Count -ne 4) {throw 'Replaced daemon task reached mutation or was accepted'}
+  }
+}
+$script:tasks[$daemon.task_name]=Clone-Task $validDaemon
+foreach ($change in @(
+  {$script:tasks[$watchdog.task_name].Triggers=@()},
+  {$script:tasks[$watchdog.task_name].Triggers[0].CimClass.CimClassName='MSFT_TaskTimeTrigger'},
+  {$script:tasks[$watchdog.task_name].Triggers[0].UserId='S-1-5-18'}
+)) {
+  $script:tasks[$watchdog.task_name]=Clone-Task $validWatchdog
+  & $change
+  foreach ($operation in @(
+    {Start-OwnedTasks -Root $Root -Registrations @($entries[1])},
+    {Stop-OwnedRuntimeForCutover -Root $Root -Registrations @($entries[1])}
+  )) {
+    $rejected=$false
+    try {& $operation} catch {$rejected=$true}
+    if (!$rejected -or $script:mutations.Count -ne 4) {throw 'Replaced watchdog trigger reached mutation or was accepted'}
+  }
+}
+$script:tasks[$watchdog.task_name]=Clone-Task $validWatchdog
+foreach ($field in @('install_nonce','owner_sid','task_name','task_path','execute','arguments','working_directory','description')) {
+  $invalid=$daemon|ConvertTo-Json|ConvertFrom-Json
+  $invalid.$field='different'
+  $invalid|ConvertTo-Json|Set-Content -LiteralPath $taskRegistrationPath
+  $rejected=$false
+  try {Start-OwnedTasks -Root $Root -Registrations @($entries[0])} catch {$rejected=$true}
+  if (!$rejected -or $script:mutations.Count -ne 4) {throw 'Changed protected registration reached mutation'}
+}
+'TASK_OWNERSHIP_OK'
+`);
+    const result = spawnSync(ps, powershellArgs(harness, { Packaging: packaging, Root: dir }),
+      { encoding: 'utf8', timeout: 30_000, windowsHide: true, env: powershellEnvironment() });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /TASK_OWNERSHIP_OK/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('cutover confirms captured partial runs, distinguishes PID reuse and rejects uncertain exits', { skip: !windows }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'am-partial-start-'));
   try {
     await mkdir(path.join(dir, 'data')); await mkdir(path.join(dir, 'scripts'));
     await writeFile(path.join(dir, 'scripts/agentmemory-stop.ps1'), "param($Root,$TimeoutSeconds)\nthrow 'partial start stop failed'\n");
     const harness = path.join(dir, 'partial-stop.ps1');
-    await writeFile(harness, `param($Source,$Root)
+    await writeFile(harness, `param($Source,$Lifecycle,$Root)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
 if ($errors.Count) {throw 'Installer parse failed'}
 $function=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Stop-OwnedRuntimeForCutover'},$true)
 Invoke-Expression $function.Extent.Text
+$ast=[Management.Automation.Language.Parser]::ParseFile($Lifecycle,[ref]$tokens,[ref]$errors)
+foreach ($name in @('Test-AgentMemoryRecordedRunExited','Get-AgentMemoryProcessIdentity')) {
+  $function=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+  Invoke-Expression $function.Extent.Text
+}
+function Get-Process {param($Id,$ErrorAction)
+  if ($script:missing) {throw (New-Object Management.Automation.ErrorRecord ([ArgumentException]::new('Absent')),'NoProcessFoundForGivenId',([Management.Automation.ErrorCategory]::ObjectNotFound),$Id)}
+  throw 'Access denied fixture'
+}
+$script:missing=$true
+if ((Get-AgentMemoryProcessIdentity -ProcessId 41).state -ne 'absent') {throw 'Missing PID was not distinguished'}
+$script:missing=$false
+if ((Get-AgentMemoryProcessIdentity -ProcessId 41).state -ne 'unknown') {throw 'Access failure was treated as process exit'}
 function Import-Module {param($Name,$ErrorAction)}
-function Stop-ScheduledTask {param($TaskPath,$TaskName,$ErrorAction)}
-function Get-Process {param($Id,$ErrorAction) if ($script:live) {return [pscustomobject]@{Id=$Id}}}
+function Stop-ScheduledTask {param($InputObject,$ErrorAction) Set-Content -LiteralPath $state -Value '{}'}
+function Get-OwnedTaskForCutover {param($Root,$Registration) return $Registration}
+function Get-AgentMemoryProcessIdentity {param($ProcessId)
+  if ($script:mode -eq 'absent') {return [pscustomobject]@{state='absent'}}
+  if ($script:mode -eq 'unknown') {return [pscustomobject]@{state='unknown'}}
+  $date=if ($script:mode -eq 'reused') {'2026-10-02T00:00:00.0000000Z'} else {'2026-10-01T00:00:00.0000000Z'}
+  return [pscustomobject]@{state='present';creation_date=$date}
+}
 function Start-Sleep {param($Milliseconds) throw 'recorded process still live'}
 $registrations=@([pscustomobject]@{Name='task-registration.json';TaskName='fixture';TaskPath='\\'})
 $state=Join-Path $Root 'data/runtime-state.json'
-$script:live=$false
-foreach ($json in @('{"daemon":{"pid":41},"engine":{"pid":42},"worker":null}','{"daemon":{"pid":41},"engine":{"pid":42}}')) {
+$script:mode='absent'
+$partial='{"daemon":{"pid":41,"creation_date":"2026-10-01T00:00:00.0000000Z"},"engine":{"pid":42,"creation_date":"2026-10-01T00:00:00.0000000Z"}}'
+$actualDate='2026-10-04T22:16:19.1593696Z'
+foreach ($typedDate in @([DateTime]::Parse($actualDate,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind),[DateTimeOffset]::Parse($actualDate))) {
+  $typedState=[pscustomobject]@{daemon=[pscustomobject]@{pid=41;creation_date=$typedDate}}
+  $script:typedObservedDate=([DateTimeOffset]::Parse($actualDate)).ToOffset([TimeSpan]::FromHours(9))
+  $probe={param($ProcessId) [pscustomobject]@{state='present';creation_date=$script:typedObservedDate}}
+  if (Test-AgentMemoryRecordedRunExited -RuntimeState $typedState -Probe $probe) {throw 'Typed same-instant process accepted as exited'}
+  $script:typedObservedDate=$script:typedObservedDate.AddTicks(1)
+  if (!(Test-AgentMemoryRecordedRunExited -RuntimeState $typedState -Probe $probe)) {throw 'Typed PID reuse rejected'}
+}
+foreach ($json in @($partial,($partial|ConvertFrom-Json|Select-Object *,@{Name='worker';Expression={$null}}|ConvertTo-Json))) {
   Set-Content -LiteralPath $state -Value $json
   Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations
 }
-$script:live=$true
-$rejected=$false
-try {Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations} catch {
-  if ($_.Exception.Message -notmatch 'recorded process still live') {throw}; $rejected=$true
+$script:mode='reused'; Set-Content -LiteralPath $state -Value $partial
+Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations
+foreach ($stopThrows in @($true,$false)) {
+  $stopBody=if ($stopThrows) {'param($Root,$TimeoutSeconds)' + [Environment]::NewLine + "throw 'partial start stop failed'"} else {'param($Root,$TimeoutSeconds)'}
+  Set-Content -LiteralPath (Join-Path $Root 'scripts/agentmemory-stop.ps1') -Value $stopBody
+  foreach ($mode in @('alive','unknown')) {
+    $script:mode=$mode; Set-Content -LiteralPath $state -Value $partial
+    $rejected=$false
+    try {Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations} catch {
+      if ($stopThrows -and $_.Exception.Message -notmatch 'partial start stop failed') {throw 'Original stop error lost'}
+      if ($_.Exception.Message -notmatch 'recorded process still live|Cannot confirm') {throw}; $rejected=$true
+    }
+    if (!$rejected) {throw 'Live or uncertain recorded process accepted'}
+  }
 }
-if (!$rejected) {throw 'Live recorded process accepted'}
-$script:live=$false
-foreach ($json in @('{"daemon":null,"engine":null,"worker":null}','{"daemon":{"pid":41},"engine":{}}')) {
+$script:mode='absent'
+foreach ($json in @('{"daemon":null,"engine":null,"worker":null}','{"daemon":{"pid":0,"creation_date":"2026-10-01T00:00:00.0000000Z"}}','{"daemon":{"pid":41},"engine":{}}')) {
   Set-Content -LiteralPath $state -Value $json
   $rejected=$false
   try {Stop-OwnedRuntimeForCutover -Root $Root -Registrations $registrations} catch {
-    if ($_.Exception.Message -notmatch 'partial start stop failed') {throw}; $rejected=$true
+    if ($_.Exception.Message -notmatch 'Cannot confirm') {throw}; $rejected=$true
   }
   if (!$rejected) {throw 'Untracked run accepted'}
 }
 'PARTIAL_START_STOP_OK'
 `);
-    const result=spawnSync(ps,powershellArgs(harness,{Source:path.join(packaging,'Install-WindowsCodex.ps1'),Root:dir}),
+    const result=spawnSync(ps,powershellArgs(harness,{Source:path.join(packaging,'Install-WindowsCodex.ps1'),Lifecycle:path.join(packaging,'powershell/agentmemory-lifecycle.ps1'),Root:dir}),
       {encoding:'utf8',timeout:30_000,windowsHide:true,env:powershellEnvironment()});
     assert.equal(result.status,0,result.stdout+result.stderr);
     assert.match(result.stdout,/PARTIAL_START_STOP_OK/);
   } finally {await rm(dir,{recursive:true,force:true});}
+});
+
+test('authenticated stop requires released ports and the captured run to exit', { skip: !windows }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'am-stop-proof-'));
+  try {
+    await mkdir(path.join(dir, 'data')); await mkdir(path.join(dir, 'scripts'));
+    for (const file of ['agentmemory-lifecycle.ps1', 'agentmemory-stop.ps1']) {
+      await copyFile(path.join(packaging, 'powershell', file), path.join(dir, 'scripts', file));
+    }
+    const creation_date = '2026-10-01T00:00:00.0000000Z';
+    const state = { status: 'active', run_id: 'fixture-run', daemon: { pid: 41, creation_date }, engine: { pid: 42, creation_date }, worker: { pid: 43, creation_date } };
+    for (const mode of ['alive', 'unknown', 'reused', 'absent', 'ports']) {
+      await writeFile(path.join(dir, 'data/runtime-state.json'), JSON.stringify(state));
+      await writeFile(path.join(dir, 'scripts/agentmemory-env.ps1'), `param($Root)
+$env:AGENTMEMORY_SECRET='fixture-key'
+$script:mode='${mode}'
+function Get-StopReservedConnections {if ($script:mode -eq 'ports') {[pscustomobject]@{LocalPort=3111;OwningProcess=99}}}
+function Get-AgentMemoryProcessIdentity {param($ProcessId)
+  Set-Content -LiteralPath (Join-Path $resolvedRoot 'data/runtime-state.json') -Value '{}'
+  if ($script:mode -eq 'unknown') {return [pscustomobject]@{state='unknown'}}
+  if ($script:mode -eq 'absent') {return [pscustomobject]@{state='absent'}}
+  $date=if ($script:mode -eq 'alive') {'2026-10-01T00:00:00.0000000Z'} else {'2026-10-02T00:00:00.0000000Z'}
+  return [pscustomobject]@{state='present';creation_date=$date}
+}
+`);
+      const result = spawnSync(ps, powershellArgs(path.join(dir, 'scripts/agentmemory-stop.ps1'), {Root:dir, TimeoutSeconds:0}),
+        {encoding:'utf8',timeout:15_000,windowsHide:true,env:powershellEnvironment()});
+      if (['reused','absent'].includes(mode)) {
+        assert.equal(result.status,0,result.stdout+result.stderr);
+        assert.equal(JSON.parse(result.stdout).stopped,true);
+      } else {
+        assert.notEqual(result.status,0,mode);
+        assert.match(result.stderr, mode === 'unknown' ? /Cannot confirm/ : /did not stop gracefully/);
+        assert.doesNotMatch(result.stdout, /"stopped":\s*true/);
+      }
+      assert.equal(JSON.parse(await readFile(path.join(dir,'data/stop-request.json'),'utf8')).worker_pid,43);
+    }
+  } finally { await rm(dir,{recursive:true,force:true}); }
 });
 
 test('runtime recovery tolerates transient failures and retains owned-stop guards', { skip: !windows }, async () => {
@@ -504,6 +714,57 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Daemon parse failed' }
+$waits=$ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Wait-Condition'},$true)
+$engineWait=@($waits | Where-Object {$_.Extent.Text.Contains('Test-EngineReady')})
+$workerWait=@($waits | Where-Object {$_.Extent.Text.Contains('Test-ServiceReady')})
+if ($engineWait.Count -ne 1) {throw 'Missing or ambiguous engine readiness wait'}
+if ($workerWait.Count -ne 1) {throw 'Missing or ambiguous worker readiness wait'}
+$waitFunction=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Wait-Condition'},$true)
+if (!$waitFunction) {throw 'Missing readiness wait function'}
+Invoke-Expression $waitFunction.Extent.Text
+$engineCondition=@($engineWait[0].CommandElements | Where-Object {$_ -is [Management.Automation.Language.ScriptBlockExpressionAst]})[0].ScriptBlock.GetScriptBlock()
+$workerCondition=@($workerWait[0].CommandElements | Where-Object {$_ -is [Management.Automation.Language.ScriptBlockExpressionAst]})[0].ScriptBlock.GetScriptBlock()
+$engine=[pscustomobject]@{HasExited=$false;Id=41;ExitCode=17}
+$worker=[pscustomobject]@{HasExited=$false;Id=42;ExitCode=-1}
+$engineOut=Join-Path $Temp 'engine-run.stdout.log'; $engineErr=Join-Path $Temp 'engine-run.stderr.log'
+$workerOut=Join-Path $Temp 'worker-run.stdout.log'; $workerErr=Join-Path $Temp 'worker-run.stderr.log'
+$script:ready=$true; $script:readinessProbes=0
+function Test-EngineReady {param($EnginePid)
+  if ($EnginePid -ne 41) {throw 'Wrong engine readiness identity'}
+  $script:readinessProbes++; return $script:ready
+}
+function Test-ServiceReady {param($EnginePid,$WorkerPid)
+  if ($EnginePid -ne 41 -or $WorkerPid -ne 42) {throw 'Wrong service readiness identities'}
+  $script:readinessProbes++; return $script:ready
+}
+foreach ($condition in @($engineCondition,$workerCondition)) {
+  Wait-Condition -Condition $condition -TimeoutSeconds 1 -FailureMessage 'healthy readiness failed'
+}
+if ($script:readinessProbes -ne 2) {throw 'Healthy readiness bypassed its probes'}
+$script:ready=$false
+foreach ($condition in @($engineCondition,$workerCondition)) {
+  if (& $condition) {throw 'Alive but unready processes were accepted'}
+}
+$message=$null
+try {Wait-Condition -Condition $engineCondition -TimeoutSeconds 1 -FailureMessage 'fixture readiness timeout'}
+catch {$message=$_.Exception.Message}
+if ($message -cne 'fixture readiness timeout') {throw 'Alive but unready engine did not retain bounded waiting'}
+function Assert-ReadinessExit {
+  param([scriptblock]$Condition,[string]$Expected,[string]$OutputPath,[string]$ErrorPath)
+  $script:readinessProbes=0; $message=$null
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  try {Wait-Condition -Condition $Condition -TimeoutSeconds 1 -FailureMessage 'fixture readiness timeout'}
+  catch {$message=$_.Exception.Message}
+  $clock.Stop()
+  if (!$message -or !$message.Contains($Expected) -or !$message.Contains($OutputPath) -or !$message.Contains($ErrorPath)) {throw "Startup exit detail lost: $message"}
+  if ($script:readinessProbes -ne 0) {throw 'Exited process reached a readiness probe'}
+  if ($clock.ElapsedMilliseconds -ge 900) {throw 'Exited process waited for the readiness deadline'}
+}
+$engine.HasExited=$true
+Assert-ReadinessExit $engineCondition 'iii engine exited during startup with code 17' $engineOut $engineErr
+Assert-ReadinessExit $workerCondition 'iii engine exited during worker startup with code 17' $engineOut $engineErr
+$engine.HasExited=$false; $worker.HasExited=$true
+Assert-ReadinessExit $workerCondition 'worker exited during startup with code -1' $workerOut $workerErr
 $liveness=$ast.Find({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$body.writeRecoveryRequired')},$true)
 if (!$liveness) {throw 'Missing write-recovery liveness check'}
 $rejectBody=[ScriptBlock]::Create('param($body) Set-StrictMode -Version Latest; return ('+$liveness.Clauses[0].Item1.Extent.Text+')')

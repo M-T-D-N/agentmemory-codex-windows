@@ -159,6 +159,7 @@ export function registerEventTriggers(
       );
       if (graphDispatch) {
         fireVoid("mem::graph-extract", {
+          ...(isGraphExtractionEnabled() && kv.usesManagedState ? { deferIfBusy: true } : {}),
           project: graphDispatch.session.project,
           sessionId: graphDispatch.session.id,
           observations: graphDispatch.selected,

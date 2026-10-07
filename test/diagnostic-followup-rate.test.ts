@@ -90,12 +90,20 @@ describe("Smart-search followup-rate diagnostic (#771)", () => {
   let kv: ReturnType<typeof mockKV>;
   let searchResults: HybridSearchResult[];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     delete process.env.AGENTMEMORY_FOLLOWUP_WINDOW_SECONDS;
     resetFollowupStatsForTests();
     kv = mockKV();
     sdk = mockSdk(kv);
     searchResults = [];
+    await kv.set(KV.sessions, "ses_1", {
+      id: "ses_1", project: "diagnostic-test", cwd: "/diagnostic-test",
+      startedAt: "2026-02-01T00:00:00Z", status: "completed", observationCount: 4,
+    });
+    for (const id of ["obs_a", "obs_b", "obs_c", "obs_d"]) {
+      const { observation } = makeHit(id);
+      await kv.set(KV.observations(observation.sessionId), observation.id, observation);
+    }
     registerSmartSearchFunction(sdk, kv as any, async () => searchResults);
     registerRecentSearchesSweepFunction(sdk, kv as any);
   });

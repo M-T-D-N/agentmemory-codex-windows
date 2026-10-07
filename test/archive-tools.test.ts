@@ -1,3 +1,4 @@
+import { withObservationWrite } from "../src/state/observation-write.js";
 import { describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { KV } from "../src/state/schema.js";
@@ -117,4 +118,24 @@ describe.each([false, true])("official explicit archive inspection and lifecycle
     expect(await f.call({ project: "p", target })).toMatchObject({ importPending: true });
     await expect(f.call({ action: "restore", project: "p", target })).rejects.toThrow("recovery must finish");
   });
+});
+
+it("archive reads work during observation writes while archive mutations still refuse", async () => {
+  const f = await fixture(false), before = structuredClone(f.kv.store);
+  await withObservationWrite(async () => {
+    expect(await f.call({ project: "p", target })).toMatchObject({ success: true, record: f.memory });
+    expect(await f.call({ project: "p", action: "list" })).toMatchObject({ success: true });
+    expect(await f.call({ project: "p", action: "candidates" })).toBeDefined();
+    await expect(f.call({ project: "p", action: "archive", target })).rejects.toThrow("Observation writers are active");
+  });
+  expect(f.kv.store).toEqual(before);
+});
+it("both official entrypoints preserve real SDK busy objects without leaking transport fields", async () => {
+  const f = await fixture(false);
+  f.sdk.fns.set("mem::archive", async () => { throw { code: "invocation_failed", message: "Observation writers are active; recovery made no changes. Retry after they finish.", stack: "private stack", secret: "private value" }; });
+  const mcp = await f.mcp({ project: "p", action: "list" });
+  expect(mcp).toMatchObject({ isError: true, success: false, code: "observation_writers_active", retryable: true, error: "Observation writers are active; recovery made no changes. Retry after they finish." });
+  const rest = await f.sdk.trigger("api::archive", { body: { project: "p", action: "list" } });
+  expect(rest).toMatchObject({ status_code: 409, body: { code: "observation_writers_active", retryable: true } });
+  expect(JSON.stringify([mcp, rest])).not.toContain("private");
 });

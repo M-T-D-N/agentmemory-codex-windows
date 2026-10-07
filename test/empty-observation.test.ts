@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { StateKV } from '../src/state/kv.js';
 import { KV } from '../src/state/schema.js';
 import { changeEmptyObservation } from '../src/functions/empty-observation.js';
+import { importExportData } from '../src/functions/export-import.js';
 import { previewSessionForget } from '../src/functions/forget-preview.js';
 import { withObservationWrite, withObservationRecovery } from '../src/state/observation-write.js';
 import { getSearchIndex, setIndexPersistence } from '../src/functions/search.js';
 import { selectSemanticGraphBatch } from '../src/functions/semantic-graph-backlog.js';
+import { VERSION } from '../src/version.js';
 
 vi.mock('../src/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 
@@ -43,6 +45,14 @@ function fixture() {
     failCount: () => { failCount = true; }, uncertain: () => { uncertain = true; } };
 }
 const request = { action: 'delete-empty', project: 'project', sessionId: 'session', observationIds: ['obs_empty'], expectedVersion: 0, reason: 'User requested proven empty records be removed' };
+const importedMemory = (id: string, sourceObservationIds = ['obs_empty']) => ({
+  id, createdAt: '2026-01-03T00:00:00Z', updatedAt: '2026-01-03T00:00:00Z', type: 'fact',
+  title: 'Existing source', content: 'A memory tied to an existing source', concepts: [], files: [],
+  sessionIds: ['session'], sourceObservationIds, strength: 5, version: 1, isLatest: true,
+});
+const importPayload = (memories: ReturnType<typeof importedMemory>[]) => ({
+  version: VERSION, exportedAt: '2026-01-03T00:00:00Z', sessions: [], observations: {}, memories, summaries: [],
+});
 
 describe('recoverable empty observations through canonical state', () => {
   it.each([KV.graphQueryDocuments, KV.graphQueryAdjacency])('rejects deleted provenance in derived graph scope %s', async (scope) => {
@@ -101,8 +111,44 @@ describe('recoverable empty observations through canonical state', () => {
     expect(() => f.kv.assertRecoveryImportAllowed({ observations: { session: [] } })).toThrow('Import');
     expect(() => f.kv.assertRecoveryImportAllowed({}, true)).toThrow('Replace import');
     expect(() => f.kv.assertRecoveryImportAllowed({ sessions: [{ id: 'unrelated' }] })).not.toThrow();
+    expect(() => f.kv.assertRecoveryImportAllowed({ memories: [importedMemory('mem_target', ['obs_empty'])] })).toThrow('deleted observation');
+    expect(() => f.kv.assertRecoveryImportAllowed({ memories: [{ id: 'obs_empty' }] })).toThrow();
+    expect(() => f.kv.assertRecoveryImportAllowed({ sessions: [{ id: 'session' }] })).toThrow('Import');
+    expect(() => f.kv.assertRecoveryImportAllowed({ memories: [{ id: 'mem_meta', emptyDeletion: {} }] })).toThrow('recovery metadata');
     const restarted = new StateKV(f.sdk); await restarted.initializeObservationRecovery();
     await expect(restarted.set(KV.graphEdges, 'edge', { sourceObservationIds: ['obs_empty'] })).rejects.toThrow('deleted observation');
+  });
+
+  it('imports memory provenance that references an existing restored observation and session', async () => {
+    const f = fixture();
+    expect(await changeEmptyObservation(f.kv, request)).toMatchObject({ success: true, state: 'deleted' });
+    expect(await changeEmptyObservation(f.kv, { ...request, action: 'restore-empty', expectedVersion: 1 })).toMatchObject({ success: true, state: 'restored' });
+    const sessionBefore = await f.kv.get<any>(KV.sessions, 'session');
+    const observationBefore = await f.kv.get<any>(KV.observations('session'), 'obs_empty');
+
+    const result = await importExportData(f.kv, { exportData: importPayload([importedMemory('mem_restored_source')]) });
+
+    expect(result).toMatchObject({ success: true, memories: 1 });
+    expect(await f.kv.get<any>(KV.memories, 'mem_restored_source')).toMatchObject({
+      sessionIds: ['session'], sourceObservationIds: ['obs_empty'],
+    });
+    expect(await f.kv.get<any>(KV.sessions, 'session')).toEqual(sessionBefore);
+    expect(await f.kv.get<any>(KV.observations('session'), 'obs_empty')).toEqual(observationBefore);
+  });
+
+  it('rejects a deleted memory source before importing any memory rows', async () => {
+    const f = fixture();
+    expect(await changeEmptyObservation(f.kv, request)).toMatchObject({ success: true, state: 'deleted' });
+    const payload = importPayload([
+      importedMemory('mem_before_rejection', []),
+      importedMemory('mem_deleted_source'),
+    ]);
+
+    await expect(importExportData(f.kv, { exportData: payload })).rejects.toThrow('Cannot reference a deleted observation');
+
+    expect(await f.kv.list(KV.memories)).toEqual([]);
+    expect(await f.kv.get(KV.observations('session'), 'obs_empty')).toBeNull();
+    expect(await f.kv.get<any>(KV.sessions, 'session')).toMatchObject({ id: 'session', project: 'project' });
   });
 
   it.each([

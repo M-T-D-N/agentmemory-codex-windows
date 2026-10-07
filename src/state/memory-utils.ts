@@ -1,4 +1,37 @@
-import type { CompressedObservation, Lesson, Memory } from "../types.js";
+import type { CompressedObservation, Lesson, Memory, Session } from "../types.js";
+
+export type MemoryProjectResolution =
+  | { status: "inferable"; project: string }
+  | { status: "no-session-provenance" }
+  | { status: "ambiguous" };
+
+export function resolveMemoryProject(
+  memory: Pick<Memory, "sessionIds" | "sourceObservationIds">,
+  sessions: ReadonlyMap<string, Session>,
+): MemoryProjectResolution {
+  const sessionIds = [...new Set(memory.sessionIds ?? [])];
+  if (sessionIds.length === 0) {
+    return (memory.sourceObservationIds?.length ?? 0) === 0
+      ? { status: "no-session-provenance" }
+      : { status: "ambiguous" };
+  }
+
+  let project: string | undefined;
+  for (const sessionId of sessionIds) {
+    const session = sessions.get(sessionId);
+    if (!session || typeof session.project !== "string" || !session.project.trim()) {
+      return { status: "ambiguous" };
+    }
+    if (project !== undefined && session.project !== project) {
+      return { status: "ambiguous" };
+    }
+    project = session.project;
+  }
+
+  return project === undefined
+    ? { status: "ambiguous" }
+    : { status: "inferable", project };
+}
 
 // Wraps a Memory record in the CompressedObservation shape that
 // SearchIndex / VectorIndex / enrichment paths consume. Memories share

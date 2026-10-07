@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { filterCodexGraphSources } from "./observation-visibility.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { readArchiveVisibility, type ArchiveVisibility } from "./archive.js";
@@ -234,6 +236,7 @@ async function validateExactEdgeInventorySnapshot(
   inventory: Partial<GraphQueryResult>,
   expectedManifest: GraphQueryIndexManifest,
   archived?: ArchiveVisibility,
+  sources?: Map<string, boolean>,
 ): Promise<Partial<GraphQueryResult>> {
   if (!inventory.edgeInventory) return inventory;
   const edgeInventoryRevision = [
@@ -242,6 +245,7 @@ async function validateExactEdgeInventorySnapshot(
     snapshot.stats.totalNodes,
     snapshot.stats.totalEdges,
     ...(archived ? [archived.graphRevision] : []),
+    ...(sources ? [createHash("sha256").update(JSON.stringify([...sources].sort(([a], [b]) => a.localeCompare(b)))).digest("hex")] : []),
   ].join(":");
   const manifest = await kv.get<GraphQueryIndexManifest>(
     KV.graphQueryManifest,
@@ -260,7 +264,13 @@ async function validateExactEdgeInventorySnapshot(
       manifest.totalEdges === snapshot.stats.totalEdges,
   );
   const archiveStable = !archived || (await readArchiveVisibility(kv)).graphRevision === archived.graphRevision;
-  if (stable && archiveStable) return { ...inventory, edgeInventoryRevision };
+  let sourceStable = true;
+  if (sources) {
+    const current = new Map<string, boolean>();
+    await filterCodexGraphSources(kv, [{ sourceSessionIds: [...sources.keys()] }], current);
+    sourceStable = [...sources].every(([id, excluded]) => current.get(id) === excluded);
+  }
+  if (stable && archiveStable && sourceStable) return { ...inventory, edgeInventoryRevision };
   return {
     ...inventory,
     edgeInventoryRevision,
@@ -592,6 +602,7 @@ export async function queryGraphFromIndex(
   offset: number,
   queryIndexRebuilt: boolean,
   visibility?: ArchiveVisibility,
+  sourceCache = new Map<string, boolean>(),
 ): Promise<GraphQueryResult> {
   const archived = visibility ?? await readArchiveVisibility(kv);
   const visibleEdge = (edge: GraphQueryEdgeRef) => !archived({ kind: "graph_edge", id: edge.id }) &&
@@ -617,6 +628,7 @@ export async function queryGraphFromIndex(
       visited.add(nodeId);
       const node = await kv.get<GraphNode>(KV.graphNodes, nodeId);
       if (!node || !isVisibleAfterReset(node, snapshot.resetAt)) continue;
+      if (!(await filterCodexGraphSources(kv, [node], sourceCache)).length) continue;
       if (project && graphNodeProject(node) !== project) continue;
       if (!data.nodeType || node.type === data.nodeType) resultNodes.push(node);
       const adjacency = await readGraphQueryEdgeRefs(
@@ -624,7 +636,7 @@ export async function queryGraphFromIndex(
         [nodeId],
         adjacencyCache,
       );
-      for (const ref of adjacency.refs) {
+      for (const ref of await filterCodexGraphSources(kv, adjacency.refs, sourceCache)) {
         if (!visibleEdge(ref)) continue;
         if (project && ref.project !== undefined && ref.project !== project) {
           continue;
@@ -659,6 +671,7 @@ export async function queryGraphFromIndex(
       ),
       manifest,
       archived,
+      sourceCache,
     );
     return {
       ...paginateGraph(resultNodes, resultEdges, maxDepth, limit, offset),
@@ -677,7 +690,7 @@ export async function queryGraphFromIndex(
       : []),
     ...(Array.isArray(data.queries) ? data.queries : []),
   ].map((query) => query.toLowerCase());
-  const documents = (await readAllGraphQueryDocuments(kv))
+  const documents = (await filterCodexGraphSources(kv, (await readAllGraphQueryDocuments(kv))
     .filter(document => !archived({ kind: "graph_node", id: document.id }))
     .filter(
       (document) =>
@@ -691,8 +704,7 @@ export async function queryGraphFromIndex(
       (document) =>
         queryTerms.length === 0 ||
         queryTerms.some((term) => document.searchText.includes(term)),
-    )
-    .sort(graphQueryDocumentOrder);
+    ), sourceCache)).sort(graphQueryDocumentOrder);
   const totalNodes = documents.length;
   const pageDocuments = documents.slice(offset, offset + limit);
   const pageNodes = await hydrateGraphNodes(
@@ -703,7 +715,7 @@ export async function queryGraphFromIndex(
   const universeIds = new Set(documents.map((document) => document.id));
   const pageIds = new Set(pageNodes.map((node) => node.id));
   const { refs } = await readGraphQueryEdgeRefs(kv, universeIds);
-  const universeEdges = refs.filter(
+  const universeEdges = (await filterCodexGraphSources(kv, refs, sourceCache)).filter(
     (ref) =>
       visibleEdge(ref) &&
       (!snapshot.resetAt ||
@@ -723,6 +735,7 @@ export async function queryGraphFromIndex(
     ),
     manifest,
     archived,
+    sourceCache,
   );
   const pageEdgeIds = universeEdges
     .filter(

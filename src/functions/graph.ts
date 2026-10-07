@@ -23,9 +23,9 @@ import {
 } from "../prompts/graph-extraction.js";
 import { isGraphExtractionEnabled } from "../config.js";
 import { recordAudit, safeAudit } from "./audit.js";
-import { withKeyedLock } from "../state/keyed-mutex.js";
+import { withKeyedLock, tryWithKeyedLock } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
-import { isCodexApprovalReviewText } from "./observation-visibility.js";
+import { isCodexInternalAmbientText, isCodexApprovalReviewText } from "./observation-visibility.js";
 import { semanticGraphCursorsAtEnd } from "./semantic-graph-backlog.js";
 import { graphObservationComplete, graphObservationDigest, readGraphCompletionContext, type GraphCompletionContext } from "./graph-observation-result.js";
 import { applyGraphWritePlan, prepareGraphWritePlan } from "../state/graph-write-plan.js";
@@ -33,7 +33,7 @@ import {
   validateObservationProvenance,
   type ObservationSourceInput,
 } from "./provenance.js";
-import { sanitizeCodexAmbientObservation } from "./observation-visibility.js";
+import { filterCodexGraphSources, sanitizeCodexProcessingObservation } from "./observation-visibility.js";
 import {
   GRAPH_EDGE_TYPES,
   GRAPH_NODE_TYPES,
@@ -80,6 +80,13 @@ const MAX_GRAPH_PURGE_EDGES = 1000;
 const MAX_GRAPH_PROVENANCE_TARGETS = 100;
 const MAX_GRAPH_PROVENANCE_OBSERVATION_REFERENCES = 500;
 export const GRAPH_WRITE_LOCK = "mem:graph-write";
+
+function withGraphWriterLock<T>(deferIfBusy: boolean, work: () => Promise<T>) {
+  if (!deferIfBusy) return withKeyedLock(GRAPH_WRITE_LOCK, work);
+  return tryWithKeyedLock(GRAPH_WRITE_LOCK, work).then(result =>
+    result.acquired ? result.value : { success: true, skipped: "graph_writer_busy" as const },
+  );
+}
 
 // #814: the precomputed snapshot covers the top-degree subgraph used by
 // the empty-body / nodeType-only branch — the path the viewer hits on
@@ -200,63 +207,6 @@ async function readGraphQueryProvenanceCandidates(
     for (const id of entry?.edgeIds ?? []) edgeIds.add(id);
   }
   return { nodeIds: [...nodeIds].sort(), edgeIds: [...edgeIds].sort() };
-}
-
-export interface GraphSessionReferenceResult {
-  sessionId: string;
-  nodeIds: string[];
-  edgeIds: string[];
-}
-
-// Read-only, bounded provenance preflight for lifecycle migrations. A stale,
-// dirty, or provenance-free derived index is not evidence of absence, so fail
-// closed instead of enumerating the large canonical graph scopes.
-export async function inspectGraphSessionReferences(
-  kv: StateKV,
-  sessionIds: string[],
-): Promise<GraphSessionReferenceResult[]> {
-  const ids = [...new Set(sessionIds)];
-  if (ids.length === 0) return [];
-
-  const snapshot = await readSnapshot(kv);
-  if (!snapshot) {
-    throw new Error("graph session-reference preflight requires a current graph snapshot");
-  }
-  if (snapshot.dirty) {
-    throw new Error("graph session-reference preflight requires an idle, clean graph snapshot");
-  }
-  if (snapshot.stats.totalNodes === 0 && snapshot.stats.totalEdges === 0) {
-    return ids.map((sessionId) => ({ sessionId, nodeIds: [], edgeIds: [] }));
-  }
-  if (
-    !Number.isInteger(snapshot.stats.totalNodes) ||
-    !Number.isInteger(snapshot.stats.totalEdges) ||
-    snapshot.stats.totalNodes < 0 ||
-    snapshot.stats.totalEdges < 0 ||
-    (snapshot.stats.totalNodes === 0 && snapshot.stats.totalEdges > 0)
-  ) {
-    throw new Error("graph session-reference preflight found inconsistent graph statistics");
-  }
-  const indexed = await ensureGraphQueryIndex(kv, snapshot);
-  if (!indexed || indexed.manifest.provenanceVersion !== 1) {
-    throw new Error(
-      "exact graph provenance index is unavailable; rebuild it before purging session stubs",
-    );
-  }
-
-  const results: GraphSessionReferenceResult[] = [];
-  for (let start = 0; start < ids.length; start += GRAPH_QUERY_INDEX_IO_BATCH) {
-    const batch = ids.slice(start, start + GRAPH_QUERY_INDEX_IO_BATCH);
-    const references = await Promise.all(
-      batch.map((sessionId) =>
-        readGraphQueryProvenanceCandidates(kv, sessionId, [], true)
-      ),
-    );
-    batch.forEach((sessionId, index) => {
-      results.push({ sessionId, ...references[index]! });
-    });
-  }
-  return results;
 }
 
 async function buildGraphQueryIndex(
@@ -3143,11 +3093,12 @@ export function registerGraphFunction(
       sessionId?: string;
       observations: CompressedObservation[];
       bootstrapSkipped?: number;
+      deferIfBusy?: boolean;
       cursorMode?: "forward" | "bootstrap_backfill";
       semanticHasMore?: boolean;
       semanticBootstrapDone?: boolean;
     }) =>
-      withKeyedLock(GRAPH_WRITE_LOCK, async () => {
+      withGraphWriterLock(data.deferIfBusy === true, async () => {
       if (!data.observations || data.observations.length === 0) {
         return { success: false, error: "No observations provided" };
       }
@@ -3174,7 +3125,7 @@ export function registerGraphFunction(
                   sessionId,
                   observationIds: data.observations.map((observation) => observation.id),
                 }],
-              });
+              }, "graph_processing");
               const official = await Promise.all(
                 data.observations.map((observation) =>
                   kv.get<CompressedObservation>(
@@ -3187,7 +3138,7 @@ export function registerGraphFunction(
                 throw new Error("official observation disappeared during graph extraction");
               }
               const sanitized = (official as CompressedObservation[]).map(
-                (observation) => sanitizeCodexAmbientObservation(observation),
+                (observation) => sanitizeCodexProcessingObservation(observation),
               );
               if (sanitized.some((observation) => !observation)) {
                 throw new Error("official observation became ineligible during graph extraction");
@@ -3234,11 +3185,13 @@ export function registerGraphFunction(
       const processedObservationIds = observations.map((observation) => observation.id);
       const processingObservations = observations;
       const excludedObservationIds = observations
-        .filter((observation) => isCodexApprovalReviewText(observation.narrative))
+        .filter((observation) => isCodexInternalAmbientText(observation.narrative))
         .map((observation) => observation.id);
-      observations = observations.filter((observation) => !isCodexApprovalReviewText(observation.narrative));
+      observations = observations.filter((observation) => !isCodexInternalAmbientText(observation.narrative));
       const obsIds = observations.map((observation) => observation.id);
-      const onlyApprovalReviews = observations.length === 0 && excludedObservationIds.length > 0;
+      const onlyExcludedObservations = observations.length === 0 && excludedObservationIds.length > 0;
+      const exclusionReason = processingObservations.filter(o => excludedObservationIds.includes(o.id)).every(o => isCodexApprovalReviewText(o.narrative)) ? "codex_approval_review" : "codex_internal_host_event";
+      const excludedAnalyzer = exclusionReason === "codex_approval_review" ? "deterministic:codex-approval-review-skip" : "deterministic:codex-internal-host-event-skip";
 
       let nodes: GraphNode[] = [];
       let edges: GraphEdge[] = [];
@@ -3273,7 +3226,7 @@ export function registerGraphFunction(
       let llmError: string | undefined;
       let semanticCompleted = false;
       let semanticRepairAttempted = false;
-      if (llmEnabled && !onlyApprovalReviews) {
+      if (llmEnabled && !onlyExcludedObservations) {
         const prompt = buildGraphExtractionPrompt(
           observations.map(toGraphExtractionObservation),
         );
@@ -3325,7 +3278,7 @@ export function registerGraphFunction(
 
       const persistExtraction = async () => {
       try {
-        const processingCompleted = semanticCompleted || onlyApprovalReviews;
+        const processingCompleted = semanticCompleted || onlyExcludedObservations;
         const persist = (writer: StateKV) => nodes.length > 0 || edges.length > 0
           ? persistGraphDelta(writer, nodes, edges, obsIds, {
               ...(project ? { project } : {}),
@@ -3338,11 +3291,11 @@ export function registerGraphFunction(
           if (!current || current.project !== project || current.semanticGraphCompletionVersion !== 1) throw Error("Graph completion session changed");
           for (const observation of processingObservations) {
             const official = await kv.get<CompressedObservation>(KV.observations(sessionId), observation.id);
-            const sanitized = official && sanitizeCodexAmbientObservation(official);
+            const sanitized = official && sanitizeCodexProcessingObservation(official);
             if (!sanitized || graphObservationDigest(sanitized) !== graphObservationDigest(observation)) throw Error("Graph input changed during extraction");
           }
           const completedAt = new Date().toISOString();
-          const analyzer = onlyApprovalReviews ? "deterministic:codex-approval-review-skip" : provider.getRuntimeInfo?.()?.fingerprint ?? provider.name;
+          const analyzer = onlyExcludedObservations ? excludedAnalyzer : provider.getRuntimeInfo?.()?.fingerprint ?? provider.name;
           const epoch = completion.epoch;
           const prepared = await prepareGraphWritePlan(kv, async store => {
             const result = await persist(store as StateKV);
@@ -3363,7 +3316,7 @@ export function registerGraphFunction(
         } else persisted = await persist(kv);
         const { newNodeCount, newEdgeCount } = persisted;
 
-        if (sessionId && (llmEnabled || onlyApprovalReviews)) {
+        if (sessionId && (llmEnabled || onlyExcludedObservations)) {
           {
             const currentSession = await kv.get<Session>(KV.sessions, sessionId);
             if (!currentSession || currentSession.id !== sessionId || currentSession.project !== project) {
@@ -3400,7 +3353,7 @@ export function registerGraphFunction(
                 {
                   type: "set",
                   path: "semanticGraphAnalyzer",
-                  value: onlyApprovalReviews ? "deterministic:codex-approval-review-skip" : runtime?.fingerprint ?? provider.name,
+                  value: onlyExcludedObservations ? excludedAnalyzer : runtime?.fingerprint ?? provider.name,
                 },
                 { type: "set", path: "semanticGraphLastError", value: "" },
                 { type: "set", path: "semanticGraphDeferredReason", value: "" },
@@ -3449,7 +3402,7 @@ export function registerGraphFunction(
           nodesExtracted: nodes.length,
           edgesExtracted: edges.length,
           processingCompleted,
-          ...(excludedObservationIds.length ? { excludedObservationIds, exclusionReason: "codex_approval_review" } : {}),
+          ...(excludedObservationIds.length ? { excludedObservationIds, exclusionReason } : {}),
           semanticCompleted,
           semanticRepairAttempted,
           ...(llmError ? { semanticError: llmError.slice(0, 1000) } : {}),
@@ -3463,12 +3416,12 @@ export function registerGraphFunction(
           edges: edges.length,
           newNodes: newNodeCount,
           newEdges: newEdgeCount,
-          llm: llmEnabled && !onlyApprovalReviews && !llmError,
+          llm: llmEnabled && !onlyExcludedObservations && !llmError,
         });
         return {
           success: processingCompleted || !llmEnabled || nodes.length > 0 || edges.length > 0,
           processingCompleted,
-          ...(excludedObservationIds.length ? { excludedObservationIds, exclusionReason: "codex_approval_review" } : {}),
+          ...(excludedObservationIds.length ? { excludedObservationIds, exclusionReason } : {}),
           nodesAdded: nodes.length,
           edgesAdded: edges.length,
           newNodes: newNodeCount,
@@ -3488,7 +3441,7 @@ export function registerGraphFunction(
         try {
           await validateObservationProvenance(kv, {
             project, sources: [{ sessionId, observationIds: processedObservationIds }],
-          });
+          }, "graph_processing");
         } catch (error) {
           return { success: false, error: error instanceof Error ? error.message : String(error), skipped: "source_deleted", nodesAdded: 0, edgesAdded: 0, newNodes: 0, newEdges: 0, semanticCompleted: false, semanticRepairAttempted };
         }
@@ -3512,7 +3465,13 @@ export function registerGraphFunction(
           ? data.project.trim()
           : undefined;
       const project = requestedProject === "*" ? undefined : requestedProject;
-      const snapshot = await readSnapshot(kv);
+      const canonicalSnapshot = await readSnapshot(kv);
+      const sourceCache = new Map<string, boolean>();
+      const snapshot = canonicalSnapshot ? { ...canonicalSnapshot,
+        topNodes: await filterCodexGraphSources(kv, canonicalSnapshot.topNodes, sourceCache),
+        topEdges: await filterCodexGraphSources(kv, canonicalSnapshot.topEdges, sourceCache),
+      } : null;
+      const internalSnapshotFiltered = !!canonicalSnapshot && (snapshot!.topNodes.length !== canonicalSnapshot.topNodes.length || snapshot!.topEdges.length !== canonicalSnapshot.topEdges.length);
       const archived = await readArchiveVisibility(kv);
 
       // #814 v2: the empty-body / nodeType-only path NEVER enumerates.
@@ -3533,7 +3492,9 @@ export function registerGraphFunction(
         data.edgeOffset === undefined;
       if (noWalk) {
         if (snapshot && snapshot.stats.totalNodes > 0) {
-          return paginateFromSnapshot(snapshot, data.nodeType, limit, offset);
+          return { ...paginateFromSnapshot(snapshot, data.nodeType, limit, offset),
+            ...(internalSnapshotFiltered ? { totalsExact: false, warning: "Snapshot totals include internal sources. Use a scoped indexed query for exact visible totals." } : {}),
+          };
         }
         return {
           nodes: [],
@@ -3568,6 +3529,7 @@ export function registerGraphFunction(
               offset,
               indexed.rebuilt,
               archived,
+              sourceCache,
             );
           }
         } catch (error) {
@@ -3624,6 +3586,7 @@ export function registerGraphFunction(
       return {
         ...snap.stats,
         fromSnapshot: true,
+        countsScope: "canonical_storage",
         updatedAt: snap.updatedAt,
         ...(archived.hasArchivedGraph ? { includesArchived: true } : {}),
         ...(snap.dirty
@@ -3653,7 +3616,7 @@ export function registerGraphFunction(
   // Canonical nodes and edges are never replaced by a derived-index rebuild.
   registerObservationWriter(sdk, "mem::graph-snapshot-rebuild",
     async (data?: { force?: boolean; onlyIfIndexUnavailable?: boolean }) =>
-      withKeyedLock(GRAPH_WRITE_LOCK, async () => {
+      withGraphWriterLock(data?.onlyIfIndexUnavailable === true, async () => {
       // Recheck after acquiring the writer lock: an intervening writer or
       // operator rebuild may already have restored the exact index.
       if (data?.onlyIfIndexUnavailable === true && await graphQueryIndexAvailable(kv)) {

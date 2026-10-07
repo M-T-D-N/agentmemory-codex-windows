@@ -51,9 +51,15 @@ describe("MCP recall agent scope contract", () => {
     }
   });
 
-  it("forwards agent selection during smart-search expansion too", async () => {
-    expect((await call("memory_smart_search", { agentId: "agent-a", expandIds: "obs-a,obs-b" })).status_code).toBe(200);
-    expect(smartSearch).toHaveBeenCalledWith(expect.objectContaining({ agentId: "agent-a", expandIds: ["obs-a", "obs-b"] }));
+  it("forwards scoped expansion without requiring a search query", async () => {
+    expect((await call("memory_smart_search", { query: undefined, agentId: "agent-a", expandIds: "obs-a,obs-b" })).status_code).toBe(200);
+    expect(smartSearch).toHaveBeenCalledWith(expect.objectContaining({ agentId: "agent-a", project: "project-a", expandIds: ["obs-a", "obs-b"] }));
+    expect(getAllTools().find(tool => tool.name === "memory_smart_search")!.inputSchema.required).not.toContain("query");
+    smartSearch.mockClear();
+    for (const expandIds of [undefined, "", " , "]) {
+      expect((await call("memory_smart_search", { query: undefined, expandIds })).status_code).toBe(400);
+    }
+    expect(smartSearch).not.toHaveBeenCalled();
   });
 
   it.each(tools)("%s rejects malformed explicit scope before querying", async name => {

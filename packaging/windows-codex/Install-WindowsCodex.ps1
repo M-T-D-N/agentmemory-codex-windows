@@ -20,6 +20,41 @@ function Compress-CompletedReleaseBackup {
           [Parameter(Mandatory)][long]$CreationTicks)
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+    function Assert-BackupPath {
+        param([Parameter(Mandatory)][string]$Path)
+        $cursor = Get-Item -LiteralPath $Path -Force
+        while ($null -ne $cursor) {
+            if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Backup has a reparse ancestor or entry.' }
+            $cursor = if ($cursor -is [IO.DirectoryInfo]) { $cursor.Parent } else { $cursor.Directory }
+        }
+    }
+    function Get-BackupStreamHash {
+        param([Parameter(Mandatory)][IO.Stream]$Stream)
+        $Stream.Position = 0
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha.ComputeHash($Stream)).Replace('-', '') }
+        finally { $sha.Dispose(); $Stream.Position = 0 }
+    }
+    function Test-BackupArchive {
+        param([Parameter(Mandatory)][IO.Compression.ZipArchive]$Zip)
+        if ($Zip.Entries.Count -ne ($files.Count + $directories.Count)) { return $false }
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($entry in $Zip.Entries) {
+            if (-not $seen.Add($entry.FullName)) { return $false }
+            if ($entry.FullName.EndsWith('/', [StringComparison]::Ordinal)) {
+                if ($directories -cnotcontains $entry.FullName -or $entry.Length -ne 0) { return $false }
+            }
+            else {
+                if (-not $files.ContainsKey($entry.FullName) -or $files.Keys -cnotcontains $entry.FullName) { return $false }
+                $stream = $entry.Open()
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+                finally { $stream.Dispose(); $sha.Dispose() }
+                if ($hash -ne $files[$entry.FullName]) { return $false }
+            }
+        }
+        return $true
+    }
     $expectedParent = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'backups\releases')).TrimEnd('\')
     $item = Get-Item -LiteralPath $BackupRoot -Force
     if (-not $item.PSIsContainer -or $item.Parent.FullName -ine $expectedParent -or
@@ -52,32 +87,49 @@ function Compress-CompletedReleaseBackup {
     $partial = $archive + '.partial'
     if ((Test-Path -LiteralPath $archive) -or (Test-Path -LiteralPath $partial)) { throw 'Backup archive destination already exists.' }
     $created = $false
+    $reused = $false
+    $archiveInput = $null
+    $archiveHash = $null
     try {
-        $output = [IO.File]::Open($partial, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $created = $true
-        try { $writer = [IO.Compression.ZipArchive]::new($output, [IO.Compression.ZipArchiveMode]::Create, $false) }
-        catch { $output.Dispose(); throw }
-        try {
-            foreach ($directory in $directories) { [void]$writer.CreateEntry($directory) }
-            foreach ($relative in $files.Keys) {
-                [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($writer, (Join-Path $item.FullName $relative), $relative, [IO.Compression.CompressionLevel]::Optimal)
+        foreach ($candidate in @(Get-ChildItem -LiteralPath $expectedParent -File -Force | Where-Object {
+            $_.Name -match '^[0-9]{8}T[0-9]{9}Z\.zip$'
+        } | Sort-Object Name -Descending)) {
+            $input = $null
+            try {
+                Assert-BackupPath -Path $candidate.FullName
+                $input = [IO.File]::Open($candidate.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                $candidateHash = Get-BackupStreamHash -Stream $input
+                $zip = [IO.Compression.ZipArchive]::new($input, [IO.Compression.ZipArchiveMode]::Read, $true)
+                try { $matches = Test-BackupArchive -Zip $zip } finally { $zip.Dispose() }
+                if ($matches) {
+                    $archive = $candidate.FullName
+                    $archiveInput = $input
+                    $input = $null
+                    $archiveHash = $candidateHash
+                    $reused = $true
+                    break
+                }
             }
-        } finally { $writer.Dispose(); $output.Dispose() }
-        $zip = [IO.Compression.ZipFile]::OpenRead($partial)
-        try {
-            $entries = @($zip.Entries | Where-Object { $_.Name.Length -gt 0 })
-            if ($entries.Count -ne $files.Count) { throw 'Backup archive file count differs.' }
-            $seen = @{}
-            foreach ($entry in $entries) {
-                if (-not $files.ContainsKey($entry.FullName) -or $seen.ContainsKey($entry.FullName)) { throw 'Backup archive path mismatch.' }
-                $seen[$entry.FullName] = $true
-                $stream = $entry.Open()
-                $sha = [Security.Cryptography.SHA256]::Create()
-                try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
-                finally { $stream.Dispose(); $sha.Dispose() }
-                if ($hash -ne $files[$entry.FullName]) { throw 'Backup archive content mismatch.' }
-            }
-        } finally { $zip.Dispose() }
+            catch { } # Unknown, unreadable and corrupt archives remain untouched.
+            finally { if ($input) { $input.Dispose() } }
+        }
+        if (-not $reused) {
+            $output = [IO.File]::Open($partial, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $created = $true
+            try { $writer = [IO.Compression.ZipArchive]::new($output, [IO.Compression.ZipArchiveMode]::Create, $false) }
+            catch { $output.Dispose(); throw }
+            try {
+                foreach ($directory in $directories) { [void]$writer.CreateEntry($directory) }
+                foreach ($relative in $files.Keys) {
+                    [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($writer, (Join-Path $item.FullName $relative), $relative, [IO.Compression.CompressionLevel]::Optimal)
+                }
+            } finally { $writer.Dispose(); $output.Dispose() }
+            $zip = [IO.Compression.ZipFile]::OpenRead($partial)
+            try {
+                if (-not (Test-BackupArchive -Zip $zip)) { throw 'Backup archive path or content mismatch.' }
+            } finally { $zip.Dispose() }
+        }
+        Assert-BackupPath -Path $item.FullName
         $current = Get-Item -LiteralPath $item.FullName -Force
         if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $current.CreationTimeUtc.Ticks -ne $CreationTicks) {
             throw 'Backup identity changed during compression.'
@@ -103,16 +155,140 @@ function Compress-CompletedReleaseBackup {
             }
         }
         if ($entryCount -ne ($files.Count + $directories.Count)) { throw 'Backup entries changed during compression.' }
-        [IO.File]::Move($partial, $archive)
+        if (-not $reused) {
+            [IO.File]::Move($partial, $archive)
+            Assert-BackupPath -Path $archive
+            $archiveInput = [IO.File]::Open($archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $archiveHash = Get-BackupStreamHash -Stream $archiveInput
+        }
+        Assert-BackupPath -Path $archive
+        if ((Get-BackupStreamHash -Stream $archiveInput) -ne $archiveHash -or
+            (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $archiveHash) {
+            throw 'Backup archive changed before compaction.'
+        }
+        Assert-BackupPath -Path $item.FullName
+        if ((Get-Item -LiteralPath $item.FullName -Force).CreationTimeUtc.Ticks -ne $CreationTicks) {
+            throw 'Backup identity changed before compaction.'
+        }
         try {
             Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
-            return [pscustomobject]@{ archive = $archive; compacted = $true; error = $null }
+            return [pscustomobject]@{ archive = $archive; compacted = $true; reused_archive = $reused; created_archive = (-not $reused); error = $null }
         } catch {
-            return [pscustomobject]@{ archive = $archive; compacted = $false; error = $_.Exception.Message }
+            return [pscustomobject]@{ archive = $archive; compacted = $false; reused_archive = $reused; created_archive = (-not $reused); error = $_.Exception.Message }
         }
     } finally {
+        if ($archiveInput) { $archiveInput.Dispose() }
         if ($created -and (Test-Path -LiteralPath $partial)) { Remove-Item -LiteralPath $partial -Force }
     }
+}
+
+function Get-ReleaseBackupRetentionReview {
+    param([Parameter(Mandatory)][string]$InstallRoot,
+          [Parameter(Mandatory)]$CurrentManifest,
+          [Parameter(Mandatory)]$PreviousManifest,
+          [ValidateRange(1, 1000)][int]$Limit = 100)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    function Assert-ReviewPath {
+        param([string]$Path)
+        $cursor = Get-Item -LiteralPath $Path -Force
+        while ($null -ne $cursor) {
+            if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse path is protected.' }
+            $cursor = if ($cursor -is [IO.DirectoryInfo]) { $cursor.Parent } else { $cursor.Directory }
+        }
+    }
+    function Get-BackupReleaseMetadata {
+        param($Manifest)
+        foreach ($name in @('release_revision', 'data_contract_version', 'package_relative_path')) {
+            if ($null -eq $Manifest -or $null -eq $Manifest.PSObject.Properties[$name]) { throw 'Incomplete backup release metadata.' }
+        }
+        $revision = [string]$Manifest.release_revision
+        $package = [string]$Manifest.package_relative_path
+        $contract = $Manifest.data_contract_version
+        if ([string]::IsNullOrWhiteSpace($revision) -or
+            [string]::IsNullOrWhiteSpace($package) -or [IO.Path]::IsPathRooted($package) -or
+            $package.Replace('\','/').Split('/') -contains '..' -or
+            ($contract -isnot [int] -and $contract -isnot [long]) -or $contract -lt 1) {
+            throw 'Invalid backup release metadata.'
+        }
+        return [pscustomobject]@{ release_revision = $revision; data_contract_version = $contract; source_package = $package }
+    }
+    function Test-SameBackupRelease {
+        param($Left, $Right)
+        return ($null -ne $Left -and $null -ne $Right -and
+            $Left.release_revision -ceq $Right.release_revision -and
+            $Left.data_contract_version -eq $Right.data_contract_version -and
+            $Left.source_package -ceq $Right.source_package)
+    }
+    $root = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'backups\releases'))
+    $current = $null
+    $previous = $null
+    try { $current = Get-BackupReleaseMetadata -Manifest $CurrentManifest } catch { }
+    try { $previous = Get-BackupReleaseMetadata -Manifest $PreviousManifest } catch { }
+    $predecessorKnown = ($null -ne $current -and $null -ne $previous -and
+        $previous.release_revision -cne $current.release_revision)
+    $review = [ordered]@{
+        action = 'explicit-maintenance-review-only'
+        automatic_delete = $false
+        current_release = $current
+        immediate_predecessor = if ($predecessorKnown) { $previous } else { $null }
+        predecessor_known = $predecessorKnown
+        data_restore = 'Code/config backups alone cannot restore data; review matching code/data snapshot compatibility, data-linked pins, audit archives and current consumers before any maintenance.'
+        backup_root = $root
+        entries = @()
+        limit = $Limit
+        omitted_count = 0
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $root)) { return [pscustomobject]$review }
+        Assert-ReviewPath -Path $root
+        $items = @(Get-ChildItem -LiteralPath $root -Force | Sort-Object Name -Descending)
+        $review.omitted_count = [Math]::Max(0, $items.Count - $Limit)
+        foreach ($item in @($items | Select-Object -First $Limit)) {
+            $entry = [ordered]@{ path = $item.FullName; disposition = 'protected_unknown'; metadata = $null; error = $null }
+            try {
+                Assert-ReviewPath -Path $item.FullName
+                if ($item.Name -notmatch '^[0-9]{8}T[0-9]{9}Z(\.zip)?$') { throw 'Unrecognized backup entry.' }
+                if ($item.PSIsContainer) {
+                    $manifestPath = Join-Path $item.FullName 'config\install-manifest.json'
+                    Assert-ReviewPath -Path $manifestPath
+                    if ((Get-Item -LiteralPath $manifestPath).Length -gt 16MB) { throw 'Backup manifest exceeds review limit.' }
+                    $manifestText = [IO.File]::ReadAllText($manifestPath)
+                }
+                else {
+                    if ($item.Extension -ine '.zip') { throw 'Unrecognized backup archive.' }
+                    $zip = [IO.Compression.ZipFile]::OpenRead($item.FullName)
+                    try {
+                        $manifests = @($zip.Entries | Where-Object { $_.FullName -ceq 'config/install-manifest.json' })
+                        if ($manifests.Count -ne 1 -or $manifests[0].Length -gt 16MB) { throw 'Missing, duplicate or oversized backup manifest.' }
+                        $reader = [IO.StreamReader]::new($manifests[0].Open())
+                        try { $manifestText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                    } finally { $zip.Dispose() }
+                }
+                $entry.metadata = Get-BackupReleaseMetadata -Manifest ($manifestText | ConvertFrom-Json)
+                if ($null -eq $current) { throw 'Current release metadata is unknown.' }
+                if (($entry.metadata.release_revision -ceq $current.release_revision -and
+                    -not (Test-SameBackupRelease -Left $entry.metadata -Right $current)) -or
+                    ($null -ne $previous -and $entry.metadata.release_revision -ceq $previous.release_revision -and
+                    -not (Test-SameBackupRelease -Left $entry.metadata -Right $previous)) -or
+                    $entry.metadata.data_contract_version -gt $current.data_contract_version) {
+                    throw 'Backup metadata conflicts with the current or predecessor release.'
+                }
+                if (Test-SameBackupRelease -Left $entry.metadata -Right $current) { $entry.disposition = 'protect_current_release' }
+                elseif ($predecessorKnown -and (Test-SameBackupRelease -Left $entry.metadata -Right $previous)) {
+                    $entry.disposition = 'protect_immediate_predecessor'
+                }
+                else {
+                    $entry.disposition = if ($predecessorKnown) { 'older_distinct_maintenance_candidate' } else { 'distinct_candidate_predecessor_unknown' }
+                }
+            }
+            catch { $entry.error = $_.Exception.Message }
+            $review.entries += [pscustomobject]$entry
+        }
+        if ($review.omitted_count -gt 0) { $review.omitted_disposition = 'protected_unreviewed' }
+    }
+    catch { $review.error = $_.Exception.Message; $review.status = 'protected_unknown' }
+    return [pscustomobject]$review
 }
 
 function Get-ManagedDataContractVersion {
@@ -274,6 +450,10 @@ function Stop-OwnedRuntimeForCutover {
         [Parameter(Mandatory = $true)][object[]]$Registrations
     )
 
+    # Capture the original run before stop scripts or Job close can replace state.
+    $runtimeStatePath = Join-Path $Root 'data\runtime-state.json'
+    if (-not (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf)) { throw 'Cannot confirm AgentMemory stop without the recorded runtime state.' }
+    $runtimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
     Import-Module ScheduledTasks -ErrorAction Stop
     $watchStopScript = Join-Path $Root 'scripts\agentmemory-watch-stop.ps1'
     if (Test-Path -LiteralPath $watchStopScript -PathType Leaf) {
@@ -283,7 +463,8 @@ function Stop-OwnedRuntimeForCutover {
         }
     }
     foreach ($registration in @($Registrations | Where-Object { $_.Name -eq 'watchdog-task-registration.json' })) {
-        Stop-ScheduledTask -TaskPath $registration.TaskPath -TaskName $registration.TaskName -ErrorAction SilentlyContinue
+        $ownedTask = Get-OwnedTaskForCutover -Root $Root -Registration $registration
+        Stop-ScheduledTask -InputObject $ownedTask -ErrorAction Stop
     }
 
     $stopScript = Join-Path $Root 'scripts\agentmemory-stop.ps1'
@@ -292,41 +473,49 @@ function Stop-OwnedRuntimeForCutover {
         try { & $stopScript -Root $Root -TimeoutSeconds 30 } catch { $stopFailure = $_ }
     }
     foreach ($registration in @($Registrations | Where-Object { $_.Name -eq 'task-registration.json' })) {
-        Stop-ScheduledTask -TaskPath $registration.TaskPath -TaskName $registration.TaskName -ErrorAction SilentlyContinue
+        $ownedTask = Get-OwnedTaskForCutover -Root $Root -Registration $registration
+        Stop-ScheduledTask -InputObject $ownedTask -ErrorAction Stop
     }
-    if ($stopFailure) {
-        $runtimeStatePath = Join-Path $Root 'data\runtime-state.json'
-        if (-not (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf)) { throw $stopFailure }
-        $runtimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
-        # A failed start can have an engine but no worker yet. Preserve the
-        # stop confirmation without dereferencing a missing child identity.
-        $ownedPids = @(@(foreach ($role in @('daemon', 'engine', 'worker')) {
-            $property = $runtimeState.PSObject.Properties[$role]
-            if ($null -eq $property -or $null -eq $property.Value) { continue }
-            $pidProperty = $property.Value.PSObject.Properties['pid']
-            if ($null -eq $pidProperty -or [int]$pidProperty.Value -le 0) { throw $stopFailure }
-            [int]$pidProperty.Value
-        }) | Sort-Object -Unique)
-        if ($ownedPids.Count -eq 0) { throw $stopFailure }
-
-        # Stop-ScheduledTask closes the registered hidden launcher's Job Object.
-        # Continue only after every process recorded for that owned run is gone.
-        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    # Port release and a successful stop command do not prove process exit.
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    try {
         do {
-            $liveOwnedPids = @($ownedPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-            if ($liveOwnedPids.Count -eq 0) { break }
+            $runExited = Test-AgentMemoryRecordedRunExited -RuntimeState $runtimeState -Probe { param($ProcessId) Get-AgentMemoryProcessIdentity -ProcessId $ProcessId }
+            if ($runExited) { break }
             Start-Sleep -Milliseconds 250
         } while ([DateTime]::UtcNow -lt $deadline)
-        if ($liveOwnedPids.Count -gt 0) { throw $stopFailure }
+    } catch {
+        if ($stopFailure) { throw "$($stopFailure.Exception.Message) Stop confirmation failed: $($_.Exception.Message)" }
+        throw
+    }
+    if (-not $runExited) {
+        if ($stopFailure) { throw $stopFailure }
+        throw 'The recorded AgentMemory run did not exit before the stop confirmation timeout.'
     }
 }
 
+function Get-OwnedTaskForCutover {
+    param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)]$Registration)
+    $kind = switch ([string]$Registration.Name) {
+        'task-registration.json' { 'daemon' }
+        'watchdog-task-registration.json' { 'watchdog' }
+        default { throw 'Unknown AgentMemory task registration.' }
+    }
+    $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $ownerMarker = Get-Content -Raw -LiteralPath (Join-Path $Root '.agentmemory-install-owner.json') | ConvertFrom-Json
+    $protectedRegistration = Get-Content -Raw -LiteralPath (Join-Path $Root "config\$($Registration.Name)") | ConvertFrom-Json
+    Assert-AgentMemoryTaskRegistration -Root $Root -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind $kind -Registration $protectedRegistration
+    $task = Get-ScheduledTask -TaskPath ([string]$protectedRegistration.task_path) -TaskName ([string]$protectedRegistration.task_name) -ErrorAction Stop
+    return Assert-AgentMemoryScheduledTaskOwnership -Root $Root -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind $kind -Registration $protectedRegistration -Task $task
+}
+
 function Start-OwnedTasks {
-    param([Parameter(Mandatory = $true)][object[]]$Registrations)
+    param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][object[]]$Registrations)
 
     Import-Module ScheduledTasks -ErrorAction Stop
     foreach ($registration in $Registrations) {
-        Start-ScheduledTask -TaskPath $registration.TaskPath -TaskName $registration.TaskName -ErrorAction Stop
+        $ownedTask = Get-OwnedTaskForCutover -Root $Root -Registration $registration
+        Start-ScheduledTask -InputObject $ownedTask -ErrorAction Stop
     }
 }
 
@@ -437,6 +626,8 @@ if ($Fresh -or $ActivatePrepared) {
     return
 }
 
+. (Join-Path $payload 'scripts\agentmemory-lifecycle.ps1')
+
 $owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
 $installed = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
 $currentDataContract = Get-ManagedDataContractVersion -Manifest $installed
@@ -539,6 +730,7 @@ if (-not $Execute) {
     return
 }
 
+$previousReleaseManifest = ($installed | ConvertTo-Json -Depth 12 | ConvertFrom-Json)
 $backupId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $backupRoot = Join-Path $root "backups\releases\$backupId"
 if (Test-Path -LiteralPath $backupRoot) { throw 'Release backup destination already exists.' }
@@ -659,32 +851,43 @@ try {
     }
 
     $candidateStartAttempted = $true
-    Start-OwnedTasks -Registrations $taskRegistrations
+    Start-OwnedTasks -Root $root -Registrations $taskRegistrations
 
     # The scheduled daemon runs in the interactive user's DPAPI context and
     # writes active state only after authenticated loopback health succeeds.
     # The installer may run under an elevated/sandbox token that cannot decrypt
     # that CurrentUser secret, so consume the daemon's fresh readiness result.
-    # Covers bounded engine cold-start (60s), worker readiness (30s), and task
-    # dispatch/cleanup overhead without accepting a partially started runtime.
-    $deadline = [DateTime]::UtcNow.AddSeconds(150)
+    # Covers observed daemon bootstrap (240s), bounded engine cold-start (300s),
+    # worker recovery/readiness (180s), and dispatch/cleanup (60s).
+    $deadline = [DateTime]::UtcNow.AddSeconds(780)
     $healthy = $false
     do {
         Start-Sleep -Milliseconds 500
+        $startupFailure = $null
         try {
             $runtimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
-            $engineProcess = Get-Process -Id ([int]$runtimeState.engine.pid) -ErrorAction Stop
-            $workerProcess = Get-Process -Id ([int]$runtimeState.worker.pid) -ErrorAction Stop
-            $healthy = (
-                [string]$runtimeState.status -eq 'active' -and
+            $freshRun = (
                 [System.IO.Path]::GetFullPath([string]$runtimeState.root) -eq $root -and
                 -not [string]::IsNullOrWhiteSpace([string]$runtimeState.run_id) -and
-                [string]$runtimeState.run_id -ne $previousRunId -and
-                -not $engineProcess.HasExited -and
-                -not $workerProcess.HasExited
+                [string]$runtimeState.run_id -ne $previousRunId
             )
+            if ($freshRun -and [string]$runtimeState.status -eq 'failed') {
+                $startupFailure = [string]$runtimeState.error_message
+                if ([string]::IsNullOrWhiteSpace($startupFailure)) { $startupFailure = 'The owned runtime reported a failed startup.' }
+                $healthy = $false
+            }
+            else {
+                $engineProcess = Get-Process -Id ([int]$runtimeState.engine.pid) -ErrorAction Stop
+                $workerProcess = Get-Process -Id ([int]$runtimeState.worker.pid) -ErrorAction Stop
+                $healthy = (
+                    $freshRun -and [string]$runtimeState.status -eq 'active' -and
+                    -not $engineProcess.HasExited -and
+                    -not $workerProcess.HasExited
+                )
+            }
         }
         catch { $healthy = $false }
+        if ($startupFailure) { throw "AgentMemory failed during cutover startup: $startupFailure" }
     } while (-not $healthy -and [DateTime]::UtcNow -lt $deadline)
     if (-not $healthy) { throw 'AgentMemory did not become healthy after cutover.' }
 
@@ -737,8 +940,11 @@ catch {
     if (Test-Path -LiteralPath $requirementsBackup -PathType Leaf) {
         Copy-Item -LiteralPath $requirementsBackup -Destination $managedRequirements -Force
     }
-    try { Start-OwnedTasks -Registrations $taskRegistrations } catch {}
-    throw "AgentMemory cutover failed; owned predecessor files were restored from $backupRoot. $($failure.Exception.Message)"
+    $restartFailure = $null
+    try { Start-OwnedTasks -Root $root -Registrations $taskRegistrations } catch { $restartFailure = $_.Exception.Message }
+    $rollbackFailureMessage = "AgentMemory cutover failed; owned predecessor files were restored from $backupRoot. $($failure.Exception.Message)"
+    if ($restartFailure) { $rollbackFailureMessage += " Predecessor task restart failed: $restartFailure" }
+    throw $rollbackFailureMessage
 }
 finally {
     if ($cutoverLock) { $cutoverLock.Dispose() }
@@ -747,13 +953,18 @@ finally {
 # A completed backup is inactive; compaction failure must not roll back a healthy install.
 $summary.backup_archive = $null
 $summary.backup_compacted = $false
+$summary.backup_archive_reused = $false
+$summary.backup_archive_created = $false
 try {
     $compaction = Compress-CompletedReleaseBackup -InstallRoot $root -BackupRoot $backupRoot -CreationTicks $backupCreationTicks
     $summary.backup_archive = $compaction.archive
     $summary.backup_compacted = $compaction.compacted
+    $summary.backup_archive_reused = $compaction.reused_archive
+    $summary.backup_archive_created = $compaction.created_archive
     if ($compaction.compacted) { $summary.backup_root = $null }
     else { $summary.backup_compaction_error = $compaction.error }
 } catch {
     $summary.backup_compaction_error = $_.Exception.Message
 }
-$summary | ConvertTo-Json
+$summary.release_backup_retention_review = Get-ReleaseBackupRetentionReview -InstallRoot $root -CurrentManifest $installed -PreviousManifest $previousReleaseManifest
+$summary | ConvertTo-Json -Depth 8

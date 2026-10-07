@@ -108,7 +108,7 @@ describe("REST exact-project and provenance boundaries", () => {
   });
   it("emits native warnings on aggregate state changes without consuming ordinary health reads", async () => {
     const protectedSdk = apiSdk();
-    let source = { status: "attention", captureIssues: 1, consecutiveFailures: 1, lastAttemptAt: "first" };
+    let source = { status: "attention", captureIssues: 1, sourceUnavailable: 0, consecutiveFailures: 1, lastAttemptAt: "first" };
     const protectedKv = { ...mockKV(), requiresWriteRecovery: () => false };
     registerApiTriggers(protectedSdk as never, protectedKv as never, readContext, "test-secret", undefined, undefined, undefined, () => source);
     const read = () => protectedSdk.trigger("api::liveness", { query_params: { notify: "true" }, headers: { authorization: "Bearer test-secret" } });
@@ -119,6 +119,9 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(await read()).toMatchObject({ body: { notificationChanged: false } });
     source = { ...source, captureIssues: 2 };
     expect(await read()).toMatchObject({ body: { notificationChanged: true } });
+    source = { ...source, sourceUnavailable: 1 };
+    expect(await read()).toMatchObject({ body: { notificationChanged: true } });
+    expect(await read()).toMatchObject({ body: { notificationChanged: false } });
     source = { ...source, status: "checking", captureIssues: 0, consecutiveFailures: 0 };
     expect(await read()).toMatchObject({ body: { notificationChanged: true } });
     source = { ...source, status: "attention", captureIssues: 1 };

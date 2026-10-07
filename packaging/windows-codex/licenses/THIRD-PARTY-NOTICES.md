@@ -29,3 +29,9 @@ and shipped license/notice files. Those components retain their own licenses;
 the adapter's Apache-2.0 license does not relicense them. Node.js itself is a
 user-installed prerequisite and is not bundled. Local Qwen models and runtimes
 are optional, separately installed, and are not included in either artifact.
+
+The production **iii-sdk 0.11.2** (Apache-2.0) includes the downstream
+`patches/iii-sdk@0.11.2.patch` for interrupted RPC settlement on socket close.
+This is a modified dependency, not an unmodified upstream SDK. The source
+lockfile identifies the patch and final release qualification compares its
+ESM and CommonJS entry points with the tested source installation.

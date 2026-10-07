@@ -1,0 +1,38 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 03575800eaa432e5e96b75d3eb3892993f8a5449..588fab784ab434706bcc75256419a86a6f5eacbd 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -597,6 +597,13 @@ var Sdk = class {
+ 		require_utils.stopWorkerGauges();
+ 	}
+-	onSocketClose() {
++	onSocketClose(code) {
++		if (!this.isShuttingDown) console.warn("[iii] Worker connection closed", { code, pendingInvocations: this.invocations.size });
++		const interrupted = new Set(this.invocations.keys());
++		for (const invocation of this.invocations.values()) {
++			invocation.reject(new Error("iii connection closed; invocation outcome is unknown"));
++		}
++		this.invocations.clear();
++		this.messagesToSend = this.messagesToSend.filter(message => !interrupted.has(message.invocation_id));
+ 		this.ws?.removeAllListeners();
+ 		this.ws?.terminate();
+ 		this.ws = void 0;
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 3e278ea3f949b6acd464980860e0c10438f896fc..a53daddf07835e143a77d82c05d91aee94bbf0b7 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -568,6 +568,13 @@ var Sdk = class {
+ 		stopWorkerGauges();
+ 	}
+-	onSocketClose() {
++	onSocketClose(code) {
++		if (!this.isShuttingDown) console.warn("[iii] Worker connection closed", { code, pendingInvocations: this.invocations.size });
++		const interrupted = new Set(this.invocations.keys());
++		for (const invocation of this.invocations.values()) {
++			invocation.reject(new Error("iii connection closed; invocation outcome is unknown"));
++		}
++		this.invocations.clear();
++		this.messagesToSend = this.messagesToSend.filter(message => !interrupted.has(message.invocation_id));
+ 		this.ws?.removeAllListeners();
+ 		this.ws?.terminate();
+ 		this.ws = void 0;

@@ -6,6 +6,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const captured: Array<{ provider: string; model: string }> = [];
 
+const anthropic = vi.hoisted(() => ({
+  moduleLoads: 0,
+  options: [] as Array<{ apiKey: string; baseURL?: string }>,
+  create: vi.fn(),
+}));
+
 vi.mock("../src/providers/openai.js", () => ({
   OpenAIProvider: class {
     name = "openai";
@@ -39,20 +45,17 @@ vi.mock("../src/providers/openrouter.js", () => ({
   },
 }));
 
-vi.mock("../src/providers/anthropic.js", () => ({
-  AnthropicProvider: class {
-    name = "anthropic";
-    constructor(_key: string, model: string) {
-      captured.push({ provider: "anthropic", model });
-    }
-    async compress() {
-      return "";
-    }
-    async summarize() {
-      return "";
-    }
-  },
-}));
+vi.mock("@anthropic-ai/sdk", () => {
+  anthropic.moduleLoads++;
+  return {
+    default: class {
+      messages = { create: anthropic.create };
+      constructor(options: { apiKey: string; baseURL?: string }) {
+        anthropic.options.push(options);
+      }
+    },
+  };
+});
 
 vi.mock("../src/providers/minimax.js", () => ({
   MinimaxProvider: class {
@@ -69,7 +72,8 @@ vi.mock("../src/providers/minimax.js", () => ({
   },
 }));
 
-import { createFallbackProvider } from "../src/providers/index.js";
+import { createFallbackProvider, createProvider } from "../src/providers/index.js";
+import { AnthropicProvider } from "../src/providers/anthropic.js";
 import type { ProviderConfig, FallbackConfig } from "../src/types.js";
 
 describe("Fallback provider model resolution (#778)", () => {
@@ -101,6 +105,12 @@ describe("Fallback provider model resolution (#778)", () => {
       if (savedEnv[k] === undefined) delete process.env[k];
       else process.env[k] = savedEnv[k];
     }
+  });
+
+  it("rejects a missing Anthropic key synchronously before loading the SDK", () => {
+    expect(() => createProvider({ provider: "anthropic", model: "claude-sonnet-5", maxTokens: 4096 }))
+      .toThrow("Missing required environment variable: ANTHROPIC_API_KEY");
+    expect(anthropic.moduleLoads).toBe(0);
   });
 
   it("primary OpenAI + fallback Gemini: Gemini is built with GEMINI_MODEL, NOT the primary's model", () => {
@@ -186,5 +196,46 @@ describe("Fallback provider model resolution (#778)", () => {
 
     const openaiCalls = captured.filter((c) => c.provider === "openai");
     expect(openaiCalls.length).toBe(1);
+  });
+});
+
+describe("Anthropic provider lazy client", () => {
+  it("keeps registry and noop creation SDK-free, then shares one client across concurrent text and image calls", async () => {
+    expect(anthropic.moduleLoads).toBe(0);
+    createProvider({ provider: "noop", model: "noop", maxTokens: 1 });
+    const provider = new AnthropicProvider("test-key", "test-model", 321, "https://example.invalid/api");
+    expect(anthropic.moduleLoads).toBe(0);
+    expect(anthropic.options).toEqual([]);
+    anthropic.create.mockResolvedValue({ content: [{ type: "text", text: "response" }] });
+
+    expect(await Promise.all([
+      provider.compress("compress-system", "compress-user"),
+      provider.summarize("summary-system", "summary-user"),
+      provider.describeImage("base64-image", "image/png", "image-prompt"),
+    ])).toEqual(["response", "response", "response"]);
+
+    expect(anthropic.moduleLoads).toBe(1);
+    expect(anthropic.options).toEqual([{ apiKey: "test-key", baseURL: "https://example.invalid/api" }]);
+    expect(anthropic.create.mock.calls.map(([request]) => request)).toEqual([
+      { model: "test-model", max_tokens: 321, system: "compress-system", messages: [{ role: "user", content: "compress-user" }] },
+      { model: "test-model", max_tokens: 321, system: "summary-system", messages: [{ role: "user", content: "summary-user" }] },
+      {
+        model: "test-model", max_tokens: 321,
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "base64-image" } },
+          { type: "text", text: "image-prompt" },
+        ] }],
+      },
+    ]);
+  });
+
+  it("preserves SDK errors and empty text results with the default base URL", async () => {
+    const provider = new AnthropicProvider("another-key", "another-model", 123);
+    const failure = new Error("SDK request failed");
+    anthropic.create.mockRejectedValueOnce(failure);
+    await expect(provider.compress("system", "user")).rejects.toBe(failure);
+    expect(anthropic.options.at(-1)).toEqual({ apiKey: "another-key" });
+    anthropic.create.mockResolvedValueOnce({ content: [{ type: "tool_use" }] });
+    await expect(provider.summarize("system", "user")).resolves.toBe("");
   });
 });

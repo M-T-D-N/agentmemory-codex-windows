@@ -4,6 +4,7 @@ import { registerCodexSourceBacklog, startCodexSourceScheduler } from "../src/fu
 import * as qwenLifecycle from "../src/providers/local-qwen-lifecycle.js";
 import { KV } from "../src/state/schema.js";
 import type { Session } from "../src/types.js";
+import { changeArchiveState } from "../src/functions/archive.js";
 
 const session = (id: string) => ({ id, project: "p", agentId: "mine", status: "active", codexNativeCapture: {
   version: 1, status: "pending", checkedAt: "2026-01-01T00:00:00Z", cursor: { byteOffset: 0 },
@@ -13,6 +14,154 @@ const drain = (overrides: object = {}) => ({ unknown: 0, captureUnknown: 0, requ
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("bounded native source backlog", () => {
+  it("reads the owner once per drain and applies owner changes on the next invocation", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV();
+    let owner = "mine";
+    const getOwner = vi.fn(() => owner);
+    const calls: string[] = [];
+    for (const id of ["mine-a", "mine-b"]) await kv.set(KV.sessions, id, session(id));
+    await kv.set(KV.sessions, "replacement", { ...session("replacement"), agentId: "replacement" });
+    registerCodexSourceBacklog(sdk as never, kv as never, getOwner);
+    const discover = vi.fn(async () => ({ unknown: 0, reconcileRequired: 0, cycleComplete: true }));
+    sdk.registerFunction("mem::codex-source-discover", discover);
+    sdk.registerFunction("mem::codex-source-capture", async input => {
+      calls.push((input as { sessionId: string }).sessionId);
+      return { status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 };
+    });
+
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ initializedSessions: 2, scannedSessions: 2 });
+    expect(getOwner).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(["mine-a", "mine-b"]);
+    owner = "replacement";
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ initializedSessions: 1, scannedSessions: 1 });
+    expect(getOwner).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual(["mine-a", "mine-b", "replacement"]);
+    expect(discover).toHaveBeenCalledTimes(2);
+    owner = "";
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toEqual({ disabled: true });
+    expect(getOwner).toHaveBeenCalledTimes(3);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("keeps immediate discovery capture inside the eight-source batch without skipping the ordinary sweep", async () => {
+    vi.useFakeTimers(); vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV(); const calls: string[] = []; let discoveries = 0;
+    for (let i = 0; i < 30; i++) await kv.set(KV.sessions, `s${String(i).padStart(2, "0")}`, session(`s${String(i).padStart(2, "0")}`));
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    sdk.registerFunction("mem::codex-source-discover", async () => {
+      discoveries++;
+      if (discoveries === 2) await kv.set(KV.sessions, "new", session("new"));
+      return { cycleComplete: true, readySessionIds: discoveries === 2 ? ["new"] : [] };
+    });
+    sdk.registerFunction("mem::codex-source-capture", async input => {
+      calls.push((input as { sessionId: string }).sessionId);
+      return { status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 };
+    });
+    await sdk.trigger("mem::codex-source-drain", {});
+    vi.setSystemTime(Date.now() + 60_000);
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ scannedSessions: 8, captureCycleComplete: false });
+    expect(calls.slice(8)).toEqual(["new", "s08", "s09", "s10", "s11", "s12", "s13", "s14"]);
+    await sdk.trigger("mem::codex-source-drain", {});
+    expect(calls[16]).toBe("s15");
+  });
+  it("rediscovers changed sources during a slow unfinished capture sweep and captures them immediately", async () => {
+    vi.useFakeTimers(); vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV(); const calls: string[] = []; let discoveries = 0;
+    for (let i = 0; i < 100; i++) await kv.set(KV.sessions, `s${String(i).padStart(3, "0")}`, session(`s${String(i).padStart(3, "0")}`));
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    sdk.registerFunction("mem::codex-source-discover", async () => {
+      discoveries++;
+      if (discoveries === 2) await kv.set(KV.sessions, "new-before-cursor", session("new-before-cursor"));
+      return { unknown: 0, reconcileRequired: 0, cycleComplete: true,
+        readySessionIds: discoveries === 2 ? ["new-before-cursor"] : [] };
+    });
+    sdk.registerFunction("mem::codex-source-capture", async input => {
+      const id = (input as { sessionId: string }).sessionId; calls.push(id);
+      vi.setSystemTime(Date.now() + 2_100);
+      return { status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 };
+    });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureCycleComplete: false });
+    await sdk.trigger("mem::codex-source-drain", {}); expect(discoveries).toBe(1);
+    vi.setSystemTime(Date.now() + 60_000);
+    await sdk.trigger("mem::codex-source-drain", {});
+    expect(discoveries).toBe(2);
+    expect(calls).toContain("new-before-cursor");
+    await sdk.trigger("mem::codex-source-drain", {});
+    expect(calls.filter(id => id.startsWith("s"))).toEqual(["s000", "s001", "s002", "s003"]);
+  });
+  it("retires only explicitly archived absent sources and re-enables checks on restore", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV(), calls: string[] = [];
+    for (const [id, issue] of [["absent", "native_source_missing"], ["permission", "native_source_read_failed"], ["readable", undefined]]) {
+      const row = session(id!);
+      await kv.set(KV.sessions, id!, { ...row, codexNativeCapture: { ...row.codexNativeCapture, status: issue ? "unknown" : "pending", issue } });
+      const input = { target: { kind: "session" as const, id: id! }, project: "p", action: "archive" as const };
+      const preview = await changeArchiveState(kv as never, input);
+      await changeArchiveState(kv as never, { ...input, dryRun: false, expectedRevision: preview.expectedRevision,
+        expectedDigest: preview.expectedDigest, reason: "Reviewed test session" });
+    }
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    sdk.registerFunction("mem::codex-source-capture", async input => {
+      calls.push((input as { sessionId: string }).sessionId);
+      return { status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 };
+    });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ archivedSourceUnavailable: 1, sourceUnavailable: 0, scannedSessions: 2 });
+    expect(calls).toEqual(["permission", "readable"]);
+    const input = { target: { kind: "session" as const, id: "absent" }, project: "p", action: "restore" as const };
+    const preview = await changeArchiveState(kv as never, input);
+    await changeArchiveState(kv as never, { ...input, dryRun: false, expectedRevision: preview.expectedRevision,
+      expectedDigest: preview.expectedDigest, reason: "Resume source checks" });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ archivedSourceUnavailable: 0, sourceUnavailable: 0, scannedSessions: 3 });
+    expect(calls).toContain("absent");
+  });
+  it("reports absent sources from canonical state even when RPC drops the filesystem code, then resumes", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV();
+    for (const id of ["a", "b"]) await kv.set(KV.sessions, id, session(id));
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    sdk.registerFunction("mem::codex-source-discover", async () => ({ unknown: 0, cycleComplete: true }));
+    sdk.registerFunction("mem::codex-source-capture", async input => {
+      const id = (input as { sessionId: string }).sessionId;
+      if (id === "a") {
+        const row = (await kv.get<Session>(KV.sessions, id))!;
+        await kv.set(KV.sessions, id, { ...row, codexNativeCapture: { ...row.codexNativeCapture!, status: "unknown", issue: "native_source_missing" } });
+        throw Error("Remote function failed");
+      }
+      return { status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 };
+    });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ windows: 1, captureUnknown: 1, sourceUnavailable: 1,
+      failures: [{ sessionId: "a", reason: "native_source_missing", error: "Remote function failed" }] });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 1, sourceUnavailable: 1 });
+    sdk.registerFunction("mem::codex-source-capture", async () => ({ status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 }));
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 0, sourceUnavailable: 0, failures: [] });
+  });
+  it("retains absent source counts outside the current batch and does not classify other unknowns as absent", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV();
+    for (let i = 0; i < 10; i++) await kv.set(KV.sessions, `s${i}`, { ...session(`s${i}`),
+      ...(i > 7 ? { codexNativeCapture: { ...session(`s${i}`).codexNativeCapture, status: "unknown",
+        issue: i === 8 ? "native_source_missing" : "native_source_read_failed" } } : {}) });
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    sdk.registerFunction("mem::codex-source-capture", async () => ({ status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 }));
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ scannedSessions: 8, captureUnknown: 2, sourceUnavailable: 1 });
+  });
+  it("keeps source absence visible as attention and validates its count", async () => {
+    vi.useFakeTimers();
+    const sdk = { trigger: vi.fn().mockResolvedValue(drain({ captureUnknown: 1, sourceUnavailable: 1 })) };
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler.status()).toMatchObject({ status: "attention", sourceUnavailable: 1, captureIssues: 1 });
+      sdk.trigger.mockResolvedValue(drain({ sourceUnavailable: 2 }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().consecutiveFailures).toBe(1);
+      sdk.trigger.mockResolvedValue(drain());
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status()).toMatchObject({ status: "checking", sourceUnavailable: 0, captureIssues: 0 });
+    } finally { await scheduler.stop(); }
+  });
   it("finishes a large native sweep without waiting one minute per batch or being reordered by hooks", async () => {
     vi.useFakeTimers(); vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
     const sdk = mockSdk(); const kv = mockKV(); const calls: string[] = [];

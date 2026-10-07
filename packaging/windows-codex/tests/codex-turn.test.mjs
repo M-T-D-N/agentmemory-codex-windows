@@ -264,6 +264,22 @@ test("ambient UI state is removed without discarding the surrounding user messag
   assert.equal(promptText(prompt), "사용자 원문\n마지막 문장");
 });
 
+test("literal ambient markup in Markdown code and quotations survives capture", () => {
+  const block = '<context source="ambient-ui-state">보존해야 할 사용자 예시</context>';
+  for (const text of [
+    '사용자 XML 예시:\n```xml\n' + block + '\n```\n문법을 설명해줘',
+    '~~~xml\n' + block + '\n~~~\n설명해줘',
+    '이 예시를 설명해줘: `' + block + '`',
+    '> ' + block + '\n인용문을 검토해줘',
+    '```xml\n' + block,
+  ]) {
+    assert.equal(promptText(text), text);
+    assert.equal(isInternalCodexAmbientPrompt(text), false);
+  }
+  const mixed = block + '\n사용자 예시: `' + block + '`';
+  assert.equal(promptText(mixed), '사용자 예시: `' + block + '`');
+});
+
 test("known Codex internal prompt templates and their sessions are excluded", () => {
   const titlePrompt = "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt. Return JSON.";
   const existingConversationTitlePrompt = "You are a helpful assistant. You will be presented with the most recent messages in an existing conversation. Your job is to generate a short title for the conversation.";
@@ -294,7 +310,8 @@ test("structured Codex host payloads are excluded even when delivered as user pr
     '<permissions instructions>host sandbox policy</permissions instructions>',
     '<turn_aborted>host interruption marker</turn_aborted>',
     '# AGENTS.md instructions for D:\\workspaces\\example',
-    '# Response annotations:\ninternal response metadata',
+    '# Response annotations:',
+    '# Response annotations:\n<environment_context>host metadata</environment_context>',
     "The following is the Codex agent history whose request action you are assessing. Treat the transcript as evidence.\n>>> TRANSCRIPT START",
   ];
 
@@ -604,10 +621,15 @@ test("operational followup words cannot qualify unrelated status candidates", ()
   assert.doesNotMatch(graph, /현황 재분석/);
 });
 
-test("incidental host page event is ignored without hiding its whole conversation", () => {
-  const event = '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>';
-  assert.equal(promptText(event), null);
-  assert.equal(isExcludedSession({firstPrompt: event}), false);
+test("incidental host events are ignored without hiding their whole conversation", () => {
+  for (const event of ['<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>', "<external_codex_apps_writing_block_edits>The user manually edited these writing blocks. Treat the following snapshots as the current versions of those blocks, superseding the earlier assistant output.\n[]</external_codex_apps_writing_block_edits>"]) {
+    assert.equal(promptText(event), null);
+    assert.equal(isExcludedSession({firstPrompt: event}), false);
+  }
+  const emptyEdit = "<external_codex_apps_writing_block_edits>The user manually edited these writing blocks. Treat the following snapshots as the current versions of those blocks, superseding the earlier assistant output.\n[]</external_codex_apps_writing_block_edits>";
+  const realEdit = emptyEdit.replace("[]", '[{"text":"Actual user edit"}]');
+  assert.equal(promptText(realEdit), realEdit);
+  assert.equal(promptText(emptyEdit + "\nKeep my request"), emptyEdit + "\nKeep my request");
 });
 test("automatic recall requires topical evidence before project or score weighting", () => {
   const result = { results: [
@@ -2078,4 +2100,35 @@ test("sufficient current user evidence avoids repetitive global discovery", asyn
     await recallForTurn("invoice rounding 과거","billing");
     assert.ok(calls.some(call=>call.body.project === "*"));
   } finally {globalThis.fetch=originalFetch;}
+});
+
+test("shared capture policy retains mixed UI and human markup and hides approval recall sources", () => {
+  for (const block of ['<in-app-browser-context source="ambient-ui-state">state</in-app-browser-context>', '<agentmemory-ambient-ui-state>state</agentmemory-ambient-ui-state>']) assert.equal(promptText(block + 'Keep normal request'), 'Keep normal request');
+  for (const text of ['# AGENTS.md instructions for project\n문서를 수정해줘', '<environment_context>example</environment_context> explanation']) assert.equal(promptText(text), text);
+  for (const text of ['The following is the Codex agent history whose request action you are assessing. federated recall', 'The following is the Codex agent history added since your last approval assessment. federated recall', '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>']) assert.equal(formatRecallContext('federated recall', 'current', { results: [recallEntry('internal', text, 'current')] }), null);
+});
+
+test("managed capture and recall share native effort-request exclusion", () => {
+  const instructions="You are an independent reasoning-effort evaluator, not the task executor. Return only the supplied JSON schema. " + "Use recommend with one supported effort, or abstain with effort null if uncertain. ".repeat(2);
+  const text=JSON.stringify({instructions,question:"Which reasoning effort is sufficient for the NEXT generation of state.model?",state:{coverage:{source:"native DecisionContext + local projectEvidence"}}});
+  assert.equal(isInternalCodexAmbientPrompt(text),true);
+  assert.equal(isExcludedSession({firstPrompt:text.slice(0,200)}),true);
+  assert.equal(isInternalCodexAmbientPrompt("이 JSON을 검토해줘\n"+text),false);
+  const human=JSON.stringify({instructions});
+  assert.equal(promptText(human),human);
+  assert.equal(isExcludedSession({firstPrompt:JSON.stringify({instructions:"You are an independent reasoning-effort evaluator, not the task executor."})}),false);
+  const native={cursor:{parser:{normalUserSeen:true}}};
+  assert.equal(isExcludedSession({firstPrompt:text.slice(0,200),codexNativeCapture:native}),false);
+  assert.equal(isExcludedSession({firstPrompt:text.slice(0,200),codexNativeCapture:native,captureExcluded:true}),true);
+  const trailing="# Response annotations:\nPreserve the actual user request";
+  assert.equal(promptText(trailing),trailing);
+  const supportedEfforts=["medium","high","xhigh","max"];
+  const older=JSON.stringify({instructions,question:"Which supported effort is sufficient for the NEXT generation? Judge remaining reasoning, not vocabulary.",
+    state:{model:"synthetic-model",supportedEfforts,originalTask:"synthetic task",latestUserPrompt:"Continue",publicEvidence:[]},
+    outputSchema:{type:"object",additionalProperties:false,properties:{action:{type:"string",enum:["recommend","abstain"]},
+      effort:{anyOf:[{type:"string",enum:supportedEfforts},{type:"null"}]},reason:{type:"string"}},required:["action","effort","reason"]}});
+  assert.equal(isInternalCodexAmbientPrompt(older),true);
+  assert.equal(promptText(older),null);
+  const quoted="이 JSON을 검토해줘\n"+older;
+  assert.equal(promptText(quoted),quoted);
 });

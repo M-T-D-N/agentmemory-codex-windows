@@ -11,3 +11,5 @@ allowBuilds:
   onnxruntime-node: true
   protobufjs: true
   sharp: true
+patchedDependencies:
+  iii-sdk@0.11.2: patches/iii-sdk@0.11.2.patch

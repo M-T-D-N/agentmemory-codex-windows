@@ -18,6 +18,22 @@ for (const required of [cli, standalone, join(dist, "index.mjs"), join(dist, "in
 for (const developmentDependency of ["vitest", "tsdown", "typescript"]) {
   assert.equal(existsSync(join(packageRoot, "node_modules", developmentDependency)), false);
 }
+const sourcePackage = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8"));
+for (const dependency of Object.keys({ ...sourcePackage.dependencies, ...sourcePackage.optionalDependencies })) {
+  const sourceManifest = join(sourceRoot, "node_modules", dependency, "package.json");
+  const releaseManifest = join(packageRoot, "node_modules", dependency, "package.json");
+  assert.equal(existsSync(releaseManifest), existsSync(sourceManifest), `deployed dependency availability differs: ${dependency}`);
+  if (existsSync(sourceManifest)) {
+    assert.equal(JSON.parse(readFileSync(releaseManifest, "utf8")).version,
+      JSON.parse(readFileSync(sourceManifest, "utf8")).version, `deployed dependency differs from tested source: ${dependency}`);
+  }
+}
+
+for (const sdkEntry of ["index.mjs", "index.cjs"]) {
+  assert.deepEqual(readFileSync(join(packageRoot, "node_modules/iii-sdk/dist", sdkEntry)),
+    readFileSync(join(sourceRoot, "node_modules/iii-sdk/dist", sdkEntry)),
+    `deployed SDK patch differs from tested source: ${sdkEntry}`);
+}
 
 const version = spawnSync(process.execPath, [cli, "--version"], {
   encoding: "utf8",

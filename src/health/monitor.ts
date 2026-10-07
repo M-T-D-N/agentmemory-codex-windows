@@ -90,17 +90,19 @@ export function registerHealthMonitor(
         if (!available && !stopped && !graphRecovery && kvConnectivity.status === "ok" && Date.now() >= graphRetryAt) {
           // The registered writer rechecks under the graph lock. Keep one
           // invocation outstanding; a slow rebuild is never a retry signal.
-          graphRecovery = sdk.trigger<unknown, { success: boolean; error?: string }>({
+          let retryDelayMs = 300_000;
+          graphRecovery = sdk.trigger<unknown, { success: boolean; error?: string; skipped?: string }>({
             function_id: "mem::graph-snapshot-rebuild",
             payload: { onlyIfIndexUnavailable: true },
           }).then(result => {
             if (!result?.success) throw new Error(result?.error ?? "Graph query index recovery failed");
+            if (result.skipped === "graph_writer_busy") retryDelayMs = 30_000;
             graphRecoveryError = undefined;
           }).catch(error => {
             graphRecoveryError = error instanceof Error ? error.message : String(error);
           }).finally(() => {
             graphRecovery = undefined;
-            graphRetryAt = Date.now() + 300_000;
+            graphRetryAt = Date.now() + retryDelayMs;
           });
         }
         graphQueryIndex = {

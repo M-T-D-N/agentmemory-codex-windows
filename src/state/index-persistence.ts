@@ -17,11 +17,13 @@ const VECTOR_MANIFEST_KEY = "vectors:manifest";
 const VECTOR_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:vectors:`;
 const INDEX_SHARD_KEY = "data";
 const DEFAULT_INDEX_SHARD_CHARS = 2_000_000;
+const INDEX_READ_BATCH = 4;
 
 type IndexShardManifest = {
   v: 1;
   generation?: string;
   shards: Array<{ scope: string; key: string; chars: number }>;
+  obsoleteShards?: Array<{ scope: string; key: string; chars: number }>;
   chars: number;
 };
 
@@ -75,6 +77,7 @@ export class IndexPersistence {
   private retryAttempts = 0;
   private stopped = false;
   private persistedContent = new Map<string, { fingerprint: string; manifest: IndexShardManifest }>();
+  private persistedBm25Revision: number | undefined;
 
   constructor(
     private kv: StateKV,
@@ -139,7 +142,15 @@ export class IndexPersistence {
   }
 
   private async saveCurrent(): Promise<void> {
-    await this.saveBm25Index(this.bm25.serialize());
+    const persisted = this.persistedContent.get(BM25_MANIFEST_KEY);
+    const revision = this.persistedBm25Revision;
+    if (revision === undefined || revision !== this.bm25.revision || !persisted || persisted.manifest.obsoleteShards?.length ||
+        !await this.isManifestPublished(BM25_MANIFEST_KEY, persisted.manifest) || revision !== this.bm25.revision) {
+      this.persistedBm25Revision = undefined;
+      const snapshotRevision = this.bm25.revision;
+      await this.saveBm25Index(this.bm25.serialize());
+      this.persistedBm25Revision = snapshotRevision;
+    }
     if (this.vector) await this.saveVectorIndex(this.vector.serialize());
   }
 
@@ -147,20 +158,25 @@ export class IndexPersistence {
     bm25: SearchIndex | null;
     vector: VectorIndex | null;
   }> {
-    let bm25: SearchIndex | null = null;
-    let vector: VectorIndex | null = null;
+    this.persistedBm25Revision = undefined;
+    try {
+      let bm25: SearchIndex | null = null;
+      let vector: VectorIndex | null = null;
 
-    const bm25Data = await this.loadBm25Data();
-    if (bm25Data && typeof bm25Data === "string") {
-      bm25 = SearchIndex.deserialize(bm25Data);
+      const bm25Data = await this.loadBm25Data();
+      if (bm25Data && typeof bm25Data === "string") {
+        bm25 = SearchIndex.deserialize(bm25Data);
+      }
+
+      const vecData = await this.loadVectorData();
+      if (vecData && typeof vecData === "string") {
+        vector = VectorIndex.deserialize(vecData);
+      }
+
+      return { bm25, vector };
+    } finally {
+      this.persistedBm25Revision = undefined;
     }
-
-    const vecData = await this.loadVectorData();
-    if (vecData && typeof vecData === "string") {
-      vector = VectorIndex.deserialize(vecData);
-    }
-
-    return { bm25, vector };
   }
 
   stop(): void {
@@ -219,11 +235,17 @@ export class IndexPersistence {
     const fingerprint = createHash("sha256").update(serialized).digest("hex");
     const persisted = this.persistedContent.get(manifestKey);
     if (persisted?.fingerprint === fingerprint &&
-        await this.isManifestPublished(manifestKey, persisted.manifest)) return;
+        await this.isManifestPublished(manifestKey, persisted.manifest)) {
+      persisted.manifest = await this.cleanupObsoleteShards(manifestKey, persisted.manifest);
+      return;
+    }
 
-    const previous = await this.kv
-      .get<IndexShardManifest>(KV.bm25Index, manifestKey)
-      .catch(() => null);
+    const previous = await this.kv.get<IndexShardManifest>(KV.bm25Index, manifestKey);
+    if (previous?.v === 1) this.validateObsoleteShards(manifestKey, previous);
+    const obsolete = previous?.v === 1 ? [...(previous.shards ?? []), ...(previous.obsoleteShards ?? [])] : [];
+    if (obsolete.some(shard => !isValidShardDescriptor(shard) || !shard.scope.startsWith(scopePrefix) || shard.key !== INDEX_SHARD_KEY)) {
+      throw new Error("Invalid obsolete index shard descriptor; preserving existing state");
+    }
     const generation =
       this.options.createGeneration?.() ?? createIndexGeneration();
     const chunkChars = shardChars(this.options);
@@ -241,6 +263,21 @@ export class IndexPersistence {
       chunks.push(chunk);
     }
 
+    const pendingManifest: IndexShardManifest = previous?.v === 1
+      ? { ...previous }
+      : { v: 1, generation, shards: [], chars: 0 };
+    pendingManifest.obsoleteShards = [...new Map(
+      [...(pendingManifest.obsoleteShards ?? []), ...shards]
+        .map(shard => [shard.scope + "\0" + shard.key, shard]),
+    ).values()];
+    this.validateObsoleteShards(manifestKey, pendingManifest);
+    // Record unpublished shards durably before their first write so a process
+    // exit cannot strand a generation outside the existing cleanup queue.
+    this.persistedContent.delete(manifestKey);
+    await this.kv.set(KV.bm25Index, manifestKey, pendingManifest);
+    await this.auditIndexPersistence("generation_prepare", [statePath(KV.bm25Index, manifestKey)], {
+      manifestKey, generation, shards: shards.length,
+    });
     // iii-state serializes file-backed writes. Fanning every multi-megabyte
     // shard out at once saturates that single writer, delays foreground MCP
     // calls, and can make the HTTP proxy abort the worker connection before
@@ -271,12 +308,17 @@ export class IndexPersistence {
       },
     );
 
-    const nextManifest: IndexShardManifest = {
+    let nextManifest: IndexShardManifest = {
       v: 1,
       generation,
       shards,
       chars: serialized.length,
     };
+    const currentShardIds = new Set(shards.map(shard => shard.scope + "\0" + shard.key));
+    const obsoleteById = new Map(obsolete.map(shard => [shard.scope + "\0" + shard.key, shard]));
+    for (const id of currentShardIds) obsoleteById.delete(id);
+    if (obsoleteById.size) nextManifest.obsoleteShards = [...obsoleteById.values()];
+    let publicationError: unknown;
     try {
       await this.kv.set<IndexShardManifest>(
         KV.bm25Index,
@@ -293,7 +335,17 @@ export class IndexPersistence {
         result: "committed",
       });
     } catch (err) {
-      if (await this.isManifestPublished(manifestKey, nextManifest)) {
+      let published: boolean;
+      try {
+        published = await this.isManifestPublished(manifestKey, nextManifest);
+      } catch (verificationError) {
+        await this.auditIndexPersistence("manifest_publish", [statePath(KV.bm25Index, manifestKey)], {
+          manifestKey, generation, result: "unknown", error: errorMessage(err),
+          verificationError: errorMessage(verificationError),
+        });
+        throw new AggregateError([err, verificationError], "Index manifest publication outcome is unknown; preserving all shards");
+      }
+      if (published) {
         await this.auditIndexPersistence("manifest_publish", [
           statePath(KV.bm25Index, manifestKey),
         ], {
@@ -304,22 +356,16 @@ export class IndexPersistence {
           result: "committed_after_error",
           error: errorMessage(err),
         });
+        publicationError = err;
       } else {
         await this.deleteShards(shards, "manifest_publish_rollback");
+        throw err;
       }
-      throw err;
     }
 
     await this.deleteKey(KV.bm25Index, legacyKey, "legacy_cleanup");
-    if (previous?.v === 1 && Array.isArray(previous.shards)) {
-      const currentShardIds = new Set(
-        shards.map((shard) => `${shard.scope}\0${shard.key}`),
-      );
-      await this.deleteShards(
-        previous.shards.filter(shard => !currentShardIds.has(shard.scope + "\0" + shard.key)),
-        "previous_generation_cleanup",
-      );
-    }
+    nextManifest = await this.cleanupObsoleteShards(manifestKey, nextManifest);
+    if (publicationError !== undefined) throw publicationError;
     this.persistedContent.set(manifestKey, { fingerprint, manifest: structuredClone(nextManifest) });
   }
 
@@ -348,14 +394,17 @@ export class IndexPersistence {
   private async deleteShards(
     shards: IndexShardManifest["shards"],
     reason: string,
-  ): Promise<void> {
-    if (!shards.length) return;
+  ): Promise<IndexShardManifest["shards"]> {
+    if (!shards.length) return [];
+    const failed: IndexShardManifest["shards"] = [];
     const results: Array<{ scope: string; key: string; result: string; error?: string }> = [];
-    for (const { scope, key } of shards) {
+    for (const shard of shards) {
+      const { scope, key } = shard;
       try {
         await this.kv.delete(scope, key);
         results.push({ scope, key, result: "deleted" });
       } catch (err) {
+        failed.push(shard);
         results.push({ scope, key, result: "failed", error: errorMessage(err) });
       }
     }
@@ -364,15 +413,36 @@ export class IndexPersistence {
       result: results.some(row => row.result === "failed") ? "partial_failure" : "deleted",
       results,
     });
+    return failed;
+  }
+
+  private validateObsoleteShards(manifestKey: string, manifest: IndexShardManifest): void {
+    if (manifest.obsoleteShards === undefined) return;
+    const prefix = manifestKey === BM25_MANIFEST_KEY ? BM25_SHARD_SCOPE_PREFIX : VECTOR_SHARD_SCOPE_PREFIX;
+    const active = new Set(manifest.shards.map(shard => shard.scope + "\0" + shard.key));
+    if (!Array.isArray(manifest.obsoleteShards) || manifest.obsoleteShards.some(shard =>
+      !isValidShardDescriptor(shard) || !shard.scope.startsWith(prefix) || shard.key !== INDEX_SHARD_KEY || active.has(shard.scope + "\0" + shard.key))) {
+      throw new Error("Invalid obsolete index shard descriptor; preserving existing state");
+    }
+  }
+
+  private async cleanupObsoleteShards(manifestKey: string, manifest: IndexShardManifest): Promise<IndexShardManifest> {
+    this.validateObsoleteShards(manifestKey, manifest);
+    if (!manifest.obsoleteShards?.length) return manifest;
+    const failed = await this.deleteShards(manifest.obsoleteShards, "previous_generation_cleanup");
+    if (failed.length === manifest.obsoleteShards.length) return manifest;
+    const next = { ...manifest };
+    if (failed.length) next.obsoleteShards = failed;
+    else delete next.obsoleteShards;
+    await this.kv.set(KV.bm25Index, manifestKey, next);
+    return next;
   }
 
   private async isManifestPublished(
     manifestKey: string,
     expected: IndexShardManifest,
   ): Promise<boolean> {
-    const published = await this.kv
-      .get<IndexShardManifest>(KV.bm25Index, manifestKey)
-      .catch(() => null);
+    const published = await this.kv.get<IndexShardManifest>(KV.bm25Index, manifestKey);
     if (
       published?.v !== 1 ||
       published.generation !== expected.generation ||
@@ -423,7 +493,16 @@ export class IndexPersistence {
       manifest.value != null &&
       typeof manifest.value === "object"
     ) {
-      return this.loadManifestData(manifest.value, label);
+      const value = manifest.value;
+      if (value.v !== 1 || value.chars !== 0 || !Array.isArray(value.shards) || value.shards.length !== 0 ||
+          typeof value.generation !== "string" || !value.generation || !value.obsoleteShards?.length) {
+        return this.loadManifestData(value, label);
+      }
+      try { this.validateObsoleteShards(manifestKey, value); }
+      catch (err) {
+        logger.warn(`index persistence: ${label} pending manifest invalid`, { message: errorMessage(err) });
+        return null;
+      }
     }
 
     const legacy = await this.readIndexValue<string>(
@@ -475,33 +554,32 @@ export class IndexPersistence {
         return null;
       }
     }
-    const loadedShards = await Promise.all(
-      manifest.shards.map(async (shard) => ({
-        shard,
-        chunk: await this.kv.get<string>(shard.scope, shard.key).catch(() => null),
-      })),
-    );
     const chunks: string[] = [];
     let chars = 0;
-    for (const { shard, chunk } of loadedShards) {
-      if (typeof chunk !== "string") {
-        logger.warn(`index persistence: ${label} shard missing`, {
-          scope: shard.scope,
-          key: shard.key,
-        });
-        return null;
+    for (let offset = 0; offset < manifest.shards.length; offset += INDEX_READ_BATCH) {
+      const loadedShards = await Promise.all(manifest.shards.slice(offset, offset + INDEX_READ_BATCH).map(async shard => ({
+        shard, chunk: await this.kv.get<string>(shard.scope, shard.key).catch(() => null),
+      })));
+      for (const { shard, chunk } of loadedShards) {
+        if (typeof chunk !== "string") {
+          logger.warn(`index persistence: ${label} shard missing`, {
+            scope: shard.scope,
+            key: shard.key,
+          });
+          return null;
+        }
+        if (chunk.length !== shard.chars) {
+          logger.warn(`index persistence: ${label} shard length mismatch`, {
+            scope: shard.scope,
+            key: shard.key,
+            expected: shard.chars,
+            actual: chunk.length,
+          });
+          return null;
+        }
+        chunks.push(chunk);
+        chars += chunk.length;
       }
-      if (chunk.length !== shard.chars) {
-        logger.warn(`index persistence: ${label} shard length mismatch`, {
-          scope: shard.scope,
-          key: shard.key,
-          expected: shard.chars,
-          actual: chunk.length,
-        });
-        return null;
-      }
-      chunks.push(chunk);
-      chars += chunk.length;
     }
     if (chars !== manifest.chars) {
       logger.warn(`index persistence: ${label} total length mismatch`, {
@@ -510,6 +588,9 @@ export class IndexPersistence {
       });
       return null;
     }
-    return chunks.join("");
+    const serialized = chunks.join("");
+    const key = label === "BM25" ? BM25_MANIFEST_KEY : VECTOR_MANIFEST_KEY;
+    this.persistedContent.set(key, { fingerprint: createHash("sha256").update(serialized).digest("hex"), manifest: structuredClone(manifest) });
+    return serialized;
   }
 }

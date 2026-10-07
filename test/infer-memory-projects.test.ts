@@ -131,19 +131,20 @@ describe("inferMemoryProjects", () => {
     expect(stored?.project).toBe("api");
   });
 
-  it("infers the majority project when sessions span multiple projects", async () => {
+  it("leaves a memory ambiguous when sessions span multiple projects", async () => {
     const kv = makeMockKV();
     await kv.set(KV.sessions, "sess_1", makeSession("sess_1", "api"));
     await kv.set(KV.sessions, "sess_2", makeSession("sess_2", "api"));
     await kv.set(KV.sessions, "sess_3", makeSession("sess_3", "web"));
-    // api appears 2 times, web 1 time — api wins strict majority
+    // A dominant project is not enough when provenance crosses project boundaries.
     await kv.set(KV.memories, "mem_a", makeMemory("mem_a", ["sess_1", "sess_2", "sess_3"]));
 
     const result = await inferMemoryProjects(kv);
 
-    expect(result.updated).toBe(1);
+    expect(result.updated).toBe(0);
+    expect(result.ambiguous).toBe(1);
     const stored = await kv.get<Memory>(KV.memories, "mem_a");
-    expect(stored?.project).toBe("api");
+    expect(stored?.project).toBeUndefined();
   });
 
   it("marks a memory ambiguous when sessions tie across two projects", async () => {
@@ -209,18 +210,35 @@ describe("inferMemoryProjects", () => {
     expect(tie?.project).toBeUndefined();
   });
 
-  it("ignores missing sessions when voting but still infers if remainder has majority", async () => {
+  it("leaves a memory ambiguous when any associated session is missing", async () => {
     const kv = makeMockKV();
     await kv.set(KV.sessions, "sess_real", makeSession("sess_real", "api"));
-    // ghost_sess does not exist in KV — should be silently skipped in voting
+    // A missing source cannot be silently excluded from the scope decision.
     await kv.set(KV.memories, "mem_a", makeMemory("mem_a", ["sess_real", "ghost_sess"]));
 
     const result = await inferMemoryProjects(kv);
 
-    // Only one vote collected (api), which is a strict majority of 1 project out of 1
-    expect(result.updated).toBe(1);
+    expect(result.updated).toBe(0);
+    expect(result.ambiguous).toBe(1);
     const stored = await kv.get<Memory>(KV.memories, "mem_a");
-    expect(stored?.project).toBe("api");
+    expect(stored?.project).toBeUndefined();
+  });
+
+  it("does not write any inferred scopes when a session lookup fails", async () => {
+    const kv = makeMockKV();
+    await kv.set(KV.sessions, "sess_a", makeSession("sess_a", "api"));
+    await kv.set(KV.memories, "mem_a", makeMemory("mem_a", ["sess_a"]));
+    await kv.set(KV.memories, "mem_b", makeMemory("mem_b", ["sess_b"]));
+    const set = vi.spyOn(kv, "set");
+    const get = kv.get;
+    kv.get = async <T>(scope: string, key: string): Promise<T | null> => {
+      if (scope === KV.sessions && key === "sess_b") throw new Error("session read failed");
+      return get<T>(scope, key);
+    };
+
+    await expect(inferMemoryProjects(kv)).rejects.toThrow("session read failed");
+    expect(set.mock.calls.filter(([scope]) => scope === KV.memories)).toHaveLength(0);
+    expect((await get<Memory>(KV.memories, "mem_a"))?.project).toBeUndefined();
   });
 
   it("is idempotent when run twice in succession", async () => {

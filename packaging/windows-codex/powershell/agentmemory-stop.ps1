@@ -7,16 +7,26 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+function Get-StopReservedConnections {
+    foreach ($line in @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p TCP)) {
+        if ($line -match '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$' -and [int]$Matches[2] -in $reservedPorts) {
+            [pscustomobject]@{ LocalPort = [int]$Matches[2]; OwningProcess = [int]$Matches[3] }
+        }
+    }
+}
+
 $resolvedRoot = if ([string]::IsNullOrWhiteSpace($Root)) { [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)) } else { [System.IO.Path]::GetFullPath($Root) }
 $envScript = Join-Path $resolvedRoot 'scripts\agentmemory-env.ps1'
+$lifecycleScript = Join-Path $resolvedRoot 'scripts\agentmemory-lifecycle.ps1'
 $statePath = Join-Path $resolvedRoot 'data\runtime-state.json'
 $stopPath = Join-Path $resolvedRoot 'data\stop-request.json'
 
-foreach ($requiredFile in @($envScript, $statePath)) {
+foreach ($requiredFile in @($envScript, $lifecycleScript, $statePath)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required AgentMemory file is missing: $requiredFile"
     }
 }
+. $lifecycleScript
 . $envScript -Root $resolvedRoot
 
 $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
@@ -50,12 +60,9 @@ Move-Item -LiteralPath $temporaryPath -Destination $stopPath -Force
 $reservedPorts = @(3111, 3112, 3113, 3114, 49134)
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 do {
-    $listeners = foreach ($line in @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p TCP)) {
-        if ($line -match '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$' -and [int]$Matches[2] -in $reservedPorts) {
-            [pscustomobject]@{ LocalPort = [int]$Matches[2]; OwningProcess = [int]$Matches[3] }
-        }
-    }
-    if (@($listeners).Count -eq 0) {
+    $listeners = @(Get-StopReservedConnections)
+    $runExited = Test-AgentMemoryRecordedRunExited -RuntimeState $state -Probe { param($ProcessId) Get-AgentMemoryProcessIdentity -ProcessId $ProcessId }
+    if ($listeners.Count -eq 0 -and $runExited) {
         [ordered]@{
             stopped = $true
             daemon_pid = [int]$state.daemon.pid

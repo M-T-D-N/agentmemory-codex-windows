@@ -300,6 +300,64 @@ describe("Timeline Function", () => {
     })).rejects.toThrow("Timeline entry exceeds the 2 MiB response limit: ses_1/oversized");
   });
 
+  it("retries one changed session count with a fresh map before reading observations", async () => {
+    kv.usesManagedState = true;
+    kv.list.mockImplementation(async () => { throw Error("managed full list forbidden"); });
+    const session = await kv.get<Session>("mem:sessions", "ses_1");
+    const actualPage = kv.listPage;
+    const offsets: number[] = [];
+    kv.listPage = vi.fn(async <T>(scope: string, offset = 0) => {
+      if (scope === "mem:sessions") {
+        offsets.push(offset);
+        if (offsets.length === 1) return { entries: [{ key: "first-attempt-only", value: { ...session, id: "first-attempt-only" } as T }], total: 2, next_offset: 1 };
+        if (offsets.length === 2) return { entries: [{ key: "changed-page", value: { ...session, id: "changed-page" } as T }], total: 3, next_offset: 2 };
+      }
+      return actualPage<T>(scope, offset);
+    });
+    const result = await sdk.trigger("mem::timeline", {
+      project: "my-project", anchor: "Third", before: 0, after: 0, trackAccess: false,
+    }) as TimelineResponse;
+    expect(result.entries.map(entry => entry.observation.id)).toEqual(["obs_3"]);
+    expect(offsets).toEqual([0, 1, 0]);
+    expect(kv.listPage.mock.calls.some(([scope]) => scope === "mem:obs:first-attempt-only" || scope === "mem:obs:changed-page")).toBe(false);
+    expect(kv.list).not.toHaveBeenCalled();
+  });
+
+  it("fails after a second changed session count without a third scan", async () => {
+    kv.usesManagedState = true;
+    const session = await kv.get<Session>("mem:sessions", "ses_1");
+    const actualPage = kv.listPage;
+    const offsets: number[] = [];
+    kv.listPage = vi.fn(async <T>(scope: string, offset = 0) => {
+      if (scope !== "mem:sessions") return actualPage<T>(scope, offset);
+      offsets.push(offset);
+      return offset === 0
+        ? { entries: [{ key: "ses_1", value: session as T }], total: 2, next_offset: 1 }
+        : { entries: [{ key: "other", value: { ...session, id: "other" } as T }], total: 3, next_offset: 2 };
+    });
+    await expect(sdk.trigger("mem::timeline", { anchor: "Third", trackAccess: false }))
+      .rejects.toThrow("Timeline source changed during page read: mem:sessions");
+    expect(offsets).toEqual([0, 1, 0, 1]);
+    expect(kv.list).not.toHaveBeenCalled();
+  });
+
+  it.each(["duplicate", "mismatched-id"])("does not retry a changed session count with a %s row", async defect => {
+    kv.usesManagedState = true;
+    const session = await kv.get<Session>("mem:sessions", "ses_1");
+    const actualPage = kv.listPage;
+    const offsets: number[] = [];
+    kv.listPage = vi.fn(async <T>(scope: string, offset = 0) => {
+      if (scope !== "mem:sessions") return actualPage<T>(scope, offset);
+      offsets.push(offset);
+      return offset === 0
+        ? { entries: [{ key: "ses_1", value: session as T }], total: 2, next_offset: 1 }
+        : { entries: [{ key: defect === "duplicate" ? "ses_1" : "other", value: session as T }], total: 3, next_offset: 2 };
+    });
+    await expect(sdk.trigger("mem::timeline", { anchor: "Third", trackAccess: false }))
+      .rejects.toThrow("Timeline source has an invalid or duplicate key: mem:sessions");
+    expect(offsets).toEqual([0, 1]);
+  });
+
   it("does not use a full-list fallback when managed pages fail or their count changes", async () => {
     kv.usesManagedState = true;
     kv.list.mockImplementation(async () => { throw Error("managed full list forbidden"); });

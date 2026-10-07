@@ -248,7 +248,7 @@ export function registerObserveFunction(
             { type: "set", path: "captureExcluded", value: false },
             { type: "set", path: "captureExclusionReason", value: null },
           );
-          if (isCodexInternalAmbientText(existingSession?.firstPrompt)) {
+          if (reactivate || isCodexInternalAmbientText(existingSession?.firstPrompt)) {
             captureUpdates.push({ type: "set", path: "firstPrompt",
               value: stripCodexAmbientUiBlocks(raw.userPrompt!).replace(/\s+/g, " ").trim().slice(0, 200) });
           }

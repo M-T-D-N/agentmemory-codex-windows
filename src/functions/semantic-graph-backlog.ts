@@ -21,11 +21,11 @@ import {
 import { logger } from "../logger.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
-import { withKeyedLock } from "../state/keyed-mutex.js";
-import { graphObservationComplete, readGraphCompletionContext, type GraphCompletionContext } from "./graph-observation-result.js";
+import { withKeyedLock, tryWithKeyedLock, keyedLockBusy } from "../state/keyed-mutex.js";
+import { graphObservationComplete, readGraphCompletionContext, readGraphCompletionEpoch, type GraphCompletionContext } from "./graph-observation-result.js";
 import {
   isExcludedCodexAmbientSession,
-  sanitizeCodexAmbientObservation,
+  sanitizeCodexProcessingObservation,
 } from "./observation-visibility.js";
 import {
   estimateGraphExtractionInputTokens,
@@ -272,7 +272,7 @@ export function orderedSessionObservations(
 ): CompressedObservation[] {
   return observations
     .filter((observation) => observation.sessionId === sessionId)
-    .map((observation) => sanitizeCodexAmbientObservation(observation))
+    .map((observation) => sanitizeCodexProcessingObservation(observation))
     .filter(
       (observation): observation is CompressedObservation =>
         Boolean(observation?.title),
@@ -417,14 +417,14 @@ async function normalizeCompletedSession(
   kv: StateKV,
   sessionId: string,
 ): Promise<boolean> {
-  return withKeyedLock("mem:graph-write", () => withKeyedLock(`mem:session-lifecycle:${sessionId}`, async () => {
+  const attempt = await tryWithKeyedLock("mem:graph-write", () => withKeyedLock(`mem:session-lifecycle:${sessionId}`, async () => {
     const session = await kv.get<Session>(KV.sessions, sessionId);
     if (!session || session.status !== "completed" && session.semanticGraphCompletionVersion !== 1) return false;
+    if (session.semanticGraphStatus === "complete" && !session.semanticGraphBootstrapSkipped) return false;
     const observations = await kv.list<CompressedObservation>(
       KV.observations(sessionId),
     );
     if (!semanticGraphCursorsAtEnd(session, observations, await readGraphCompletionContext(kv, session))) return false;
-    if (session.semanticGraphStatus === "complete" && !session.semanticGraphBootstrapSkipped) return false;
     const updates: Array<{ type: "set"; path: string; value: unknown }> = [
       { type: "set", path: "semanticGraphStatus", value: "complete" },
       { type: "set", path: "semanticGraphLastError", value: "" },
@@ -439,6 +439,7 @@ async function normalizeCompletedSession(
     await kv.update(KV.sessions, sessionId, updates);
     return true;
   }));
+  return attempt.acquired && attempt.value;
 }
 
 function attemptTime(session: Session): number {
@@ -464,7 +465,10 @@ export function registerSemanticGraphBacklogFunction(
   kv: StateKV,
   provider?: MemoryProvider,
 ): void {
-  sdk.registerFunction("mem::graph-backlog-step", async (request: { checkOnly?: boolean } = {}) => {
+  const step = async (request: { checkOnly?: boolean } = {}) => {
+    if (keyedLockBusy("mem:graph-write")) {
+      return { success: true, skipped: "graph_writer_busy" };
+    }
     if (!isGraphExtractionEnabled()) {
       return { success: false, skipped: "graph_extraction_disabled" };
     }
@@ -502,6 +506,7 @@ export function registerSemanticGraphBacklogFunction(
       projectLastAttempt: number;
     }> = [];
     let normalizedSessions = 0;
+    let completionEpoch: Promise<string> | undefined;
     for (const projectSessions of byProject.values()) {
       const projectLastAttempt = projectLastAttempts.get(
         projectSessions[0]!.project,
@@ -524,7 +529,11 @@ export function registerSemanticGraphBacklogFunction(
           observations,
           retrySingle ? 1 : batchSize,
           inputTokenBudget,
-          await readGraphCompletionContext(kv, session),
+          await readGraphCompletionContext(kv, session,
+            session.semanticGraphCompletionVersion === 1
+              ? await (completionEpoch ??= readGraphCompletionEpoch(kv))
+              : undefined,
+          ),
         );
         if (!batch) {
           if (!request.checkOnly && await normalizeCompletedSession(kv, session.id)) {
@@ -589,6 +598,7 @@ export function registerSemanticGraphBacklogFunction(
       function_id: "mem::graph-extract",
       timeoutMs: graphExtractInvocationTimeoutMs(),
       payload: {
+        deferIfBusy: true,
         project: candidate.session.project,
         sessionId: candidate.session.id,
         observations: candidate.batch.observations,
@@ -645,6 +655,10 @@ export function registerSemanticGraphBacklogFunction(
       normalizedSessions,
       result,
     };
+  };
+  sdk.registerFunction("mem::graph-backlog-step", async (request: { checkOnly?: boolean } = {}) => {
+    const attempt = await tryWithKeyedLock("mem:graph-backlog-step", () => step(request));
+    return attempt.acquired ? attempt.value : { success: true, skipped: "backlog_running" };
   });
 }
 
@@ -766,8 +780,14 @@ export function startSemanticGraphBacklogScheduler(
           payload: {},
         }) as {
           skipped?: string;
-          result?: { success?: boolean; semanticCompleted?: boolean };
+          result?: { success?: boolean; semanticCompleted?: boolean; skipped?: string };
         };
+        if (step?.skipped === "backlog_running" || step?.skipped === "graph_writer_busy"
+            || step?.result?.skipped === "graph_writer_busy") {
+          idleSince = null;
+          scheduleDrain(eventDrainCooldownMs);
+          return;
+        }
         if (step?.skipped === "backlog_empty") {
           if (lifecycle && !stopped) {
             idleSince ??= Date.now();

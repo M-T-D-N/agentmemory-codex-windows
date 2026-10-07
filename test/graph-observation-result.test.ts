@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import type { CompressedObservation, Session } from "../src/types.js";
 import { KV } from "../src/state/schema.js";
+import { keyedLockBusy } from "../src/state/keyed-mutex.js";
 import { resumeGraphWritePlan } from "../src/state/graph-write-plan.js";
-import { readGraphCompletionContext } from "../src/functions/graph-observation-result.js";
+import { graphObservationDigest, readGraphCompletionContext } from "../src/functions/graph-observation-result.js";
 import { registerGraphFunction } from "../src/functions/graph.js";
 import { registerSemanticGraphBacklogFunction, selectSemanticGraphBatch, semanticGraphCursorsAtEnd } from "../src/functions/semantic-graph-backlog.js";
 
@@ -25,7 +26,107 @@ async function fixture() {
   return { kv, sdk, provider, row, extract };
 }
 
+async function completedBacklogFixture(ids = ["s", "t"], status: Session["semanticGraphStatus"] = "complete") {
+  const kv = mockKV();
+  const sdk = mockSdk();
+  for (const id of ids) {
+    const current = { ...session, id, status: "completed" as const, semanticGraphStatus: status };
+    const row = { ...observation(id + "_obs"), sessionId: id };
+    await kv.set(KV.sessions, id, current);
+    await kv.set(KV.observations(id), row.id, row);
+    await kv.set(KV.graphObservationResults(id), row.id, {
+      version: 1, id: row.id, sessionId: id, project: current.project,
+      inputDigest: graphObservationDigest(row), graphEpoch: "",
+      completedAt: "2026-09-13T02:00:00Z", analyzer: "fixture", outcome: "extracted",
+    });
+  }
+  registerSemanticGraphBacklogFunction(sdk as never, kv as never);
+  const readGet = kv.get;
+  const readList = kv.list;
+  const get = vi.spyOn(kv, "get");
+  const list = vi.spyOn(kv, "list");
+  const update = vi.spyOn(kv, "update");
+  return { kv, sdk, get, list, update, readGet, readList };
+}
+
 describe("observation-specific graph completion", () => {
+  it("shares one scan epoch across sessions and refreshes it on the next backlog step", async () => {
+    const f = await completedBacklogFixture();
+    expect(await f.sdk.trigger("mem::graph-backlog-step", { checkOnly: true })).toMatchObject({ skipped: "backlog_empty" });
+    expect(f.get.mock.calls.filter(([scope]) => scope === KV.graphSnapshot)).toHaveLength(1);
+    expect(f.list.mock.calls.filter(([scope]) => scope.startsWith("mem:graph:results:"))).toEqual([
+      [KV.graphObservationResults("s")], [KV.graphObservationResults("t")],
+    ]);
+    await f.kv.set(KV.graphSnapshot, "current", { resetAt: "2026-09-13T03:00:00Z" });
+    expect(await f.sdk.trigger("mem::graph-backlog-step", { checkOnly: true })).toMatchObject({ eligible: true });
+    expect(f.get.mock.calls.filter(([scope]) => scope === KV.graphSnapshot)).toHaveLength(2);
+    expect(f.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["", 1, "complete"],
+    ["2026-09-13T03:00:00Z", 0, "pending"],
+  ] as const)("freshly checks epoch %s under the normalization lock", async (freshEpoch, normalizedSessions, status) => {
+    const f = await completedBacklogFixture(["s"], "pending");
+    const read = f.readGet;
+    let snapshotReads = 0;
+    f.get.mockImplementation(async (scope, key) => {
+      if (scope === KV.graphSnapshot) {
+        snapshotReads += 1;
+        if (snapshotReads === 2) {
+          expect(keyedLockBusy("mem:graph-write")).toBe(true);
+          expect(keyedLockBusy("mem:session-lifecycle:s")).toBe(true);
+        }
+        return { resetAt: snapshotReads === 1 ? "" : freshEpoch } as never;
+      }
+      return read(scope, key);
+    });
+    expect(await f.sdk.trigger("mem::graph-backlog-step", {})).toMatchObject({ skipped: "backlog_empty", normalizedSessions });
+    expect(snapshotReads).toBe(2);
+    expect(f.list.mock.calls.filter(([scope]) => scope === KV.observations("s"))).toHaveLength(2);
+    expect(f.list.mock.calls.filter(([scope]) => scope === KV.graphObservationResults("s"))).toHaveLength(2);
+    expect(f.update).toHaveBeenCalledTimes(normalizedSessions);
+    expect(await f.kv.get(KV.sessions, "s")).toMatchObject({ semanticGraphStatus: status });
+  });
+
+  it.each([
+    ["invalid epoch", "Invalid graph completion epoch"],
+    ["unsupported version", "Unsupported graph observation completion version"],
+    ["malformed completion", "Invalid graph observation completion record"],
+    ["duplicate completion", "Duplicate graph observation completion record"],
+  ])("retains backlog %s errors while sharing the scan epoch", async (failure, expectedError) => {
+    const f = await completedBacklogFixture();
+    if (failure === "invalid epoch") await f.kv.set(KV.graphSnapshot, "current", { resetAt: "invalid" });
+    if (failure === "unsupported version") {
+      await f.kv.set(KV.sessions, "t", { ...session, id: "t", semanticGraphCompletionVersion: 2 });
+    }
+    if (failure === "malformed completion") {
+      const row = (await f.kv.get<Record<string, unknown>>(KV.graphObservationResults("t"), "t_obs"))!;
+      await f.kv.set(KV.graphObservationResults("t"), "t_obs", { ...row, inputDigest: "invalid" });
+    }
+    if (failure === "duplicate completion") {
+      const read = f.readList;
+      f.list.mockImplementation(async (scope) => {
+        const rows = await read(scope);
+        return scope === KV.graphObservationResults("t") ? [...rows, ...rows] : rows;
+      });
+    }
+    await expect(f.sdk.trigger("mem::graph-backlog-step", { checkOnly: true })).rejects.toThrow(expectedError);
+    expect(f.get.mock.calls.filter(([scope]) => scope === KV.graphSnapshot)).toHaveLength(1);
+    expect(f.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps general completion reads fresh and does not read an epoch for legacy sessions", async () => {
+    const f = await completedBacklogFixture(["s"]);
+    const current = (await f.kv.get<Session>(KV.sessions, "s"))!;
+    expect(await readGraphCompletionContext(f.kv as never, current)).toMatchObject({ epoch: "" });
+    await f.kv.set(KV.graphSnapshot, "current", { resetAt: "2026-09-13T03:00:00Z" });
+    expect(await readGraphCompletionContext(f.kv as never, current)).toMatchObject({ epoch: "2026-09-13T03:00:00Z" });
+    expect(await readGraphCompletionContext(f.kv as never, { ...current, semanticGraphCompletionVersion: undefined })).toBeUndefined();
+    expect(f.get.mock.calls.filter(([scope]) => scope === KV.graphSnapshot)).toHaveLength(2);
+    expect(f.update).not.toHaveBeenCalled();
+  });
+
   it("records a valid zero-node result and skips the repeated provider call", async () => {
     const f = await fixture();
     expect(semanticGraphCursorsAtEnd(session, [f.row])).toBe(false);
@@ -107,4 +208,14 @@ describe("observation-specific graph completion", () => {
     expect(await f.kv.list(KV.graphObservationResults("s"))).toEqual([]);
     expect(await f.kv.get(KV.graphWritePlan, "current")).toBeNull();
   });
+});
+
+it.each(["The following is the Codex agent history added since your last approval assessment. internal", '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>', '<agentmemory-ambient-ui-state>state</agentmemory-ambient-ui-state>'])("completes excluded host observations in the official completion ledger without changing original: %s", async narrative => {
+ const f=await fixture(); const row={...f.row,narrative,concepts:["never derive"],files:["internal.ts"]}; await f.kv.set(KV.observations("s"),row.id,row);
+ expect(await f.extract([row])).toMatchObject({success:true,processingCompleted:true,nodesAdded:0,edgesAdded:0,excludedObservationIds:[row.id]});
+ expect(f.provider.compress).not.toHaveBeenCalled(); expect(await f.kv.get(KV.observations("s"),row.id)).toEqual(row);
+ expect(await f.kv.get(KV.graphObservationResults("s"),row.id)).toMatchObject({outcome:"excluded"});
+ const current=(await f.kv.get<Session>(KV.sessions,"s"))!;
+ expect(semanticGraphCursorsAtEnd(current,[row],await readGraphCompletionContext(f.kv as never,current))).toBe(true);
+ expect(await f.extract([row])).toMatchObject({skipped:"already_processed",processingCompleted:true});
 });

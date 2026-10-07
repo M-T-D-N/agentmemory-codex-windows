@@ -134,7 +134,7 @@ try {
         return
     }
 
-    & $pnpm --config.node-linker=hoisted --filter '@agentmemory/agentmemory' deploy --prod --legacy $runtimePackageRoot
+    & $pnpm --config.inject-workspace-packages=true --config.node-linker=hoisted --filter '@agentmemory/agentmemory' deploy --prod $runtimePackageRoot
     if ($LASTEXITCODE -ne 0) { throw "pnpm deploy failed with exit code $LASTEXITCODE" }
     Get-ChildItem -Recurse -Directory -Filter '.bin' -LiteralPath (Join-Path $runtimePackageRoot 'node_modules') |
         Sort-Object { $_.FullName.Length } -Descending |
@@ -172,6 +172,7 @@ foreach ($directory in @($scriptsOut, $binOut, $configOut, $srcOut)) {
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'powershell\*.ps1') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-turn.mjs') -Destination $scriptsOut
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-visibility.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-project.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-recall-evidence.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'node\agentmemory-worker.mjs') -Destination $binOut

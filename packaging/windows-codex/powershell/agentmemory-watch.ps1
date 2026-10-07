@@ -32,69 +32,14 @@ foreach ($requiredFile in @($envScript, $lifecycleScript, $taskRegistrationPath,
 . $envScript -Root $resolvedRoot
 . $lifecycleScript
 
-function Get-SidSuffix {
-    param([Parameter(Mandatory = $true)][string]$Sid)
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Sid)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        return ([BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').Substring(0, 12).ToLowerInvariant())
-    }
-    finally {
-        $sha.Dispose()
-        [System.Array]::Clear($bytes, 0, $bytes.Length)
-    }
-}
-
-function Resolve-PrincipalSid {
-    param([Parameter(Mandatory = $true)][string]$UserId)
-    if ($UserId -match '^S-1-') {
-        return (New-Object System.Security.Principal.SecurityIdentifier($UserId)).Value
-    }
-    return (New-Object System.Security.Principal.NTAccount($UserId)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-}
-
 function Get-OwnedDaemonTask {
     Import-Module ScheduledTasks -ErrorAction Stop
     $ownerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $ownerMarker = Get-Content -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
     $registration = Get-Content -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
-    $expectedName = 'AgentMemoryCodex-Daemon-' + (Get-SidSuffix -Sid $ownerSid)
-    $expectedDescription = "OpenAI Codex AgentMemory daemon; install_nonce=$([string]$ownerMarker.install_nonce)"
-    if (
-        [string]$registration.task_path -ne '\' -or
-        [string]$registration.task_name -ne $expectedName -or
-        [string]$registration.owner_sid -ne $ownerSid -or
-        [string]$registration.install_nonce -ne [string]$ownerMarker.install_nonce -or
-        [string]$registration.description -ne $expectedDescription -or
-        [System.IO.Path]::GetFullPath([string]$registration.execute) -ne $hiddenLauncherPath -or
-        [string]$registration.arguments -ne 'task' -or
-        [System.IO.Path]::GetFullPath([string]$registration.working_directory) -ne $resolvedRoot
-    ) {
-        throw 'The protected AgentMemory daemon task registration does not match this installation.'
-    }
-
-    $task = Get-ScheduledTask -TaskPath '\' -TaskName $expectedName -ErrorAction Stop
-    $actions = @($task.Actions)
-    $triggers = @($task.Triggers | Where-Object { $null -ne $_ })
-    $principalSid = Resolve-PrincipalSid -UserId ([string]$task.Principal.UserId)
-    $executionLimit = [string]$task.Settings.ExecutionTimeLimit
-    if (
-        [string]$task.Description -ne $expectedDescription -or
-        $actions.Count -ne 1 -or
-        [System.IO.Path]::GetFullPath([string]$actions[0].Execute) -ne $hiddenLauncherPath -or
-        [string]$actions[0].Arguments -ne 'task' -or
-        [System.IO.Path]::GetFullPath([string]$actions[0].WorkingDirectory) -ne $resolvedRoot -or
-        $triggers.Count -ne 0 -or
-        $principalSid -ne $ownerSid -or
-        [string]$task.Principal.LogonType -notin @('Interactive', 'InteractiveToken') -or
-        [string]$task.Principal.RunLevel -notin @('Limited', 'LeastPrivilege') -or
-        [string]$task.Settings.MultipleInstances -ne 'IgnoreNew' -or
-        $executionLimit -notin @('00:00:00', 'PT0S') -or
-        -not [bool]$task.Settings.AllowDemandStart
-    ) {
-        throw 'The AgentMemory daemon task failed its ownership or least-privilege checks.'
-    }
-    return $task
+    Assert-AgentMemoryTaskRegistration -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration
+    $task = Get-ScheduledTask -TaskPath ([string]$registration.task_path) -TaskName ([string]$registration.task_name) -ErrorAction Stop
+    return Assert-AgentMemoryScheduledTaskOwnership -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration -Task $task
 }
 
 function Get-ReservedConnections {
@@ -186,6 +131,9 @@ function Test-WatchdogStopRequest {
     }
     try {
         $request = Get-Content -Raw -LiteralPath $watchStopPath | ConvertFrom-Json
+        if ($request.watcher_started_at_utc -is [DateTime] -or $request.watcher_started_at_utc -is [DateTimeOffset]) {
+            $request.watcher_started_at_utc = $request.watcher_started_at_utc.ToUniversalTime().ToString('o')
+        }
         if ([int]$request.watcher_pid -ne $PID -or [string]$request.watcher_started_at_utc -ne $watchdogStartedAtUtc) {
             return $false
         }

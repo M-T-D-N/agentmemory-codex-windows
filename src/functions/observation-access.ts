@@ -27,6 +27,7 @@ export async function readVisibleObservation(
   sessionId: string,
   observationId: string,
 ): Promise<CompressedObservation | null> {
+  if (isExcludedCodexAmbientSession(await kv.get<Session>(KV.sessions, sessionId))) return null;
   const observation = await kv.get<CompressedObservation>(
     KV.observations(sessionId),
     observationId,

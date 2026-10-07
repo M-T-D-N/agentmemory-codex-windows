@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
+import { listenForFetch } from "./helpers/http-port.js";
 
 // #666: api::session::end must publish the session-stopped lifecycle so
 // summarize + slot-reflect + graph extraction actually fire. Before this
@@ -69,25 +76,120 @@ describe("api::graph-build endpoint (#666)", () => {
   });
 });
 
-// #666: `agentmemory status` showed Memories/Observations as 0 because it
-// fetched /agentmemory/export which times out on iii-engine's file-based
-// KV under concurrent kv.list() pressure. Switch to /memories for the
-// memory count and derive observation count from sessions[].observationCount.
-describe("agentmemory status no longer depends on /export (#666)", () => {
-  const cli = readFileSync("src/cli.ts", "utf-8");
+describe("agentmemory status through the CLI", () => {
+  it("preserves scoped totals and distinguishes failed reads from genuine zero", async () => {
+    const inherited: NodeJS.ProcessEnv = Object.create(null);
+    for (const [name, value] of Object.entries(process.env)) {
+      if (value === undefined) continue;
+      const key = process.platform === "win32" ? name.toUpperCase() : name;
+      if (Object.hasOwn(inherited, key) && inherited[key] !== value) {
+        throw new Error("Conflicting environment aliases for " + key);
+      }
+      inherited[key] = value;
+    }
+    for (const key of Object.keys(inherited)) {
+      if (key.startsWith("AGENTMEMORY_") || key === "NODE_OPTIONS") delete inherited[key];
+    }
 
-  it("status uses count-only memories endpoint instead of export", () => {
-    expect(cli).toMatch(/apiFetch<any>\(base,\s*"memories\?count=true"\)/);
-    expect(cli).not.toMatch(/apiFetch<any>\(base,\s*"export"\)/);
-  });
+    const fixture = mkdtempSync(join(tmpdir(), "agentmemory-status-"));
+    let variant: "http-error" | "api-error" | "zero" | "page" = "http-error";
+    const requests: { url: URL; authorization?: string }[] = [];
+    const server = createServer((req, res) => {
+      const url = new URL(req.url!, "http://127.0.0.1");
+      requests.push({ url, authorization: req.headers.authorization });
+      let result: unknown = {};
+      if (url.pathname === "/agentmemory/sessions" || url.pathname === "/agentmemory/memories") {
+        if (url.searchParams.get("project") !== "*" || variant === "http-error") {
+          res.statusCode = 400;
+          result = { error: "project is required or fixture read failed" };
+        } else if (variant === "api-error") {
+          result = { error: "fixture API read failed" };
+        } else if (url.pathname === "/agentmemory/sessions") {
+          result = variant === "zero"
+            ? { sessions: [], total: 0, nextOffset: null }
+            : { sessions: [{ observationCount: 3 }], total: 9, nextOffset: 1 };
+        } else {
+          result = variant === "zero" ? { latestCount: 0, total: 0 } : { latestCount: 7, total: 11 };
+        }
+      } else if (url.pathname === "/agentmemory/health") {
+        result = { status: "healthy", version: "fixture", circuitBreaker: { state: "closed" },
+          health: { memory: { heapUsed: 0 }, uptimeSeconds: 0 } };
+      } else if (url.pathname === "/agentmemory/graph/stats") {
+        result = { totalNodes: 0, totalEdges: 0 };
+      } else if (url.pathname === "/agentmemory/config/flags") {
+        result = { provider: "llm", embeddingProvider: "embeddings", flags: [] };
+      } else if (url.pathname === "/agentmemory/diagnostics/followup") {
+        result = { agentInitiatedSearches: 0, followupWithinWindow: 0, windowSeconds: 60 };
+      } else if (url.pathname !== "/") {
+        res.statusCode = 404;
+        result = { error: "Unexpected fixture request" };
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(result));
+    });
 
-  it("status derives obsCount from sessions[].observationCount", () => {
-    expect(cli).toMatch(
-      /sessionList\.reduce\([\s\S]*?observationCount/,
-    );
-  });
+    try {
+      await listenForFetch(server);
+      const base = "http://127.0.0.1:" + (server.address() as { port: number }).port;
+      const env = { ...inherited, HOME: fixture, USERPROFILE: fixture, APPDATA: fixture,
+        LOCALAPPDATA: fixture, TEMP: fixture, TMP: fixture, TMPDIR: fixture,
+        AGENTMEMORY_DATA_DIR: join(fixture, "data"), AGENTMEMORY_URL: base,
+        AGENTMEMORY_SECRET: "fixture-key", TSX_DISABLE_CACHE: "1", NO_COLOR: "1" };
 
-  it("status reads memCount from memoriesRes.latestCount (count endpoint)", () => {
-    expect(cli).toMatch(/memoriesRes\?\.latestCount\s*\?\?\s*memoriesRes\?\.total/);
-  });
+      for (const sample of ["http-error", "api-error", "zero", "page"] as const) {
+        variant = sample;
+        requests.length = 0;
+        const child = spawn(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "status"], {
+          cwd: process.cwd(), env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+        });
+        let stdout = "", stderr = "", timedOut = false;
+        child.stdout.on("data", chunk => { stdout += chunk; });
+        child.stderr.on("data", chunk => { stderr += chunk; });
+        const closed = once(child, "close");
+        const timeout = setTimeout(() => { timedOut = true; child.kill(); }, 15000);
+        try {
+          const [code] = await closed;
+          expect(timedOut, sample + ": " + stderr).toBe(false);
+          expect(code, sample + ": " + stderr).toBe(0);
+          const output = stripVTControlCharacters(stdout);
+          const failed = sample === "http-error" || sample === "api-error";
+          expect(output).toMatch(new RegExp("Sessions:\\s+" + (failed ? "unavailable" : sample === "zero" ? "0" : "9") + "\\b"));
+          expect(output).toMatch(new RegExp("Observations:\\s+" + (failed ? "unavailable" : sample === "zero" ? "0" : "3") + "\\b"));
+          expect(output).toMatch(new RegExp("Memories:\\s+" + (failed ? "unavailable" : sample === "zero" ? "0" : "7") + "\\b"));
+          if (!failed) expect(output).toContain("(returned session page)");
+          expect(output).toContain("all projects; current configured agent scope");
+          expect(output).toContain("unavailable: no searches yet");
+          expect(output).not.toContain("(0%)");
+          expect(output).not.toContain("Token savings");
+          const reads = requests.filter(({ url }) =>
+            url.pathname === "/agentmemory/sessions" || url.pathname === "/agentmemory/memories");
+          expect(reads).toHaveLength(2);
+          for (const { url, authorization } of reads) {
+            expect(url.searchParams.get("project")).toBe("*");
+            expect(url.searchParams.has("agentId")).toBe(false);
+            expect(authorization).toBe("Bearer fixture-key");
+          }
+          expect(reads.find(({ url }) => url.pathname === "/agentmemory/memories")?.url.searchParams.get("count")).toBe("true");
+          expect(requests.some(({ url }) => url.pathname === "/agentmemory/export")).toBe(false);
+        } finally {
+          clearTimeout(timeout);
+          if (child.pid && child.exitCode === null && child.signalCode === null) {
+            child.kill();
+            await closed.catch(() => undefined);
+          }
+        }
+      }
+    } finally {
+      try {
+        server.closeAllConnections();
+        if (server.listening) {
+          await new Promise<void>((resolve, reject) => {
+            server.close(error => error ? reject(error) : resolve());
+          });
+        }
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    }
+  }, 90000);
 });

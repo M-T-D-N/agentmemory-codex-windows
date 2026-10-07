@@ -354,10 +354,8 @@ export function getAgentId(): string | undefined {
   return loadAgentScope()?.agentId;
 }
 
-// True only when AGENT_ID is set AND scope=isolated. Recall paths
-// consult this to decide whether to filter.
 export function isAgentScopeIsolated(): boolean {
-  return loadAgentScope()?.mode === "isolated";
+  return getMergedEnv()["AGENTMEMORY_AGENT_SCOPE"] === "isolated";
 }
 
 // Floor for the git-snapshot timer. A zero/negative SNAPSHOT_INTERVAL would
@@ -488,10 +486,6 @@ export function getConsolidationCooldownMs(): number {
     CONSOLIDATION_COOLDOWN_DEFAULT_MS,
   );
   return raw >= 0 ? raw : CONSOLIDATION_COOLDOWN_DEFAULT_MS;
-}
-
-export function isStandaloneMcp(): boolean {
-  return getMergedEnv()["STANDALONE_MCP"] === "true";
 }
 
 export function getStandalonePersistPath(): string {

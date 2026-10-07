@@ -30,6 +30,18 @@ function fixture() {
 }
 
 describe("StateModule durability boundaries", () => {
+  it("holds already queued writes after the first durability failure", async () => {
+    const f = fixture(), kv = f.kv();
+    await kv.initializeObservationRecovery();
+    f.failAt(1);
+    const outcomes = await Promise.allSettled(Array.from({ length: 16 }, (_, id) =>
+      kv.set(KV.config, "queued-" + id, { value: id })));
+    expect(outcomes.every(result => result.status === "rejected")).toBe(true);
+    expect(f.trigger.mock.calls.filter(([request]) => request.function_id === "state::set")).toHaveLength(1);
+    expect(kv.requiresWriteRecovery()).toBe(true);
+    expect(f.disk).toHaveLength(0);
+  });
+
   it.each([1, 2, 3, 4, 5, 6, 7])("recovers paged intents after flush %i fails without exposing partial assignments", async boundary => {
     const f = fixture(), kv = f.kv();
     const { plan } = await prepareGraphWritePlan(kv, async store => {

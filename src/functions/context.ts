@@ -4,7 +4,6 @@ import type {
   CompressedObservation,
   SessionSummary,
   ContextBlock,
-  ProjectProfile,
   MemorySlot,
   Lesson,
 } from "../types.js";
@@ -17,8 +16,10 @@ import {
   listPinnedSlots,
   renderPinnedContext,
 } from "./slots.js";
-import { getAgentId, isAgentScopeIsolated } from "../config.js";
-import { isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation } from "./observation-visibility.js";
+import { resolveReadAgentId } from "./read-agent-scope.js";
+import { readCurrentProfile } from "./profile.js";
+import { summarySourceDigest, SUMMARY_VISIBILITY_REVISION } from "./summary-visibility.js";
+import { isCodexInternalAmbientText, isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation } from "./observation-visibility.js";
 import { estimateTextTokens } from "../token-estimate.js";
 import { readArchiveVisibility } from "./archive.js";
 
@@ -55,37 +56,13 @@ export function registerContextFunction(
       const blocks: ContextBlock[] = [];
       const archived = await readArchiveVisibility(kv);
 
-      // Cross-agent isolation for the injected-context path. Mirrors the
-      // filter mem::search / mem::smart-search already apply so /context
-      // cannot leak another profile's sessions. Fail-closed: if isolated
-      // mode is on with no explicit agentId and env AGENT_ID unset, refuse
-      // rather than silently returning cross-agent rows.
-      const isolated = isAgentScopeIsolated();
-      const explicitAgentId =
-        typeof data.agentId === "string" && data.agentId.trim().length > 0
-          ? data.agentId.trim()
-          : undefined;
-      const wildcardAgent = explicitAgentId === "*";
-      const envAgentId = isolated ? getAgentId() : undefined;
-      const filterAgentId = wildcardAgent
-        ? undefined
-        : explicitAgentId ?? envAgentId;
-      if (isolated && !wildcardAgent && !explicitAgentId && !envAgentId) {
-        throw new Error(
-          "mem::context: AGENTMEMORY_AGENT_SCOPE=isolated is set but no " +
-            "agent id is available (env AGENT_ID unset and no explicit " +
-            "agentId in the call). Refusing to read cross-agent rows. " +
-            'Pass agentId: "*" to opt in to a wildcard read.',
-        );
-      }
+      const filterAgentId = resolveReadAgentId(data.agentId, "mem::context");
 
       const [pinnedSlots, profile, lessons] = await Promise.all([
         isSlotsEnabled()
           ? listPinnedSlots(kv).catch(() => [] as MemorySlot[])
           : Promise.resolve([] as MemorySlot[]),
-        kv
-          .get<ProjectProfile>(KV.profiles, data.project)
-          .catch(() => null),
+        readCurrentProfile(kv, data.project, filterAgentId),
         kv.list<Lesson>(KV.lessons).catch(() => [] as Lesson[]),
       ]);
 
@@ -184,39 +161,25 @@ export function registerContextFunction(
         .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
         .slice(0, 10);
 
-      const summariesPerSession = await Promise.all(
-        sessions.map((s) =>
-          archived.hasArchivedObservations(s.id) ? Promise.resolve(null) : kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
-        ),
-      );
-
+      const sessionRows = await Promise.all(sessions.map(async session => ({
+        summary: await kv.get<SessionSummary>(KV.summaries, session.id).catch(() => null),
+        raw: await kv.list<CompressedObservation>(KV.observations(session.id)),
+      })));
+      const obsResults = sessionRows.map(({raw}, i) => raw.map(sanitizeCodexAmbientObservation).filter((o): o is CompressedObservation => o !== null && !archived({ kind: "observation", id: o.id, sessionId: sessions[i].id }) && (filterAgentId === undefined || o.agentId === filterAgentId)));
       const sessionsNeedingObs: number[] = [];
       for (let i = 0; i < sessions.length; i++) {
-        const summary = summariesPerSession[i];
-        if (summary) {
+        const summary = sessionRows[i].summary;
+        const observations = obsResults[i];
+        const summaryText = summary && [summary.keyDecisions, summary.filesModified, summary.concepts].every(Array.isArray) ? [summary.title, summary.narrative, ...summary.keyDecisions, ...summary.filesModified, ...summary.concepts] : null;
+        if (summary && summaryText && summary.sessionId === sessions[i].id && summary.project === data.project && summary.visibilityRevision === SUMMARY_VISIBILITY_REVISION && summary.sourceDigest === summarySourceDigest(observations) && summary.observationCount === observations.filter(o => !!o.title).length && !archived.hasArchivedObservations(sessions[i].id) && summaryText.every(text => typeof text === "string" && !isCodexInternalAmbientText(text))) {
           const content = `## ${summary.title}\n${summary.narrative}\nDecisions: ${summary.keyDecisions.join("; ")}\nFiles: ${summary.filesModified.join(", ")}`;
-          blocks.push({
-            type: "summary",
-            content,
-            tokens: estimateTextTokens(content),
-            recency: new Date(summary.createdAt).getTime(),
-          });
-        } else {
-          sessionsNeedingObs.push(i);
-        }
+          blocks.push({ type: "summary", content, tokens: estimateTextTokens(content), recency: new Date(summary.createdAt).getTime() });
+        } else sessionsNeedingObs.push(i);
       }
-
-      const obsResults = await Promise.all(
-        sessionsNeedingObs.map((i) =>
-          kv
-            .list<CompressedObservation>(KV.observations(sessions[i].id))
-            .catch(() => []),
-        ),
-      );
 
       for (let j = 0; j < sessionsNeedingObs.length; j++) {
         const i = sessionsNeedingObs[j];
-        const observations = obsResults[j];
+        const observations = obsResults[i];
         const important = observations
           .map((observation) => sanitizeCodexAmbientObservation(observation))
           .filter(

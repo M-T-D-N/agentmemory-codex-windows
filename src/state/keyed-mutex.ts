@@ -16,3 +16,16 @@ export function withKeyedLock<T>(
   });
   return next;
 }
+
+export function keyedLockBusy(key: string): boolean {
+  return locks.has(key);
+}
+
+export async function tryWithKeyedLock<T>(
+  key: string,
+  fn: () => Promise<T>,
+): Promise<{ acquired: false } | { acquired: true; value: T }> {
+  if (keyedLockBusy(key)) return { acquired: false };
+  const value = await withKeyedLock(key, fn);
+  return { acquired: true, value };
+}

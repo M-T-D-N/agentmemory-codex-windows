@@ -1,8 +1,9 @@
-import type { Session } from "../types.js";
+import type { CompressedObservation, Session } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import {
   isExcludedCodexAmbientSession,
+  sanitizeCodexProcessingObservation,
 } from "./observation-visibility.js";
 import { readVisibleObservation } from "./observation-access.js";
 
@@ -51,8 +52,10 @@ async function requireObservation(
   kv: StateKV,
   sessionId: string,
   observationId: string,
+  visibility: "retrieval" | "graph_processing",
 ): Promise<void> {
-  const observation = await readVisibleObservation(kv, sessionId, observationId);
+  const raw = visibility === "graph_processing" ? await kv.get<CompressedObservation>(KV.observations(sessionId), observationId) : null;
+  const observation = visibility === "graph_processing" ? (raw?.id === observationId && raw.sessionId === sessionId ? sanitizeCodexProcessingObservation(raw) : null) : await readVisibleObservation(kv, sessionId, observationId);
   if (!observation) {
     throw new Error(`unknown source observation: ${observationId}`);
   }
@@ -70,6 +73,7 @@ export async function validateObservationProvenance(
     sources?: ObservationSourceInput[];
     sourceObservationIds?: string[];
   },
+  visibility: "retrieval" | "graph_processing" = "retrieval",
 ): Promise<ValidatedObservationProvenance> {
   const project = input.project.trim();
   if (!project || project === "*" || project.length > 512) {
@@ -116,7 +120,7 @@ export async function validateObservationProvenance(
       throw new Error("each source.observationIds must contain at least one ID");
     }
     await Promise.all(
-      ids.map((observationId) => requireObservation(kv, sessionId, observationId)),
+      ids.map((observationId) => requireObservation(kv, sessionId, observationId, visibility)),
     );
     sourceObservationIds.push(...ids);
     sourceSessionIds.push(sessionId);

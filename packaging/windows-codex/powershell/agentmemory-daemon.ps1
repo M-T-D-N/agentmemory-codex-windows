@@ -633,6 +633,12 @@ function Write-RuntimeState {
         [string]$ErrorMessage,
         [string]$TerminalReason
     )
+    if ($Status -eq 'failed' -and -not $EngineIdentity -and -not $WorkerIdentity -and (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        $previousState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+        if (-not (Test-AgentMemoryRecordedRunExited -RuntimeState $previousState -Probe { param($id) Get-AgentMemoryProcessIdentity -ProcessId $id })) {
+            return
+        }
+    }
     $daemonProcess = Get-Process -Id $PID -ErrorAction Stop
     $state = [ordered]@{
         schema_version = 1
@@ -728,7 +734,12 @@ try {
     $engineLaunch = $engineStart.Launch
     $engineIdentity = $engineStart.Identity
     # Loading a large persisted state can exceed 20 seconds on a cold start.
-    Wait-Condition -Condition { -not $engine.HasExited -and (Test-EngineReady -EnginePid $engine.Id) } -TimeoutSeconds 60 -FailureMessage 'The iii engine did not become loopback-ready.'
+    Wait-Condition -Condition {
+        if ($engine.HasExited) {
+            throw "The iii engine exited during startup with code $($engine.ExitCode). Engine logs: '$engineOut', '$engineErr'."
+        }
+        return Test-EngineReady -EnginePid $engine.Id
+    } -TimeoutSeconds 300 -FailureMessage 'The iii engine did not become loopback-ready.'
 
     $previousDiagnosticsFile = [Environment]::GetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_FILE', 'Process')
     $previousDiagnosticsRun = [Environment]::GetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_RUN_ID', 'Process')
@@ -750,7 +761,15 @@ try {
     $worker = $workerStart.Process
     $workerLaunch = $workerStart.Launch
     $workerIdentity = $workerStart.Identity
-    Wait-Condition -Condition { -not $worker.HasExited -and (Test-ServiceReady -EnginePid $engine.Id -WorkerPid $worker.Id) } -TimeoutSeconds 30 -FailureMessage 'AgentMemory did not become authenticated and loopback-ready.'
+    Wait-Condition -Condition {
+        if ($engine.HasExited) {
+            throw "The iii engine exited during worker startup with code $($engine.ExitCode). Engine logs: '$engineOut', '$engineErr'."
+        }
+        if ($worker.HasExited) {
+            throw "AgentMemory worker exited during startup with code $($worker.ExitCode). Worker logs: '$workerOut', '$workerErr'."
+        }
+        return Test-ServiceReady -EnginePid $engine.Id -WorkerPid $worker.Id
+    } -TimeoutSeconds 180 -FailureMessage 'AgentMemory did not become authenticated and loopback-ready.'
     Write-RuntimeState -Status 'active' -EngineIdentity $engineIdentity -WorkerIdentity $workerIdentity
 
     $consumerAbsentSince = $null
@@ -850,7 +869,7 @@ finally {
     if ($engineLaunch -and $engine -and $engine.HasExited) {
         $engineLaunch.Dispose()
     }
-    if ($engineIdentity -or $workerIdentity) {
+    if ($engineIdentity -or $workerIdentity -or $terminalStatus -eq 'failed') {
         Write-RuntimeState -Status $terminalStatus -EngineIdentity $engineIdentity -WorkerIdentity $workerIdentity -ErrorMessage $terminalError -TerminalReason $terminalReason
     }
     if (Test-Path -LiteralPath $stopPath -PathType Leaf) {

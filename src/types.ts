@@ -266,6 +266,8 @@ export interface Memory {
 }
 
 export interface SessionSummary {
+  visibilityRevision?: number;
+  sourceDigest?: string;
   sessionId: string;
   project: string;
   createdAt: string;
@@ -472,6 +474,8 @@ export interface ProjectProfile {
   project: string;
   updatedAt: string;
   visibilityRevision?: number;
+  sourceDigest?: string;
+  agentId?: string;
   topConcepts: Array<{ concept: string; frequency: number }>;
   topFiles: Array<{ file: string; frequency: number }>;
   conventions: string[];
@@ -541,12 +545,6 @@ export interface ClaudeBridgeConfig {
   projectPath: string;
   memoryFilePath: string;
   lineBudget: number;
-}
-
-export interface StandaloneConfig {
-  dataDir: string;
-  persistPath: string;
-  agentType?: string;
 }
 
 export type GraphNodeType =
@@ -709,12 +707,6 @@ export interface GraphSnapshot {
   resetAt?: string;
 }
 
-export type ConsolidationTier =
-  | "working"
-  | "episodic"
-  | "semantic"
-  | "procedural";
-
 export interface SemanticMemory {
   id: string;
   fact: string;
@@ -751,11 +743,6 @@ export interface TeamConfig {
 }
 
 export type AgentScopeMode = "shared" | "isolated";
-export interface AgentScope {
-  agentId: string;
-  mode: AgentScopeMode;
-}
-
 export interface TeamSharedItem {
   id: string;
   sharedBy: string;
@@ -861,13 +848,6 @@ export interface SnapshotMeta {
     memories: number;
     graphNodes: number;
   };
-}
-
-export interface SnapshotDiff {
-  fromCommit: string;
-  toCommit: string;
-  added: { memories: number; observations: number; graphNodes: number };
-  removed: { memories: number; observations: number; graphNodes: number };
 }
 
 export interface Action {
@@ -1096,36 +1076,11 @@ export interface EnrichedChunk {
   createdAt: string;
 }
 
-export interface LatentEmbedding {
-  obsId: string;
-  contentEmbedding: string;
-  latentEmbedding: string;
-  sessionId: string;
-}
-
 export interface QueryExpansion {
   original: string;
   reformulations: string[];
   temporalConcretizations: string[];
   entityExtractions: string[];
-}
-
-export interface TripleStreamResult {
-  observation: CompressedObservation;
-  vectorScore: number;
-  bm25Score: number;
-  graphScore: number;
-  combinedScore: number;
-  sessionId: string;
-  graphContext?: string;
-}
-
-export interface TemporalQuery {
-  entityName: string;
-  asOf?: string;
-  from?: string;
-  to?: string;
-  includeHistory?: boolean;
 }
 
 export interface TemporalState {

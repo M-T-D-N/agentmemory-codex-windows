@@ -62,7 +62,9 @@ export class HybridSearch {
     ];
 
     const resultSets = await Promise.all(
-      allQueries.map((q) => this.tripleStreamSearch(q, limit, allEntities)),
+      allQueries.map((q) => this.tripleStreamSearch(
+        q, limit, allEntities, undefined, undefined, expansion.entityExtractions.length > 0,
+      )),
     );
 
     const merged = new Map<string, HybridSearchResult>();
@@ -94,62 +96,63 @@ export class HybridSearch {
     entityHints?: string[],
     selection?: SearchCandidateSelection,
     policy?: AutomaticRetrievalPolicy,
+    hasExplicitEntityHints = false,
   ): Promise<HybridSearchResult[]> {
     const fetchDepth = Math.max(limit * 5, 50);
+    const entities = entityHints?.length ? entityHints : extractEntitiesFromQuery(query);
+    const graphEnabled = !policy && this.graphWeight > 0;
     const bm25Candidates = this.bm25.search(query, selection ? this.bm25.size : fetchDepth);
-    const bm25Results = selection ? await selection.select(bm25Candidates, fetchDepth) : bm25Candidates;
-
-    let vectorResults: Array<{
-      obsId: string;
-      sessionId: string;
-      score: number;
-    }> = [];
-    let queryEmbedding: Float32Array | null = null;
 
     if (policy) policy.channels.graph = "skipped-automatic";
     const vectorEligible = this.vector && this.embeddingProvider && this.vector.size > 0;
     if (policy) policy.channels.vector = !vectorEligible ? "unavailable" : this.vector!.size > policy.maxVectorScan ? "skipped-scan-bound" : "available";
-    if (vectorEligible && (!policy || this.vector!.size <= policy.maxVectorScan)) {
-      try {
-        queryEmbedding = await this.embeddingProvider!.embed(query);
-        vectorResults = this.vector!.search(queryEmbedding, selection ? this.vector!.size : fetchDepth);
-      } catch {
-        if (policy) policy.channels.vector = "failed";
-        // fall through to BM25-only
-      }
-    }
-    if (selection) vectorResults = await selection.select(vectorResults, fetchDepth);
 
-    const entities =
-      entityHints && entityHints.length > 0
-        ? entityHints
-        : extractEntitiesFromQuery(query);
-    let graphResults: GraphRetrievalResult[] = [];
-    const graphEnabled = !policy && this.graphWeight > 0;
-    if (graphEnabled && entities.length > 0) {
-      try {
-        graphResults = await this.graphRetrieval.searchByEntities(
-          entities,
-          2,
-          selection ? Number.MAX_SAFE_INTEGER : limit,
-          selection?.project,
-        );
-      } catch {
-        // graph search is best-effort
-      }
-    }
-    if (selection) graphResults = await selection.select(graphResults, limit);
+    const keywordDepth = selection?.resolve && !vectorEligible && (!graphEnabled || entities.length === 0) && (policy || !this.rerankEnabled)
+      ? limit : fetchDepth;
+    const [bm25Results, vectorResults, entityGraphResults] = await Promise.all([
+      selection ? selection.select(bm25Candidates, keywordDepth) : Promise.resolve(bm25Candidates),
+      (async () => {
+        let rows: Array<{ obsId: string; sessionId: string; score: number }> = [];
+        if (vectorEligible && (!policy || this.vector!.size <= policy.maxVectorScan)) {
+          try {
+            const embedding = await this.embeddingProvider!.embed(query);
+            rows = this.vector!.search(embedding, selection ? this.vector!.size : fetchDepth);
+          } catch {
+            if (policy) policy.channels.vector = "failed";
+          }
+        }
+        return selection ? selection.select(rows, fetchDepth) : rows;
+      })(),
+      (async () => {
+        let rows: GraphRetrievalResult[] = [];
+        if (graphEnabled && entities.length > 0) {
+          try {
+            rows = await this.graphRetrieval.searchByEntities(
+              entities, 2, selection ? Number.MAX_SAFE_INTEGER : limit,
+              selection?.project, selection?.readSession,
+            );
+          } catch {
+            // graph search is best-effort
+          }
+        }
+        return selection ? selection.select(rows, limit, id => this.bm25.getSessionId(id)) : rows;
+      })(),
+    ]);
+    let graphResults = entityGraphResults;
 
+    let graphExpansionMatched = false;
     const topVectorObs = vectorResults.slice(0, 5).map((r) => r.obsId);
     if (graphEnabled && topVectorObs.length > 0) {
       let expansionResults: GraphRetrievalResult[] = [];
       try {
         expansionResults =
-          await this.graphRetrieval.expandFromChunks(topVectorObs, 1, selection ? Number.MAX_SAFE_INTEGER : 5, selection?.project);
+          await this.graphRetrieval.expandFromChunks(topVectorObs, 1, selection ? Number.MAX_SAFE_INTEGER : 5, selection?.project, selection?.readSession);
       } catch {
         // expansion is best-effort
       }
-      graphResults = [...graphResults, ...(selection ? await selection.select(expansionResults, 5) : expansionResults)];
+      const selectedExpansion = selection ? await selection.select(expansionResults, 5, id => this.bm25.getSessionId(id)) : expansionResults;
+      graphExpansionMatched = selectedExpansion.length > 0;
+      graphResults = [...graphResults, ...selectedExpansion];
     }
 
     const scores = new Map<
@@ -221,16 +224,24 @@ export class HybridSearch {
     // Normalize once per query by the best attainable weighted score over
     // the streams that produced results, so configured stream weights
     // survive for single-stream hits and a silent stream carries no penalty.
+    const queryTerms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_./\\-]+/gu) ?? [])];
+    const entityTerms = new Set(entities.flatMap(entity =>
+      entity.toLowerCase().match(/[\p{L}\p{N}_./\\-]+/gu) ?? []));
+    const entityCoverage = queryTerms.length > 0
+      ? queryTerms.filter(term => entityTerms.has(term)).length / queryTerms.length : 0;
+    const graphQueryWeight = this.graphWeight * (
+      graphExpansionMatched || hasExplicitEntityHints ? 1 : entityCoverage
+    );
     const AGREEMENT_BONUS = 0.05;
     const activeWeight =
       (bm25Results.length > 0 ? this.bm25Weight : 0) +
       (vectorResults.length > 0 ? this.vectorWeight : 0) +
-      (graphResults.length > 0 ? this.graphWeight : 0);
+      (graphResults.length > 0 ? graphQueryWeight : 0);
     const maxAttainable = activeWeight * (1 / (RRF_K + 1));
     const ranked = Array.from(scores.entries()).map(([obsId, s]) => {
       const wB = Number.isFinite(s.bm25Rank) ? this.bm25Weight : 0;
       const wV = Number.isFinite(s.vectorRank) ? this.vectorWeight : 0;
-      const wG = Number.isFinite(s.graphRank) ? this.graphWeight : 0;
+      const wG = Number.isFinite(s.graphRank) ? graphQueryWeight : 0;
       const matchedStreams =
         (wB > 0 ? 1 : 0) + (wV > 0 ? 1 : 0) + (wG > 0 ? 1 : 0);
       const weighted =
@@ -263,8 +274,8 @@ export class HybridSearch {
     }));
 
     const rerankWindow = 20;
-    const diversified = this.diversifyBySession(combined, combined.length);
-    const enriched = await this.enrichResults(diversified, combined.length);
+    const enrichmentLimit = !policy && this.rerankEnabled ? Math.max(limit, rerankWindow) : limit;
+    const enriched = await this.enrichResults(combined, enrichmentLimit, selection);
 
     if (!policy && this.rerankEnabled && enriched.length > 1) {
       try {
@@ -280,42 +291,6 @@ export class HybridSearch {
     return enriched.slice(0, limit);
   }
 
-  private diversifyBySession(
-    results: Array<{
-      obsId: string;
-      sessionId: string;
-      bm25Score: number;
-      vectorScore: number;
-      graphScore: number;
-      combinedScore: number;
-      graphContext?: string;
-    }>,
-    limit: number,
-    maxPerSession = 3,
-  ): typeof results {
-    const selected: typeof results = [];
-    const sessionCounts = new Map<string, number>();
-
-    for (const r of results) {
-      const count = sessionCounts.get(r.sessionId) || 0;
-      if (count >= maxPerSession) continue;
-      selected.push(r);
-      sessionCounts.set(r.sessionId, count + 1);
-      if (selected.length >= limit) break;
-    }
-
-    if (selected.length < limit) {
-      for (const r of results) {
-        if (selected.length >= limit) break;
-        if (!selected.some(s => s.obsId === r.obsId)) {
-          selected.push(r);
-        }
-      }
-    }
-
-    return selected;
-  }
-
   private async enrichResults(
     results: Array<{
       obsId: string;
@@ -327,38 +302,37 @@ export class HybridSearch {
       graphContext?: string;
     }>,
     limit: number,
+    selection?: SearchCandidateSelection,
   ): Promise<HybridSearchResult[]> {
-    const sliced = results.slice(0, limit);
-    const observations: Array<CompressedObservation | null> = [];
-    for (let offset = 0; offset < sliced.length; offset += 8) {
-      observations.push(...await Promise.all(sliced.slice(offset, offset + 8).map(async (r) => {
+    const enriched: HybridSearchResult[] = [];
+    for (let offset = 0; offset < results.length && enriched.length < limit;) {
+      const batch = results.slice(offset, offset + Math.min(8, limit - enriched.length));
+      offset += batch.length;
+      const observations = await Promise.all(batch.map(async (r) => {
+        if (selection?.resolve) return (await selection.resolve(r))?.observation ?? null;
         const obs = await this.kv
           .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
           .catch(() => null);
         if (obs) return obs;
-        // Fallback: indexed entry may originate from mem::remember, which
-        // writes to KV.memories with a synthetic sessionId ("memory" or the
-        // memory's first associated session). Coerce the Memory record into
-        // a CompressedObservation so search/recall surface saved memories.
+        // Saved memories use a synthetic observation location in the index.
         const mem = await this.kv
           .get<Memory>(KV.memories, r.obsId)
           .catch(() => null);
         return mem && mem.isLatest !== false ? memoryToObservation(mem) : null;
-      })));
-    }
-    const enriched: HybridSearchResult[] = [];
-    for (let i = 0; i < sliced.length; i++) {
-      const obs = observations[i];
-      if (obs) {
-        enriched.push({
-          observation: obs,
-          bm25Score: sliced[i].bm25Score,
-          vectorScore: sliced[i].vectorScore,
-          graphScore: sliced[i].graphScore,
-          combinedScore: sliced[i].combinedScore,
-          sessionId: sliced[i].sessionId,
-          graphContext: sliced[i].graphContext,
-        });
+      }));
+      for (let i = 0; i < batch.length; i++) {
+        const obs = observations[i];
+        if (obs) {
+          enriched.push({
+            observation: obs,
+            bm25Score: batch[i].bm25Score,
+            vectorScore: batch[i].vectorScore,
+            graphScore: batch[i].graphScore,
+            combinedScore: batch[i].combinedScore,
+            sessionId: batch[i].sessionId,
+            graphContext: batch[i].graphContext,
+          });
+        }
       }
     }
     return enriched;

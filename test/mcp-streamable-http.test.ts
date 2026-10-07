@@ -1,5 +1,6 @@
 import { startOnFetchPort } from "./helpers/http-port.js";
 import { createHash } from "node:crypto";
+import { Agent, request } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   deriveMcpHttpAccessToken,
@@ -69,6 +70,35 @@ describe("AgentMemory Streamable HTTP security", () => {
     });
     expect(rawSecret.status).toBe(401);
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("does not leave a loopback connection available for client reuse", async () => {
+    const { server } = await start();
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    const read = () => new Promise<boolean>((resolve, reject) => {
+      const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" });
+      const call = request(server.resourceUrl, {
+        agent,
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${deriveMcpHttpAccessToken(secret)}`,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+        },
+      }, response => {
+        response.resume();
+        response.once("end", () => resolve(call.reusedSocket));
+        response.once("error", reject);
+      });
+      call.once("error", reject);
+      call.end(body);
+    });
+    try {
+      expect(await read()).toBe(false);
+      expect(await read()).toBe(false);
+    } finally {
+      agent.destroy();
+    }
   });
 
   it("serves authenticated JSON-RPC requests and suppresses notification responses", async () => {

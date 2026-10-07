@@ -1,5 +1,5 @@
 import type { Session } from "../types.js";
-import { getAgentId, isAgentScopeIsolated } from "../config.js";
+import { resolveReadAgentId } from "./read-agent-scope.js";
 import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
 import type { ArchiveVisibility } from "./archive.js";
 
@@ -46,9 +46,7 @@ export function parseSessionQuery(args: Record<string, unknown>): SessionQuery |
 }
 
 export function selectSessionPage(sessions: Session[], query: SessionQuery, archived?: ArchiveVisibility) {
-  const agent = query.agentId?.trim();
-  const filterAgent = agent === "*" ? undefined : agent ||
-    (isAgentScopeIsolated() ? getAgentId() : undefined);
+  const filterAgent = resolveReadAgentId(query.agentId, "mem::sessions");
   const filtered = sessions
     .filter(s => s && typeof s.id === "string" && !!s.id.trim()
       && typeof s.project === "string" && !!s.project.trim())

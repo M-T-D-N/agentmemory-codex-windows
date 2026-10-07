@@ -33,6 +33,34 @@ function fixture() {
 }
 
 describe("scope before retrieval candidate limits", () => {
+  it("uses verified indexed locations for shared graph provenance while retaining stale-hint fallback", async () => {
+    const { kv, session, obs, reads } = fixture();
+    const sources = Array.from({ length: 40 }, (_, i) => "source-" + i);
+    for (const id of sources) await kv.set(KV.sessions, id, session(id, "own"));
+    const owner = sources.at(-1)!;
+    const assistant = obs("assistant", owner, "agent", "assistant_response");
+    const user = obs("user", owner, "agent", "prompt_submit");
+    await kv.set(KV.observations(owner), assistant.id, assistant);
+    await kv.set(KV.observations(owner), user.id, user);
+    const candidates = [assistant, user].map(row => ({ obsId: row.id, sessionId: "", sourceSessionIds: sources }));
+    const selector = createSearchCandidateSelection(kv as never, { project: "own", sourceKind: "user" });
+    expect((await selector.select(candidates, 1, () => owner)).map(row => row.obsId)).toEqual([user.id]);
+    expect(reads()).toBe(2);
+    const stale = createSearchCandidateSelection(kv as never, { project: "own", sourceKind: "user" });
+    expect((await stale.select([candidates[1]], 1, () => sources[0])).map(row => row.obsId)).toEqual([user.id]);
+    const outside = createSearchCandidateSelection(kv as never, { project: "own", sourceKind: "user" });
+    expect((await outside.select([candidates[1]], 1, () => "unrelated")).map(row => row.obsId)).toEqual([user.id]);
+    const index = new SearchIndex(); index.add(assistant); index.add(user);
+    await kv.set(KV.graphNodes, "shared", { id: "shared", name: "AuthService", type: "concept", project: "own",
+      sourceObservationIds: [assistant.id, user.id], sourceSessionIds: sources, properties: {}, createdAt: user.timestamp });
+    const read = vi.spyOn(kv, "get");
+    const hybrid = new HybridSearch(index, null, null, kv as never);
+    const result = await hybrid.search("AuthService", 1, createSearchCandidateSelection(kv as never, { project: "own", sourceKind: "user" }));
+    expect(result.map(row => row.observation.id)).toEqual([user.id]);
+    expect(result[0].graphScore).toBeGreaterThan(0);
+    expect(read.mock.calls.filter(([scope]) => scope.startsWith("mem:obs:"))).toHaveLength(2);
+  });
+
   it("retrieves original user requirements below assistant summaries without changing ordinary recall", async () => {
     const { kv, session, obs } = fixture();
     await kv.set(KV.sessions, "legacy", session("legacy", "legacy-space"));
@@ -152,4 +180,102 @@ describe("scope before retrieval candidate limits", () => {
     expect(await selector.select(candidates, 1)).toEqual([]);
     expect(reads()).toBe(count);
   });
+  it("reuses verified observations and session metadata through hybrid and final loading only within one request", async () => {
+    const { kv, session, obs } = fixture();
+    await kv.set(KV.sessions, "own", session("own", "own"));
+    const index = getSearchIndex();
+    const vector = new VectorIndex();
+    for (let i = 0; i < 10; i++) {
+      const row = obs("shared-" + i, "own", "agent", "auth");
+      index.add(row); vector.add(row.id, row.sessionId, new Float32Array([1, 0]));
+      await kv.set(KV.observations("own"), row.id, row);
+    }
+    const read = vi.spyOn(kv, "get");
+    const list = vi.spyOn(kv, "list");
+    const hybrid = new HybridSearch(index, vector, { embed: async () => new Float32Array([1, 0]) } as never, kv as never, 0.4, 0.6, 0, false);
+    const handlers = new Map<string, Function>();
+    registerSearchFunction({ registerFunction(id: string, fn: Function) { handlers.set(id, fn); } } as never, kv as never);
+    setHybridRanker((query, limit, selection) => hybrid.search(query, limit, selection));
+    const search = handlers.get("mem::search")!;
+    const input = { query: "auth", project: "own", limit: 3, trackAccess: false };
+    expect((await search(input)).results).toHaveLength(3);
+    expect(read.mock.calls.filter(([scope]) => scope.startsWith("mem:obs:"))).toHaveLength(10);
+    expect(read.mock.calls.filter(([scope]) => scope === KV.sessions)).toHaveLength(0);
+    expect(list.mock.calls.filter(([scope]) => scope === KV.sessions)).toHaveLength(1);
+    expect((await search(input)).results).toHaveLength(3);
+    expect(read.mock.calls.filter(([scope]) => scope.startsWith("mem:obs:"))).toHaveLength(20);
+    expect(list.mock.calls.filter(([scope]) => scope === KV.sessions)).toHaveLength(2);
+    await kv.set(KV.memories, "saved-memory", {
+      id: "saved-memory", agentId: "agent", project: "memory-owner", sessionIds: ["own"],
+      createdAt: "2026-09-13T00:00:00Z", updatedAt: "2026-09-13T00:00:00Z",
+      type: "fact", title: "saved", content: "saved canonical content", concepts: [], files: [],
+      strength: 1, version: 1, isLatest: true,
+    });
+    index.add(obs("saved-memory", "own", "agent", "saved"));
+    const saved = await search({ query: "saved", project: "memory-owner", agentId: "agent", limit: 1, trackAccess: false });
+    expect(saved.results.map((row: any) => [row.observation.narrative, row.sessionId, row.project]))
+      .toEqual([["saved canonical content", "own", "memory-owner"]]);
+    expect(read.mock.calls.filter(([scope]) => scope.startsWith("mem:obs:") || scope === KV.memories || scope === KV.sessions)).toHaveLength(20);
+
+  });
+
+  it("never reuses a ranker's unverified body or a mismatched candidate location", async () => {
+    const { kv, session, obs, reads } = fixture();
+    await kv.set(KV.sessions, "own", session("own", "own"));
+    const row = obs("original", "own", "agent", "prompt_submit");
+    await kv.set(KV.observations("own"), row.id, row);
+    const selector = createSearchCandidateSelection(kv as never, { project: "own" });
+    const selected = await selector.select([{ obsId: row.id, sessionId: "", sourceSessionIds: ["missing", "own"] }], 1, () => "own");
+    const count = reads();
+    expect((await selector.resolve({ obsId: row.id, sessionId: "own" }))?.observation).toEqual(row);
+    expect(reads()).toBe(count);
+    expect(await selector.resolve({ obsId: row.id, sessionId: "missing" })).toBeNull();
+    expect(selected[0].sessionId).toBe("own");
+    const handlers = new Map<string, Function>();
+    registerSearchFunction({ registerFunction(id: string, fn: Function) { handlers.set(id, fn); } } as never, kv as never);
+    getSearchIndex().add(row);
+    const search = handlers.get("mem::search")!;
+    const input = { query: "prompt_submit", project: "own", sourceKind: "user", trackAccess: false };
+    setHybridRanker(async () => [{ observation: { ...row, narrative: "forged" }, sessionId: "own", combinedScore: 1 }]);
+    expect((await search(input)).results[0].observation.narrative).toBe(row.narrative);
+    setHybridRanker(async () => [{ observation: row, sessionId: "missing", combinedScore: 1 }]);
+    expect((await search(input)).results).toEqual([]);
+    await kv.set(KV.observations("own"), row.id, { ...row, sessionId: "unrelated" });
+    setHybridRanker(async () => [{ observation: row, sessionId: "own", combinedScore: 1 }]);
+    expect((await search(input)).results).toEqual([]);
+    await kv.set(KV.observations("own"), row.id, { ...row, emptyDeletion: { state: "deleted" } });
+    expect((await search(input)).results).toEqual([]);
+  });
+
+  it("reuses selector session metadata in entity retrieval and vector graph expansion", async () => {
+    const { kv, session, obs } = fixture();
+    await kv.set(KV.sessions, "own", session("own", "own"));
+    await kv.set(KV.sessions, "ambient", { ...session("ambient", "own"), captureExcluded: true });
+    const seed = obs("seed", "own", "agent");
+    const related = obs("related", "own", "agent", "different words");
+    const hidden = obs("hidden", "ambient", "agent", "different words");
+    for (const row of [seed, related, hidden]) await kv.set(KV.observations(row.sessionId), row.id, row);
+    for (const [id, name, row] of [["start", "AuthService", seed], ["related", "Neighbor", related], ["hidden", "Private", hidden]] as const) {
+      await kv.set(KV.graphNodes, id, { id, name, type: "concept", project: "own", sourceObservationIds: [row.id],
+        sourceSessionIds: [row.sessionId], properties: {}, createdAt: seed.timestamp });
+    }
+    for (const id of ["related", "hidden"]) await kv.set(KV.graphEdges, id, {
+      id, type: "related_to", project: "own", sourceNodeId: "start", targetNodeId: id, weight: 0.8, isLatest: true,
+      sourceObservationIds: [seed.id], sourceSessionIds: ["own"], createdAt: seed.timestamp,
+    });
+    const index = new SearchIndex(); index.add(seed);
+    const vector = new VectorIndex(); vector.add(seed.id, seed.sessionId, new Float32Array([1, 0]));
+    const read = vi.spyOn(kv, "get");
+    const list = vi.spyOn(kv, "list");
+    const hybrid = new HybridSearch(index, vector, { embed: async () => new Float32Array([1, 0]) } as never, kv as never, 0.4, 0.6, 0.3, false);
+    const selection = createSearchCandidateSelection(kv as never, { project: "own" });
+    const results = await hybrid.search("AuthService", 5, selection);
+    expect(results.map(row => row.observation.id)).toEqual(["seed", "related"]);
+    expect(read.mock.calls.filter(([scope]) => scope === KV.sessions)).toHaveLength(0);
+    expect(list.mock.calls.filter(([scope]) => scope === KV.sessions)).toHaveLength(1);
+    expect(list.mock.calls.filter(([scope]) => scope === KV.graphEdges)).toHaveLength(2);
+    expect(await selection.readSession!("absent")).toBeNull();
+    expect(list.mock.calls.filter(([scope]) => scope === KV.sessions)).toHaveLength(1);
+  });
+
 });

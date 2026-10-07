@@ -24,6 +24,7 @@ export class StateKV {
   private recoveryUncertain = false
   private graphPlanReady?: Promise<void>
   private graphPlanPending = false
+  private mutationQueue: Promise<void> = Promise.resolve()
   constructor(private sdk: ISdk, private options: { requireDurability?: boolean } = {}) {}
 
   async flush(): Promise<void> {
@@ -92,9 +93,41 @@ export class StateKV {
 
   assertRecoveryImportAllowed(value: unknown, replace = false): void {
     if (replace && this.recoveryRows.size) throw new Error('Replace import would erase recoverable observations')
-    const protectedIds = new Set([...this.recoveryRows.keys(), ...[...this.recoveryRows.values()].map(row => row.sessionId)])
+    const protectedSessions = new Set([...this.recoveryRows.values()].map(row => row.sessionId))
+    const protectedIds = new Set([...this.recoveryRows.keys(), ...protectedSessions])
+    const memoryProvenanceArrays = new WeakMap<object, 'sessionIds' | 'sourceObservationIds'>()
+    if (value && typeof value === 'object' && Array.isArray((value as Row).memories)) {
+      for (const memory of (value as Row).memories) {
+        if (!memory || typeof memory !== 'object') continue
+        for (const field of ['sessionIds', 'sourceObservationIds'] as const) {
+          if (Array.isArray(memory[field])) memoryProvenanceArrays.set(memory[field], field)
+        }
+      }
+    }
     const visit = (item: unknown): void => {
-      if (typeof item === 'string' && protectedIds.has(item)) throw new Error('Import targets a protected observation or session; use the empty observation lifecycle')
+      if (typeof item === 'string') {
+        if (!protectedIds.has(item)) return
+        const recoveredObservation = this.recoveryRows.get(item)
+        throw new Error(isDeletedObservation(recoveredObservation)
+          ? 'Cannot reference a deleted observation: ' + item
+          : 'Import targets a protected observation or session; use the empty observation lifecycle')
+      }
+      if (Array.isArray(item)) {
+        const provenanceField = memoryProvenanceArrays.get(item)
+        for (const child of item) {
+          if (typeof child !== 'string' || !protectedIds.has(child)) {
+            visit(child)
+            continue
+          }
+          const recoveredObservation = this.recoveryRows.get(child)
+          if (provenanceField === 'sessionIds' && protectedSessions.has(child)) continue
+          if (provenanceField === 'sourceObservationIds' && recoveredObservation && !isDeletedObservation(recoveredObservation)) continue
+          throw new Error(isDeletedObservation(recoveredObservation)
+            ? 'Cannot reference a deleted observation: ' + child
+            : 'Import targets a protected observation or session; use the empty observation lifecycle')
+        }
+        return
+      }
       if (item && typeof item === 'object') {
         for (const [key, child] of Object.entries(item)) {
           if (key === 'emptyDeletion' || protectedIds.has(key)) throw new Error('Import cannot install or overwrite observation recovery metadata')
@@ -146,7 +179,21 @@ export class StateKV {
     return scope.startsWith(OBS) && !options?.includeDeleted && isDeletedObservation(row) ? null : row ?? null
   }
 
-  private async mutate<T>(functionId: string, payload: { scope: string; [key: string]: unknown }): Promise<T> {
+  private mutate<T>(functionId: string, payload: { scope: string; [key: string]: unknown }): Promise<T> {
+    const run = () => this.mutateNow<T>(functionId, payload)
+    if (!this.options.requireDurability) return run()
+    // Large concurrent writes can stall the managed loopback WebSocket.
+    // Keep its mutation and required disk confirmation in one ordered unit.
+    const pending = this.mutationQueue.then(run)
+    this.mutationQueue = pending.then(() => {}, () => {})
+    return pending
+  }
+
+  private async mutateNow<T>(functionId: string, payload: { scope: string; [key: string]: unknown }): Promise<T> {
+    // A queued write may have passed its guards before an earlier write failed.
+    if (this.options.requireDurability && this.recoveryUncertain) {
+      throw new Error('Observation recovery write outcome is uncertain; verify canonical state and restart the worker before writing')
+    }
     try {
       if (payload.scope === KV.graphWritePlan && payload.key === 'current' && functionId === 'state::delete') await this.flush()
       const result = await this.sdk.trigger<any, T>({ function_id: functionId, payload })

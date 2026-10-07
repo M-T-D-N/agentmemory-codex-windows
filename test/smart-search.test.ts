@@ -5,6 +5,9 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerSmartSearchFunction } from "../src/functions/smart-search.js";
+import { registerMcpEndpoints } from "../src/mcp/server.js";
+import { HybridSearch } from "../src/state/hybrid-search.js";
+import { SearchIndex } from "../src/state/search-index.js";
 import type {
   CompressedObservation,
   HybridSearchResult,
@@ -114,6 +117,91 @@ describe("Smart Search Function", () => {
     registerSmartSearchFunction(sdk as never, kv as never, searchFn);
   });
 
+
+  it("uses canonical compact fields and rejects missing or superseded ranker bodies", async () => {
+    const original = searchResults[0].observation;
+    await kv.set("mem:memories", "superseded", {
+      id: "superseded", project: "my-project", sessionIds: ["ses_1"],
+      createdAt: original.timestamp, updatedAt: original.timestamp, type: "fact",
+      title: "old memory", content: "old memory", concepts: [], files: [],
+      strength: 1, version: 1, isLatest: false,
+    });
+    const forged = { ...searchResults[0], observation: { ...original, title: "forged title", timestamp: "1900-01-01T00:00:00Z" } };
+    searchResults = [
+      forged,
+      { ...forged, observation: { ...original, id: "missing" } },
+      { ...forged, observation: { ...original, id: "superseded" } },
+      searchResults[1],
+    ];
+    const result = await sdk.trigger("mem::smart-search", {
+      query: "auth", project: "my-project", limit: 2, trackAccess: false, includeLessons: false,
+    });
+    expect(result.results.map((row: CompactSearchResult) => row.obsId)).toEqual(["obs_1", "obs_2"]);
+    expect(result.results[0]).toMatchObject({ title: original.title, timestamp: original.timestamp, score: forged.combinedScore });
+    await kv.delete("mem:obs:ses_1", original.id);
+    expect((await sdk.trigger("mem::smart-search", {
+      query: "auth", project: "my-project", limit: 2, trackAccess: false, includeLessons: false,
+    })).results.map((row: CompactSearchResult) => row.obsId)).toEqual(["obs_2"]);
+  });
+
+  it("reuses hybrid canonical reads for a full compact result limit within each request", async () => {
+    const index = new SearchIndex();
+    for (let i = 0; i < 99; i++) {
+      const observation = makeObs({ id: "reuse-" + i, title: "Auth " + i });
+      await kv.set("mem:obs:ses_1", observation.id, observation);
+      index.add(observation);
+    }
+    await kv.set("mem:memories", "saved-memory", {
+      id: "saved-memory", project: "my-project", sessionIds: ["ses_1"],
+      createdAt: "2026-02-01T10:00:00Z", updatedAt: "2026-02-01T10:00:00Z",
+      type: "fact", title: "Auth saved", content: "auth saved original", concepts: [], files: [],
+      strength: 1, version: 1, isLatest: true,
+    });
+    index.add(makeObs({ id: "saved-memory", title: "Auth saved", narrative: "auth saved original" }));
+    const hybrid = new HybridSearch(index, null, null, kv as never, 0.4, 0.6, 0, false);
+    registerSmartSearchFunction(sdk as never, kv as never, (query, limit, selection) => hybrid.search(query, limit, selection));
+    const read = vi.spyOn(kv, "get");
+    const list = vi.spyOn(kv, "list");
+    const input = { query: "auth", project: "my-project", limit: 100, trackAccess: false, includeLessons: false };
+    const result = await sdk.trigger("mem::smart-search", input);
+    expect(result.results).toHaveLength(100);
+    expect(read.mock.calls.filter(([scope]) => scope.startsWith("mem:obs:"))).toHaveLength(99);
+    expect(read.mock.calls.filter(([scope]) => scope === "mem:sessions" || scope === "mem:memories")).toHaveLength(0);
+    for (const scope of ["mem:sessions", "mem:memories", "mem:archive:states"]) {
+      expect(list.mock.calls.filter(([listed]) => listed === scope)).toHaveLength(1);
+    }
+    await kv.set("mem:obs:ses_1", "reuse-0", makeObs({ id: "reuse-0", title: "Updated canonical" }));
+    const next = await sdk.trigger("mem::smart-search", input);
+    expect(next.results.find((row: CompactSearchResult) => row.obsId === "reuse-0").title).toBe("Updated canonical");
+    expect(read.mock.calls.filter(([scope]) => scope.startsWith("mem:obs:"))).toHaveLength(198);
+    expect(read.mock.calls.filter(([scope]) => scope === "mem:sessions" || scope === "mem:memories")).toHaveLength(0);
+  });
+
+  it("reports expansion truncation through MCP and allows the remaining originals to be read", async () => {
+    const ids = Array.from({ length: 25 }, (_, i) => `expanded-${i + 1}`);
+    for (const id of ids) {
+      await kv.set("mem:obs:ses_1", id, makeObs({ id, narrative: `Original ${id}` }));
+    }
+    registerMcpEndpoints(sdk as never, kv as never);
+    const expand = async (selected: string[]) => {
+      const response = await sdk.trigger("mcp::tools::call", {
+        headers: {},
+        body: { name: "memory_smart_search", arguments: {
+          project: "my-project", expandIds: selected.join(","), trackAccess: false,
+        } },
+      });
+      expect(response.status_code).toBe(200);
+      return JSON.parse(response.body.content[0].text);
+    };
+    const first = await expand(ids);
+    expect(first.truncated).toBe(true);
+    expect(first.results.map((r: { obsId: string }) => r.obsId)).toEqual(ids.slice(0, 20));
+    const rest = await expand(ids.slice(20));
+    expect(rest.truncated).toBe(false);
+    expect([...first.results, ...rest.results].map((r: { obsId: string }) => r.obsId)).toEqual(ids);
+    for (const id of ids) expect(await kv.get("mem:access", id)).toBeNull();
+  });
+
   it("exact expansion never enumerates sessions or substitutes a missing source pair", async () => {
     const list = vi.spyOn(kv, "list");
     const result = await sdk.trigger("mem::smart-search", {project:"my-project", expandIds:[{obsId:"obs_1",sessionId:"wrong-session"}],exactExpansion:true,trackAccess:false});
@@ -213,10 +301,26 @@ describe("Smart Search Function", () => {
     expect(result.results.map((entry) => entry.obsId)).toEqual([target.id]);
   });
 
-  it("lists the session scope once when expanding multiple ID-only references", async () => {
+  it("uses indexed session hints and falls back to project-scoped ID expansion", async () => {
+    const session = await kv.get<Session>("mem:sessions", "ses_1");
+    await kv.delete("mem:sessions", "ses_1");
+    await kv.set("mem:sessions", "other", { ...session, id: "other", project: "other-project" });
+    await kv.set("mem:sessions", "ses_1", session);
     const list = vi.spyOn(kv, "list");
+    const hints = new SearchIndex();
+    hints.add((await kv.get("mem:obs:ses_1", "obs_1"))!);
+    hints.add((await kv.get("mem:obs:ses_1", "obs_2"))!);
+    registerSmartSearchFunction(sdk as never, kv as never, async () => searchResults, id => hints.getSessionId(id));
+    const indexed = await sdk.trigger("mem::smart-search", {
+      project: "my-project", trackAccess: false, expandIds: ["obs_1", "obs_2"],
+    });
+    expect(indexed.results.map((row: { obsId: string }) => row.obsId)).toEqual(["obs_1", "obs_2"]);
+    expect(list.mock.calls.filter(([scope]) => scope === 'mem:sessions' || String(scope).startsWith('mem:obs:'))).toHaveLength(0);
+    list.mockClear();
+    registerSmartSearchFunction(sdk as never, kv as never, async () => searchResults, () => "other");
 
     const result = (await sdk.trigger("mem::smart-search", {
+      project: "my-project", trackAccess: false,
       expandIds: ["obs_1", "obs_2"],
     })) as {
       mode: string;

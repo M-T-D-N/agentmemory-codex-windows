@@ -148,6 +148,8 @@ export const CORE_TOOLS: McpToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
+        project: { type: "string", description: "Exact project; use wildcard for all projects" },
+        agentId: { type: "string", minLength: 1, maxLength: 512, description: "Optional agent ID; omit for configured scope, or use '*' for a deliberate cross-agent read" },
         files: { type: "string", description: "Comma-separated file paths" },
         sessionId: {
           type: "string",
@@ -163,6 +165,7 @@ export const CORE_TOOLS: McpToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
+        agentId: { type: "string", minLength: 1, maxLength: 512, description: "Optional agent ID; omit for configured scope, or use '*' for a deliberate cross-agent read" },
         project: { type: "string", description: "Project path to analyze" },
       },
     },
@@ -191,7 +194,7 @@ export const CORE_TOOLS: McpToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Search query" },
+        query: { type: "string", description: "Search query; optional when expanding observation IDs" },
         agentId: {
           type: "string", minLength: 1, maxLength: 512,
           description: "Optional agent ID for search and expansion; omit to preserve the configured scope, or pass '*' for a deliberate cross-agent read",
@@ -212,7 +215,7 @@ export const CORE_TOOLS: McpToolDef[] = [
             "Set to false for analytical reads that must not reinforce access-based retention (default true)",
         },
       },
-      required: ["query", "project"],
+      required: ["project"],
     },
   },
   {
@@ -236,6 +239,7 @@ export const CORE_TOOLS: McpToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
+        agentId: { type: "string", minLength: 1, maxLength: 512, description: "Optional agent ID; omit for configured scope, or use '*' for a deliberate cross-agent read" },
         anchor: {
           type: "string",
           description: "Anchor point: ISO date or keyword",
@@ -268,6 +272,7 @@ export const CORE_TOOLS: McpToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
+        agentId: { type: "string", minLength: 1, maxLength: 512, description: "Optional agent ID; omit for configured scope, or use '*' for a deliberate cross-agent read" },
         project: { type: "string", description: "Project path" },
         refresh: {
           type: "string",

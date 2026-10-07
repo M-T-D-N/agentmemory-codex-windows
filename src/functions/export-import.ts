@@ -1,3 +1,4 @@
+import { profileCacheKey } from "./profile.js";
 import { withObservationRecovery } from "../state/observation-write.js";
 import type { ISdk } from "iii-sdk";
 import type {
@@ -508,7 +509,7 @@ export async function importExportData(
         );
         await runChunked(
           await kv.list<ProjectProfile>(KV.profiles).catch(() => []),
-          (profile) => kv.delete(KV.profiles, profile.project),
+          (profile) => kv.delete(KV.profiles, profileCacheKey(profile.project, profile.agentId)),
         );
         await runChunked(
           await kv.list<AccessLogExport>(KV.accessLog).catch(() => []),
@@ -658,14 +659,14 @@ export async function importExportData(
         await runChunked(importData.profiles, async (profile) => {
           if (strategy === "skip") {
             const existing = await kv
-              .get<ProjectProfile>(KV.profiles, profile.project)
+              .get<ProjectProfile>(KV.profiles, profileCacheKey(profile.project, profile.agentId))
               .catch(() => null);
             if (existing) {
               stats.skipped++;
               return;
             }
           }
-          await kv.set(KV.profiles, profile.project, profile);
+          await kv.set(KV.profiles, profileCacheKey(profile.project, profile.agentId), profile);
         });
       }
 

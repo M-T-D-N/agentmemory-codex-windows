@@ -1,3 +1,5 @@
+import { readArchiveVisibility } from "./archive.js";
+import { resolveReadAgentId } from "./read-agent-scope.js";
 import type { ISdk } from "iii-sdk";
 import type { CompressedObservation, Session } from "../types.js";
 import { KV } from "../state/schema.js";
@@ -18,14 +20,16 @@ interface Pattern {
 
 export function registerPatternsFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::patterns", 
-    async (data: { project?: string }) => {
+    async (data: { project?: string; agentId?: string }) => {
       const patterns: Pattern[] = [];
+      const archived = await readArchiveVisibility(kv);
+      const agentId = resolveReadAgentId(data.agentId, "mem::patterns");
 
       const sessions = await kv.list<Session>(KV.sessions);
       const visibleSessions = sessions.filter(
-        (session) => !isExcludedCodexAmbientSession(session),
+        (session) => !isExcludedCodexAmbientSession(session) && !archived({ kind: "session", id: session.id }) && (agentId === undefined || session.agentId === agentId),
       );
-      const filtered = data.project
+      const filtered = data.project && data.project !== "*"
         ? visibleSessions.filter((session) => session.project === data.project)
         : visibleSessions;
 
@@ -52,7 +56,7 @@ export function registerPatternsFunction(sdk: ISdk, kv: StateKV): void {
               .map((observation) => sanitizeCodexAmbientObservation(observation))
               .filter(
                 (observation): observation is CompressedObservation =>
-                  observation !== null,
+                  observation !== null && !archived({ kind: "observation", id: observation.id, sessionId: session.id }) && (agentId === undefined || observation.agentId === agentId),
               ),
           })),
         );
@@ -135,7 +139,7 @@ export function registerPatternsFunction(sdk: ISdk, kv: StateKV): void {
   );
 
   sdk.registerFunction("mem::generate-rules", 
-    async (data: { project?: string }) => {
+    async (data: { project?: string; agentId?: string }) => {
       const result = await sdk.trigger<
         { project?: string },
         { patterns: Pattern[] }

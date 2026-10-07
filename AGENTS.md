@@ -46,6 +46,9 @@ other hosts. The supported Windows/Codex build in
 - canonical data is installation state, not a generated build artifact. See
   `packaging/windows-codex/README.md` for build, cutover, and retention rules.
 
+- Before reporting a successful cutover complete, apply that retention review to existing backups against the current release, actual immediate predecessor, matching code/data snapshot pairs and current consumers.
+  Preserve compatible code/data recovery sets and required archive/audit evidence; report protected unknowns and explicit maintenance candidates. ZIP compaction alone does not complete this review. Use the existing workspace storage/approval policy for maintenance; do not automatically delete older archives.
+
 ## Consistency Rules
 
 **When adding or removing MCP tools, you MUST update ALL of the following:**

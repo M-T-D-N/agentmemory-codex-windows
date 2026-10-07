@@ -3,25 +3,15 @@ import { createRequire } from "node:module";
 const cjkRequire = createRequire(import.meta.url);
 
 const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-const HAN_RE = /\p{Script=Han}/u;
 const KANA_RE = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const HANGUL_RE = /\p{Script=Hangul}/u;
 const CJK_RUN_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
 const HANGUL_BLOCK_RE = /[가-힯]+/g;
 
-type Script = "han" | "kana" | "hangul" | "other";
-
 const hintShown = new Set<string>();
 
 export function hasCjk(text: string): boolean {
   return CJK_RE.test(text);
-}
-
-export function detectScript(text: string): Script {
-  if (HAN_RE.test(text)) return "han";
-  if (KANA_RE.test(text)) return "kana";
-  if (HANGUL_RE.test(text)) return "hangul";
-  return "other";
 }
 
 function showHintOnce(key: string, message: string): void {

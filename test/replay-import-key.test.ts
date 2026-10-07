@@ -73,6 +73,10 @@ describe("import-jsonl re-key on parsed.sessionId (#775)", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "replay-import-key-"));
   });
 
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
   function writeFixture(sessionId: string, ts = "2026-04-17T10:00:00.000Z") {
     const dir = join(tmpRoot, "proj");
     rmSync(dir, { recursive: true, force: true });
@@ -185,6 +189,7 @@ describe("import-jsonl indexes observations into BM25 AND vector", () => {
     setVectorIndex(null);
     setEmbeddingProvider(null);
     getSearchIndex().clear();
+    rmSync(tmpRoot, { recursive: true, force: true });
   });
 
   function writeFixture(sessionId: string) {

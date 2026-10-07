@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isCodexApprovalReviewText, isCodexInternalAmbientText, stripCodexAmbientUiBlocks } from "../functions/observation-visibility.js";
+import { isCodexApprovalReviewText, isCodexInternalAmbientText, isIncidentalCodexHostEvent, stripCodexAmbientUiBlocks } from "../functions/observation-visibility.js";
 import { stripPrivateData } from "../functions/privacy.js";
 import { canonicalCodexCwd } from "../functions/codex-source-identity.js";
 
@@ -53,6 +53,7 @@ export function initialCodexParseState(normalSessionSeen = false): CodexParseSta
 }
 
 function isInternalTurnInstruction(text: string): boolean {
+  if (isIncidentalCodexHostEvent(text)) return false;
   if (isCodexApprovalReviewText(text)) return true;
   if (!isCodexInternalAmbientText(text)) return false;
   if (/^\s*<codex_internal_context\b[^>]*\bsource=["']goal["']/i.test(text)) return false;

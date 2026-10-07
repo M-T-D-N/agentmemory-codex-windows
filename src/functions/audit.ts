@@ -86,28 +86,30 @@ export async function queryAudit(
     limit?: number;
   },
 ): Promise<AuditEntry[]> {
-  const all = await kv.list<AuditEntry>(KV.audit);
-  let entries = [...all].sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  );
-
-  if (filter?.operation) {
-    entries = entries.filter((e) => e.operation === filter.operation);
+  const from = filter?.dateFrom ? Date.parse(filter.dateFrom) : undefined;
+  const to = filter?.dateTo ? Date.parse(filter.dateTo) : undefined;
+  if (from !== undefined && Number.isNaN(from)) throw new Error(`Invalid dateFrom: ${filter?.dateFrom}`);
+  if (to !== undefined && Number.isNaN(to)) throw new Error(`Invalid dateTo: ${filter?.dateTo}`);
+  const accepts = (entry: AuditEntry) => (!filter?.operation || entry.operation === filter.operation) &&
+    (from === undefined || Date.parse(entry.timestamp) >= from) &&
+    (to === undefined || Date.parse(entry.timestamp) <= to);
+  const newestFirst = (a: AuditEntry, b: AuditEntry) => Date.parse(b.timestamp) - Date.parse(a.timestamp);
+  const limit = filter?.limit || 100;
+  if (!kv.usesManagedState) {
+    return (await kv.list<AuditEntry>(KV.audit)).filter(accepts).sort(newestFirst).slice(0, limit);
   }
-  if (filter?.dateFrom) {
-    const from = new Date(filter.dateFrom).getTime();
-    if (Number.isNaN(from)) {
-      throw new Error(`Invalid dateFrom: ${filter.dateFrom}`);
-    }
-    entries = entries.filter((e) => new Date(e.timestamp).getTime() >= from);
-  }
-  if (filter?.dateTo) {
-    const to = new Date(filter.dateTo).getTime();
-    if (Number.isNaN(to)) {
-      throw new Error(`Invalid dateTo: ${filter.dateTo}`);
-    }
-    entries = entries.filter((e) => new Date(e.timestamp).getTime() <= to);
-  }
-
-  return entries.slice(0, filter?.limit || 100);
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Invalid audit limit");
+  let entries: AuditEntry[] = [];
+  let offset = 0;
+  let capturedTotal: number | undefined;
+  do {
+    const page = await kv.listPage<AuditEntry>(KV.audit, offset);
+    capturedTotal ??= page.total;
+    entries.push(...page.entries.slice(0, Math.max(0, capturedTotal - offset)).map(row => row.value).filter(accepts));
+    entries.sort(newestFirst);
+    entries = entries.slice(0, limit);
+    if (page.next_offset === null || page.next_offset >= capturedTotal) break;
+    offset = page.next_offset;
+  } while (true);
+  return entries;
 }

@@ -3,7 +3,7 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { parseSessionQuery, selectSessionPage } from "../functions/session-query.js";
 import { readArchiveVisibility } from "../functions/archive.js";
-import { parseArchiveToolInput } from "../functions/archive-tools.js";
+import { archiveOperationError, parseArchiveToolInput } from "../functions/archive-tools.js";
 import type {
   SessionSummary,
   Memory,
@@ -332,6 +332,8 @@ export function registerMcpEndpoints(
           }
 
           case "memory_file_history": {
+            const agentId = parseAgentId(args.agentId);
+            if (!agentId.valid) return agentId.response;
             if (typeof args.files !== "string" || !args.files.trim()) {
               return {
                 status_code: 400,
@@ -345,7 +347,10 @@ export function registerMcpEndpoints(
                 body: { error: "files must contain at least one valid path" },
               };
             }
-            const payload: { sessionId?: string; files: string[] } = { files: fileList };
+            if (args.project !== undefined && (typeof args.project !== "string" || !args.project.trim())) return { status_code: 400, body: { error: "project must be a non-empty string" } };
+            const payload: { sessionId?: string; project?: string; agentId?: string; files: string[] } = { files: fileList };
+            if (agentId.value !== undefined) payload.agentId = agentId.value;
+            if (args.project !== undefined) payload.project = args.project as string;
             const sessionId = asNonEmptyString(args.sessionId);
             if (sessionId) payload.sessionId = sessionId;
             const result = await sdk.trigger({
@@ -368,7 +373,10 @@ export function registerMcpEndpoints(
           }
 
           case "memory_patterns": {
+            const agentId = parseAgentId(args.agentId);
+            if (!agentId.valid) return agentId.response;
             const result = await sdk.trigger({ function_id: "mem::patterns", payload: {
+              agentId: agentId.value,
               project: args.project as string,
             } });
             return {
@@ -390,12 +398,15 @@ export function registerMcpEndpoints(
             let payload;
             try { payload = parseArchiveToolInput(args); }
             catch (error) { return mcpToolResult({ error: error instanceof Error ? error.message : "Invalid archive request" }, true); }
-            const result = await sdk.trigger({ function_id: "mem::archive", payload });
-            return mcpToolResult(result, Boolean(result && typeof result === "object" && (result as { success?: boolean }).success === false));
+            try {
+              const result = await sdk.trigger({ function_id: "mem::archive", payload });
+              return mcpToolResult(result, Boolean(result && typeof result === "object" && (result as { success?: boolean }).success === false));
+            } catch (error) { return mcpToolResult(archiveOperationError(error), true); }
           }
 
           case "memory_smart_search": {
-            if (typeof args.query !== "string" || !args.query.trim()) {
+            const expandIds = parseCsvList(args.expandIds);
+            if (expandIds.length === 0 && (typeof args.query !== "string" || !args.query.trim())) {
               return {
                 status_code: 400,
                 body: { error: "query is required for memory_smart_search" },
@@ -408,7 +419,6 @@ export function registerMcpEndpoints(
                 body: { error: "project is required for memory_smart_search" },
               };
             }
-            const expandIds = parseCsvList(args.expandIds).slice(0, 20);
             const limit = Math.max(1, Math.min(100, asNumber(args.limit, 10) ?? 10));
             const trackAccess = parseTrackAccess(args.trackAccess);
             if (!trackAccess.valid) return trackAccess.response;
@@ -462,6 +472,8 @@ export function registerMcpEndpoints(
           }
 
           case "memory_timeline": {
+            const agentId = parseAgentId(args.agentId);
+            if (!agentId.valid) return agentId.response;
             if (typeof args.anchor !== "string" || !args.anchor.trim()) {
               return {
                 status_code: 400,
@@ -481,6 +493,7 @@ export function registerMcpEndpoints(
               return { status_code: 400, body: { error: "project must be a non-empty string" } };
             }
             const result = await sdk.trigger({ function_id: "mem::timeline", payload: {
+              agentId: agentId.value,
               anchor: args.anchor,
               project: typeof args.project === "string" ? args.project.trim() : undefined,
               before: args.before as number | undefined,
@@ -499,6 +512,8 @@ export function registerMcpEndpoints(
           }
 
           case "memory_profile": {
+            const agentId = parseAgentId(args.agentId);
+            if (!agentId.valid) return agentId.response;
             if (typeof args.project !== "string" || !args.project.trim()) {
               return {
                 status_code: 400,
@@ -506,6 +521,7 @@ export function registerMcpEndpoints(
               };
             }
             const result = await sdk.trigger({ function_id: "mem::profile", payload: {
+              agentId: agentId.value,
               project: args.project,
               refresh: args.refresh === true || args.refresh === "true",
             } });

@@ -2,6 +2,7 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
+import { resolveMemoryProject } from "../state/memory-utils.js";
 import { recordAudit } from "./audit.js";
 import type {
   Action,
@@ -355,12 +356,11 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
           }
         }
 
-        // Project-coverage check: unscoped memories (no project field) will
-        // appear in every project's context and search results until the
-        // infer-memory-projects migration runs. Surface a count so operators
-        // know the backfill is still pending and can trigger it explicitly.
         const latestMemories = memories.filter((m) => m.isLatest);
-        const unscopedCount = latestMemories.filter((m) => !m.project).length;
+        const unscopedMemories = latestMemories.filter((m) => !m.project);
+        const unscopedCount = unscopedMemories.length;
+        let projectCoverageDetails: string | undefined;
+        let inferableCount = 0;
         if (unscopedCount === 0) {
           checks.push({
             name: "memory-project-coverage",
@@ -369,21 +369,29 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
             message: `All ${latestMemories.length} latest memories have a project scope`,
             fixable: false,
           });
-        } else if (unscopedCount <= 10) {
-          checks.push({
-            name: "memory-project-coverage",
-            category: "memories",
-            status: "warn",
-            message: `${unscopedCount} of ${latestMemories.length} latest memories have no project scope — run POST /agentmemory/migrate {"step":"infer-memory-projects"} to backfill`,
-            fixable: true,
-          });
         } else {
+          const sessions = new Map(
+            (await kv.list<Session>(KV.sessions)).map((session) => [session.id, session]),
+          );
+          const resolutions = unscopedMemories.map((memory) =>
+            resolveMemoryProject(memory, sessions),
+          );
+          inferableCount = resolutions.filter((result) => result.status === "inferable").length;
+          const noProvenanceCount = resolutions.filter((result) => result.status === "no-session-provenance").length;
+          const ambiguousCount = resolutions.filter((result) => result.status === "ambiguous").length;
+          const migrationGuidance = inferableCount > 0
+            ? `Run POST /agentmemory/migrate {"step":"infer-memory-projects"} to backfill the ${inferableCount} safely inferable memories; the remaining records require explicit project curation.`
+            : "No safe migration candidates; explicit project curation is required.";
+          projectCoverageDetails = `${inferableCount} safely inferable, ${noProvenanceCount} have no session provenance, and ${ambiguousCount} have missing or mixed source sessions. ${migrationGuidance}`;
+        }
+
+        if (unscopedCount > 0) {
           checks.push({
             name: "memory-project-coverage",
             category: "memories",
-            status: "fail",
-            message: `${unscopedCount} of ${latestMemories.length} latest memories have no project scope — run POST /agentmemory/migrate {"step":"infer-memory-projects"} to backfill`,
-            fixable: true,
+            status: unscopedCount <= 10 ? "warn" : "fail",
+            message: `${unscopedCount} of ${latestMemories.length} latest memories have no project scope; ${projectCoverageDetails}`,
+            fixable: inferableCount > 0,
           });
         }
 

@@ -1,3 +1,5 @@
+import { readArchiveVisibility } from "./archive.js";
+import { resolveReadAgentId } from "./read-agent-scope.js";
 import type { ISdk } from "iii-sdk";
 import type { CompressedObservation, Session } from "../types.js";
 import { KV } from "../state/schema.js";
@@ -26,8 +28,9 @@ interface FileHistory {
 export function registerFileIndexFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::file-context", 
     async (
-      data: { sessionId?: string; files?: string[]; project?: string } | undefined,
+      data: { sessionId?: string; files?: string[]; project?: string; agentId?: string } | undefined,
     ) => {
+      if (data?.project !== undefined && (typeof data.project !== "string" || !data.project.trim())) throw Error("project must be a non-empty string");
       const sessionId =
         data && typeof data.sessionId === "string" ? data.sessionId.trim() : "";
       const normalizedProject =
@@ -47,6 +50,8 @@ export function registerFileIndexFunction(sdk: ISdk, kv: StateKV): void {
         return { context: "", files: [] };
       }
       const results: FileHistory[] = [];
+      const archived = await readArchiveVisibility(kv);
+      const agentId = resolveReadAgentId(data?.agentId, "mem::file-context");
 
       const sessions = await kv.list<Session>(KV.sessions);
       let otherSessions = sessionId
@@ -57,7 +62,8 @@ export function registerFileIndexFunction(sdk: ISdk, kv: StateKV): void {
         : sessions.filter(
             (session) => !isExcludedCodexAmbientSession(session),
           );
-      if (normalizedProject) {
+      otherSessions = otherSessions.filter(s => !archived({ kind: "session", id: s.id }) && (agentId === undefined || s.agentId === agentId));
+      if (normalizedProject && normalizedProject !== "*") {
         otherSessions = otherSessions.filter((s) => s.project === normalizedProject);
       }
       otherSessions = otherSessions
@@ -77,7 +83,7 @@ export function registerFileIndexFunction(sdk: ISdk, kv: StateKV): void {
           observations
             .map((observation) => sanitizeCodexAmbientObservation(observation))
             .filter(
-              (observation): observation is CompressedObservation => observation !== null,
+              (observation): observation is CompressedObservation => observation !== null && !archived({ kind: "observation", id: observation.id, sessionId: session.id }) && (agentId === undefined || observation.agentId === agentId),
             ),
         );
       }

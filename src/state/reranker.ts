@@ -68,7 +68,3 @@ export async function rerank(
     rerankPosition: i + 1,
   }));
 }
-
-export function isRerankerAvailable(): boolean {
-  return pipeline !== null;
-}

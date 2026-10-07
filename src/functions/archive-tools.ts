@@ -3,7 +3,6 @@ import type { ArchiveState, ArchiveTarget } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { checkPayloadFrameSize } from "../state/frame-guard.js";
-import { withObservationRecovery } from "../state/observation-write.js";
 import { archiveTargetAddress, changeArchiveState, readOwnedArchiveTarget, validateArchiveState, type ArchiveRequest } from "./archive.js";
 import { listArchiveCandidates, type ArchiveCandidateQuery } from "./archive-candidates.js";
 
@@ -53,25 +52,30 @@ export function registerArchiveFunctions(sdk: ISdk, kv: StateKV) {
       ? Object.fromEntries(Object.entries(data).filter(([key]) => key !== "_caller_worker_id")) : data;
     const input = parseArchiveToolInput(payload);
     if (input.action === "archive" || input.action === "restore") return changeArchiveState(kv, input);
-    return withObservationRecovery(async () => {
-      if (input.action === "candidates") return listArchiveCandidates(kv, input);
-      if (input.action === "list") {
-        const rows = (await kv.list<ArchiveState>(KV.archiveStates)).map(validateArchiveState)
-          .filter(state => state.project === input.project && (input.state === "all" ||
-            (input.state === "archived" ? state.state === "archived" || Boolean(state.importPendingDigest) : state.state === "restored" && !state.importPendingDigest)))
-          .sort((a, b) => b.changedAt.localeCompare(a.changedAt) || a.id.localeCompare(b.id));
-        const archives = rows.slice(input.offset, input.offset + input.limit);
-        return { success: true, archives, total: rows.length, limit: input.limit, offset: input.offset,
-          nextOffset: input.offset + archives.length < rows.length ? input.offset + archives.length : null };
-      }
-      const address = archiveTargetAddress(input.target);
-      const record = await readOwnedArchiveTarget(kv, address.target, address.scope, input.project);
-      const raw = await kv.get<ArchiveState>(KV.archiveStates, address.key);
-      const archive = raw ? validateArchiveState(raw) : null;
-      if (archive && archive.project !== input.project) throw Error("Archive ownership changed; reconcile before continuing");
-      const result = { success: true, target: address.target, project: input.project, state: archive?.state ?? "active",
-        importPending: Boolean(archive?.importPendingDigest), archive, record };
-      return checkPayloadFrameSize(result, "archive record exceeds the supported transport frame; use the canonical export path") ?? result;
-    });
+    if (input.action === "candidates") return listArchiveCandidates(kv, input);
+    if (input.action === "list") {
+      const rows = (await kv.list<ArchiveState>(KV.archiveStates)).map(validateArchiveState)
+        .filter(state => state.project === input.project && (input.state === "all" ||
+          (input.state === "archived" ? state.state === "archived" || Boolean(state.importPendingDigest) : state.state === "restored" && !state.importPendingDigest)))
+        .sort((a, b) => b.changedAt.localeCompare(a.changedAt) || a.id.localeCompare(b.id));
+      const archives = rows.slice(input.offset, input.offset + input.limit);
+      return { success: true, archives, total: rows.length, limit: input.limit, offset: input.offset,
+        nextOffset: input.offset + archives.length < rows.length ? input.offset + archives.length : null };
+    }
+    const address = archiveTargetAddress(input.target);
+    const record = await readOwnedArchiveTarget(kv, address.target, address.scope, input.project);
+    const raw = await kv.get<ArchiveState>(KV.archiveStates, address.key);
+    const archive = raw ? validateArchiveState(raw) : null;
+    if (archive && archive.project !== input.project) throw Error("Archive ownership changed; reconcile before continuing");
+    const result = { success: true, target: address.target, project: input.project, state: archive?.state ?? "active",
+      importPending: Boolean(archive?.importPendingDigest), archive, record };
+    return checkPayloadFrameSize(result, "archive record exceeds the supported transport frame; use the canonical export path") ?? result;
   });
+}
+
+export function archiveOperationError(error: unknown) {
+  const message = error instanceof Error ? error.message : error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string" ? (error as { message: string }).message : "Archive operation failed";
+  const safeMessage = message.split(/\r?\n/, 1)[0].slice(0, 1000) || "Archive operation failed";
+  const busy = safeMessage === "Observation writers are active; recovery made no changes. Retry after they finish.";
+  return { success: false, error: safeMessage, ...(busy ? { code: "observation_writers_active", retryable: true } : {}) };
 }

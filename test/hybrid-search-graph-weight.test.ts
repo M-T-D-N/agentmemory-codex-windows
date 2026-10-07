@@ -123,3 +123,24 @@ describe("graph weight 0 also skips vector-chunk graph expansion", () => {
     expect(await vectorSearchWith(0)).toEqual([]);
   });
 });
+
+it("empty expansion preserves ordinary entity-coverage ranking", async () => {
+  const bm25 = new SearchIndex();
+  const graphObs = { ...obs, id: "obs_graph", title: "Graph note", narrative: "Graph note", facts: [], concepts: [], files: [] };
+  bm25.add(obs);
+  bm25.add(graphObs);
+  const kv = mockKV();
+  await kv.set("mem:obs:ses_1", obs.id, obs);
+  await kv.set("mem:obs:ses_1", graphObs.id, graphObs);
+  await kv.set("mem:graph:nodes", "node", {
+    id: "node", name: "AuthMiddleware", type: "concept", project: "test", properties: {},
+    sourceObservationIds: [graphObs.id], sourceSessionIds: [],
+  });
+  const hybrid = new HybridSearch(bm25, null, null, kv as never);
+  const query = "AuthMiddleware validation";
+  const ordinary = await hybrid.search(query, 10);
+  expect(ordinary.find(row => row.observation.id === graphObs.id)?.graphScore).toBeGreaterThan(0);
+  expect(await hybrid.searchWithExpansion(query, 10, {
+    original: query, reformulations: [], temporalConcretizations: [], entityExtractions: [],
+  })).toEqual(ordinary);
+});

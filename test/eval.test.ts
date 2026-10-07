@@ -1,57 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
-  ObserveInputSchema,
   CompressOutputSchema,
   SummaryOutputSchema,
-  SearchInputSchema,
-  ContextInputSchema,
-  RememberInputSchema,
 } from "../src/eval/schemas.js";
 import { validateInput, validateOutput } from "../src/eval/validator.js";
 import {
   scoreCompression,
   scoreSummary,
-  scoreContextRelevance,
 } from "../src/eval/quality.js";
 
 describe("Zod Schemas", () => {
-  describe("ObserveInputSchema", () => {
-    it("accepts valid input", () => {
-      const result = ObserveInputSchema.safeParse({
-        hookType: "post_tool_use",
-        sessionId: "ses_abc",
-        project: "my-project",
-        cwd: "/home/user",
-        timestamp: "2026-01-01T00:00:00Z",
-        data: { tool_name: "Read" },
-      });
-      expect(result.success).toBe(true);
-    });
-
-    it("rejects missing sessionId", () => {
-      const result = ObserveInputSchema.safeParse({
-        hookType: "post_tool_use",
-        project: "my-project",
-        cwd: "/home/user",
-        timestamp: "2026-01-01T00:00:00Z",
-        data: {},
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects invalid hookType", () => {
-      const result = ObserveInputSchema.safeParse({
-        hookType: "invalid_hook",
-        sessionId: "ses_abc",
-        project: "my-project",
-        cwd: "/home/user",
-        timestamp: "2026-01-01T00:00:00Z",
-        data: {},
-      });
-      expect(result.success).toBe(false);
-    });
-  });
-
   describe("CompressOutputSchema", () => {
     it("accepts valid output", () => {
       const result = CompressOutputSchema.safeParse({
@@ -142,66 +100,30 @@ describe("Zod Schemas", () => {
       expect(result.success).toBe(false);
     });
   });
-
-  describe("SearchInputSchema", () => {
-    it("accepts valid search", () => {
-      expect(SearchInputSchema.safeParse({ query: "auth" }).success).toBe(true);
-    });
-
-    it("accepts search with limit", () => {
-      expect(
-        SearchInputSchema.safeParse({ query: "auth", limit: 10 }).success,
-      ).toBe(true);
-    });
-
-    it("rejects empty query", () => {
-      expect(SearchInputSchema.safeParse({ query: "" }).success).toBe(false);
-    });
-  });
-
-  describe("ContextInputSchema", () => {
-    it("accepts valid input", () => {
-      expect(
-        ContextInputSchema.safeParse({
-          sessionId: "ses_1",
-          project: "proj",
-        }).success,
-      ).toBe(true);
-    });
-  });
-
-  describe("RememberInputSchema", () => {
-    it("accepts valid input", () => {
-      expect(
-        RememberInputSchema.safeParse({
-          content: "Always use TypeScript",
-          type: "preference",
-        }).success,
-      ).toBe(true);
-    });
-
-    it("rejects empty content", () => {
-      expect(
-        RememberInputSchema.safeParse({ content: "" }).success,
-      ).toBe(false);
-    });
-  });
 });
 
 describe("Validator", () => {
   it("returns valid with correct data", () => {
-    const result = validateInput(SearchInputSchema, { query: "test" }, "search");
+    const result = validateInput(CompressOutputSchema, {
+      type: "file_edit",
+      title: "Test",
+      facts: ["a"],
+      narrative: "A long enough narrative",
+      concepts: [],
+      files: [],
+      importance: 5,
+    }, "compress");
     expect(result.valid).toBe(true);
     if (result.valid) {
-      expect(result.data.query).toBe("test");
+      expect(result.data.title).toBe("Test");
     }
   });
 
   it("returns invalid with error details", () => {
-    const result = validateInput(SearchInputSchema, { query: "" }, "search");
+    const result = validateInput(CompressOutputSchema, { title: "" }, "compress");
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.result.functionId).toBe("search");
+      expect(result.result.functionId).toBe("compress");
       expect(result.result.errors.length).toBeGreaterThan(0);
     }
   });
@@ -268,33 +190,6 @@ describe("Quality Scoring", () => {
         concepts: ["authentication", "database"],
       });
       expect(score).toBeGreaterThanOrEqual(90);
-    });
-  });
-
-  describe("scoreContextRelevance", () => {
-    it("returns 0 for empty context", () => {
-      expect(scoreContextRelevance("", "proj")).toBe(0);
-    });
-
-    it("scores higher when project is mentioned", () => {
-      const withProject = scoreContextRelevance(
-        "<context>This is for my-project with details</context>",
-        "my-project",
-      );
-      const without = scoreContextRelevance(
-        "<context>Some generic context details</context>",
-        "my-project",
-      );
-      expect(withProject).toBeGreaterThan(without);
-    });
-
-    it("scores higher with more XML sections", () => {
-      const multi = scoreContextRelevance(
-        "<summary>A</summary><observations>B</observations><memories>C</memories><patterns>D</patterns>",
-        "test",
-      );
-      const single = scoreContextRelevance("<summary>A</summary>", "test");
-      expect(multi).toBeGreaterThan(single);
     });
   });
 });

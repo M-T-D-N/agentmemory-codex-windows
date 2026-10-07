@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type {
   MemoryProvider,
   ProviderRuntimeInfo,
@@ -11,6 +12,8 @@ const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_MIN_CONTEXT_TOKENS = 8_192;
 const PROBE_TIMEOUT_MS = 3_000;
 const FOREGROUND_POLL_MS = 250;
+const LEASE_RELEASE_ATTEMPTS = 3;
+const LEASE_RELEASE_RETRY_MS = 50;
 
 interface LeaseRecord {
   owner: "agentmemory-background" | "qwen-foreground";
@@ -54,6 +57,7 @@ function choiceContent(choice: ChatCompletionChoice | undefined): string {
 async function streamingChatContent(
   response: Response,
   maxTokens: number,
+  url: string,
 ): Promise<string> {
   if (!response.body) throw new Error("local_qwen_empty_stream");
   const reader = response.body.getReader();
@@ -84,15 +88,17 @@ async function streamingChatContent(
   };
 
   try {
-  for (;;) {
-    const { done, value } = await reader.read();
-    buffered += decoder.decode(value, { stream: !done });
-    const lines = buffered.split(/\r?\n/);
-    buffered = lines.pop() ?? "";
-    for (const line of lines) consumeLine(line);
-    if (done) break;
-  }
-  if (buffered) consumeLine(buffered);
+    for (;;) {
+      const { done, value } = await reader.read().catch((error) => {
+        throw localQwenTransportError(error, url);
+      });
+      buffered += decoder.decode(value, { stream: !done });
+      const lines = buffered.split(/\r?\n/);
+      buffered = lines.pop() ?? "";
+      for (const line of lines) consumeLine(line);
+      if (done) break;
+    }
+    if (buffered) consumeLine(buffered);
   } catch (error) {
     await reader.cancel().catch(() => undefined);
     throw error;
@@ -162,29 +168,43 @@ function v1Endpoint(base: URL, route: string): string {
   return url.toString();
 }
 
+function localQwenTransportError(error: unknown, url: string): Error {
+  if (error instanceof Error && error.name === "AbortError") return error;
+  const detail = objectValue(error);
+  const cause = objectValue(detail?.cause);
+  const rawCode = cause?.code ?? detail?.code;
+  const code = typeof rawCode === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(rawCode)
+    ? rawCode
+    : error instanceof Error && error.name === "TimeoutError" ? "TIMEOUT" : "UNKNOWN";
+  return new Error("local_qwen_transport_failed:" + code + ":" + new URL(url).host, { cause: error });
+}
+
+function requestAndCleanupError(requestError: unknown, cleanupError: unknown): AggregateError {
+  const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+  return new AggregateError([requestError, cleanupError],
+    "local_qwen_request_and_lease_release_failed:" + message(requestError) + "; " + message(cleanupError),
+    { cause: requestError });
+}
+
 async function fetchLocalQwen(url: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(url, init);
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") throw error;
-    const detail = objectValue(error);
-    const cause = objectValue(detail?.cause);
-    const rawCode = cause?.code ?? detail?.code;
-    const code = typeof rawCode === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(rawCode)
-      ? rawCode
-      : error instanceof Error && error.name === "TimeoutError" ? "TIMEOUT" : "UNKNOWN";
-    throw new Error(`local_qwen_transport_failed:${code}:${new URL(url).host}`, { cause: error });
+    throw localQwenTransportError(error, url);
   }
 }
 
 async function fetchJson(
   url: string,
   timeoutMs: number,
+  shutdownSignal?: AbortSignal,
 ): Promise<unknown> {
   const response = await fetchLocalQwen(url, {
     method: "GET",
     redirect: "error",
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: shutdownSignal
+      ? AbortSignal.any([shutdownSignal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     throw new Error(`local_qwen_probe_http_${response.status}`);
@@ -246,8 +266,15 @@ export class LocalQwenProvider implements MemoryProvider {
   private readonly coordinationDir: string;
   private runtimeInfo: ProviderRuntimeInfo | null = null;
   private validatedFingerprint: string | null = null;
+  private pendingLeaseRelease: LeaseRecord | null = null;
+  private pendingLeaseRecovery: Promise<void> | null = null;
 
-  constructor(model: string, maxTokens: number, baseURL?: string) {
+  constructor(
+    model: string,
+    maxTokens: number,
+    baseURL?: string,
+    private readonly shutdownSignal?: AbortSignal,
+  ) {
     this.baseUrl = loopbackBaseUrl(
       baseURL ||
         getEnvVar("AGENTMEMORY_LOCAL_QWEN_BASE_URL") ||
@@ -283,6 +310,7 @@ export class LocalQwenProvider implements MemoryProvider {
   }
 
   private assertBackgroundAllowed(): void {
+    if (this.shutdownSignal?.aborted) throw new Error("local_qwen_deferred:shutdown");
     const reason = localQwenBackgroundDeferral();
     if (reason) throw new Error(`local_qwen_deferred:${reason}`);
   }
@@ -295,6 +323,8 @@ export class LocalQwenProvider implements MemoryProvider {
   async compress(systemPrompt: string, userPrompt: string): Promise<string> {
     this.assertBackgroundAllowed();
     const release = await this.acquireBackgroundLease();
+    let requestFailed = false;
+    let requestError: unknown;
     try {
       const discovered = await this.discover();
       if (!discovered.slotsIdle) {
@@ -326,8 +356,17 @@ export class LocalQwenProvider implements MemoryProvider {
         this.maxOutputTokens,
         discovered.info,
       );
+    } catch (error) {
+      requestFailed = true;
+      requestError = error;
+      throw error;
     } finally {
-      await release();
+      try {
+        await release();
+      } catch (cleanupError) {
+        if (requestFailed) throw requestAndCleanupError(requestError, cleanupError);
+        throw cleanupError;
+      }
     }
   }
 
@@ -336,11 +375,12 @@ export class LocalQwenProvider implements MemoryProvider {
   }
 
   private async discover(): Promise<LocalQwenDiscovery> {
+    this.assertBackgroundAllowed();
     const [healthRaw, propsRaw, modelsRaw, slotsRaw] = await Promise.all([
-      fetchJson(endpoint(this.baseUrl, "/health"), PROBE_TIMEOUT_MS),
-      fetchJson(endpoint(this.baseUrl, "/props"), PROBE_TIMEOUT_MS),
-      fetchJson(v1Endpoint(this.baseUrl, "/models"), PROBE_TIMEOUT_MS),
-      fetchJson(endpoint(this.baseUrl, "/slots"), PROBE_TIMEOUT_MS),
+      fetchJson(endpoint(this.baseUrl, "/health"), PROBE_TIMEOUT_MS, this.shutdownSignal),
+      fetchJson(endpoint(this.baseUrl, "/props"), PROBE_TIMEOUT_MS, this.shutdownSignal),
+      fetchJson(v1Endpoint(this.baseUrl, "/models"), PROBE_TIMEOUT_MS, this.shutdownSignal),
+      fetchJson(endpoint(this.baseUrl, "/slots"), PROBE_TIMEOUT_MS, this.shutdownSignal),
     ]);
     const health = objectValue(healthRaw);
     if (health?.status !== "ok") throw new Error("local_qwen_unhealthy");
@@ -437,7 +477,9 @@ export class LocalQwenProvider implements MemoryProvider {
             { role: "user", content: userPrompt },
           ],
         }),
-        signal: controller.signal,
+        signal: this.shutdownSignal
+          ? AbortSignal.any([controller.signal, this.shutdownSignal])
+          : controller.signal,
       });
       if (!response.ok) {
         const detail = (await response.text()).slice(0, 1000);
@@ -446,7 +488,7 @@ export class LocalQwenProvider implements MemoryProvider {
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
       let content: string;
       if (contentType.includes("text/event-stream")) {
-        content = await streamingChatContent(response, maxTokens);
+        content = await streamingChatContent(response, maxTokens, v1Endpoint(this.baseUrl, "/chat/completions"));
       } else {
         const choice = (
           (await response.json()) as { choices?: ChatCompletionChoice[] }
@@ -457,8 +499,10 @@ export class LocalQwenProvider implements MemoryProvider {
         content = choiceContent(choice);
       }
       if (!content?.trim()) throw new Error("local_qwen_empty_response");
+      this.assertBackgroundAllowed();
       return content;
     } catch (error) {
+      if (this.shutdownSignal?.aborted) throw new Error("local_qwen_deferred:shutdown");
       if (foregroundRequested) {
         throw new Error("local_qwen_deferred:foreground_requested");
       }
@@ -474,11 +518,12 @@ export class LocalQwenProvider implements MemoryProvider {
 
   private async acquireBackgroundLease(): Promise<() => Promise<void>> {
     await mkdir(this.coordinationDir, { recursive: true });
+    const leasePath = join(this.coordinationDir, "qwen-use.lock");
+    if (this.pendingLeaseRelease) await this.retryPendingLease(leasePath);
     const foregroundPath = join(this.coordinationDir, "foreground-request.json");
     if (await activeMarker(foregroundPath)) {
       throw new Error("local_qwen_deferred:foreground_requested");
     }
-    const leasePath = join(this.coordinationDir, "qwen-use.lock");
     const token = crypto.randomUUID();
     const record: LeaseRecord = {
       owner: "agentmemory-background",
@@ -496,10 +541,15 @@ export class LocalQwenProvider implements MemoryProvider {
           await handle.close();
         }
         if (await activeMarker(foregroundPath)) {
-          await this.releaseLease(leasePath, token);
-          throw new Error("local_qwen_deferred:foreground_requested");
+          const deferred = new Error("local_qwen_deferred:foreground_requested");
+          try {
+            await this.releaseLease(leasePath, record);
+          } catch (cleanupError) {
+            throw requestAndCleanupError(deferred, cleanupError);
+          }
+          throw deferred;
         }
-        return () => this.releaseLease(leasePath, token);
+        return () => this.releaseLease(leasePath, record);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "EEXIST") throw error;
@@ -511,12 +561,43 @@ export class LocalQwenProvider implements MemoryProvider {
     throw new Error("local_qwen_deferred:lease_busy");
   }
 
-  private async releaseLease(path: string, token: string): Promise<void> {
+  private async retryPendingLease(path: string): Promise<void> {
+    if (!this.pendingLeaseRelease) return;
+    const recovery = this.pendingLeaseRecovery ?? this.releaseLease(path, this.pendingLeaseRelease);
+    this.pendingLeaseRecovery = recovery;
     try {
-      const parsed = JSON.parse(await readFile(path, "utf8")) as { token?: unknown };
-      if (parsed.token === token) await unlink(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await recovery;
+    } finally {
+      if (this.pendingLeaseRecovery === recovery) this.pendingLeaseRecovery = null;
+    }
+  }
+
+  private async releaseLease(path: string, record: LeaseRecord): Promise<void> {
+    const clearPending = () => {
+      if (this.pendingLeaseRelease?.token === record.token) this.pendingLeaseRelease = null;
+    };
+    for (let attempt = 0; attempt < LEASE_RELEASE_ATTEMPTS; attempt++) {
+      try {
+        const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<LeaseRecord>;
+        if (parsed.token === record.token && parsed.pid === record.pid &&
+          parsed.processStartUtc === record.processStartUtc && parsed.owner === record.owner) {
+          await unlink(path);
+        }
+        clearPending();
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
+          clearPending();
+          return;
+        }
+        if ((code === "EBUSY" || code === "EPERM") && attempt + 1 < LEASE_RELEASE_ATTEMPTS) {
+          await delay(LEASE_RELEASE_RETRY_MS);
+          continue;
+        }
+        this.pendingLeaseRelease = record;
+        throw new Error("local_qwen_lease_release_failed:" + (code ?? "UNKNOWN"), { cause: error });
+      }
     }
   }
 }

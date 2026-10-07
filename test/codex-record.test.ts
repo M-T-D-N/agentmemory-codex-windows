@@ -19,6 +19,25 @@ function harness() {
 }
 
 describe("canonical native Codex conversation records", () => {
+  it("excludes an older evaluator request and its fresh internal final", () => {
+    const supportedEfforts = ["medium", "high", "xhigh", "max"];
+    const text = JSON.stringify({
+      instructions: "You are an independent reasoning-effort evaluator, not the task executor. Return only the supplied JSON schema.",
+      question: "Which supported effort is sufficient for the NEXT generation? Judge remaining reasoning, not vocabulary.",
+      state: { model: "synthetic-model", supportedEfforts, originalTask: "synthetic task", latestUserPrompt: "Continue", publicEvidence: [] },
+      outputSchema: { type: "object", additionalProperties: false, properties: {
+        action: { type: "string", enum: ["recommend", "abstain"] },
+        effort: { anyOf: [{ type: "string", enum: supportedEfforts }, { type: "null" }] },
+        reason: { type: "string" },
+      }, required: ["action", "effort", "reason"] },
+    });
+    const parse = harness(); parse(turn);
+    expect(parse(record("user", "older-evaluator", text))).toMatchObject({ status: "excluded", reason: "no_eligible_text" });
+    expect(parse(record("assistant", "older-evaluator-final", JSON.stringify({ action: "recommend", effort: "medium", reason: "Synthetic evidence" }), "final_answer")))
+      .toMatchObject({ status: "excluded", reason: "assistant_without_normal_user" });
+    expect(parse(record("user", "normal-after-evaluator", "Preserve the actual user request")))
+      .toMatchObject({ status: "message", message: { nativeMessageId: "normal-after-evaluator" } });
+  });
   it("continues through configuration updates without importing settings or losing message identity", () => {
     const parse = harness(); parse(turn);
     const user = parse(record("user", "user-1", "Preserve my requirement"));
@@ -276,4 +295,17 @@ describe("plugin mention mirrors", () => {
     parse(record("user","wrong","Different content"));
     expect(parse({type:"event_msg",payload:{type:"task_complete",turn_id:"turn-a"}}).status).toBe("unknown");
   });
+});
+
+it("excludes incidental native host events and retains normal source identity and inherited eligibility", () => {
+ for (const event of ['<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>', "<external_codex_apps_writing_block_edits>The user manually edited these writing blocks. Treat the following snapshots as the current versions of those blocks, superseding the earlier assistant output.\n[]</external_codex_apps_writing_block_edits>"]) {
+  const parse = harness(); parse(turn);
+  expect(parse(record("user", "incidental", event))).toMatchObject({ status: "excluded", state: { internalTurn: false, normalUserSeen: false } });
+  const normal = "Preserve my actual request";
+  expect(parse(record("user", "human", normal))).toMatchObject({ status: "message", message: { text: normal, nativeMessageId: "human" } });
+  parse({ type: "event_msg", payload: { type: "task_started", turn_id: "turn-b" } });
+  expect(parse(record("user", "next-incidental", event))).toMatchObject({ status: "excluded", state: { internalTurn: false, normalUserSeen: false } });
+  const final = "Complete the inherited work";
+  expect(parse(record("assistant", "final", final, "final_answer"))).toMatchObject({ status: "message", message: { text: final, kind: "assistant_final" } });
+ }
 });

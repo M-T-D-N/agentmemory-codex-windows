@@ -1,3 +1,7 @@
+import { readCurrentProfile } from "./profile.js";
+import { resolveReadAgentId } from "./read-agent-scope.js";
+import { sanitizeCodexAmbientObservation } from "./observation-visibility.js";
+import { memoryToObservation } from "../state/memory-utils.js";
 import type { ISdk } from "iii-sdk";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -120,15 +124,18 @@ export function registerClaudeBridgeFunction(
       }
 
       try {
+        const agentId = resolveReadAgentId(undefined, "mem::claude-bridge-sync");
         const memories = await kv.list<Memory>(KV.memories);
         const hidden = await readArchiveVisibility(kv);
-        const latestMemories = memories.filter((m) => m.isLatest && !hidden({ kind: "memory", id: m.id }));
+        const latestMemories = memories.flatMap((m) => {
+          if (!m.isLatest || hidden({ kind: "memory", id: m.id }) || (agentId !== undefined && m.agentId !== agentId)) return [];
+          const visible = sanitizeCodexAmbientObservation(memoryToObservation(m));
+          return visible ? [{ ...m, content: visible.narrative }] : [];
+        });
 
         let projectSummary = "";
         if (config.projectPath) {
-          const profile = await kv
-            .get<{ summary?: string }>(KV.profiles, config.projectPath)
-            .catch(() => null);
+          const profile = await readCurrentProfile(kv, config.projectPath, agentId);
           projectSummary = profile?.summary || "";
         }
 

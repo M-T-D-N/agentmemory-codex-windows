@@ -214,6 +214,8 @@ export async function startStreamableHttpServer(
   let resourceUrl = "";
 
   const server = createServer(async (request, response) => {
+    // Closing each response prevents stale pooled connections from racing the idle timeout.
+    response.setHeader("connection", "close");
     try {
       if (request.socket.remoteAddress !== "127.0.0.1") {
         throw new HttpStatusError(403, "IPv4 loopback access is required");

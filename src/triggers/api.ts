@@ -11,7 +11,7 @@ import { selectSessionPage } from "../functions/session-query.js";
 import { readArchiveVisibility } from "../functions/archive.js";
 import { legacyMeshArchiveError } from "../functions/archive-transfer.js";
 import { registerObservationWriter } from "../state/observation-write.js";
-import { parseArchiveToolInput } from "../functions/archive-tools.js";
+import { archiveOperationError, parseArchiveToolInput } from "../functions/archive-tools.js";
 import { safeAudit } from "../functions/audit.js";
 import type { ObservationSourceInput } from "../functions/provenance.js";
 import { KV, STREAM } from "../state/schema.js";
@@ -260,7 +260,7 @@ export function registerApiTriggers(
       if (!notify) return { status_code: 200, body };
       const source = (body.nativeCapture ?? {}) as Record<string, unknown>;
       const state = JSON.stringify([body.writeRecoveryRequired, source.status ?? "unknown",
-        source.discoveryIssues ?? 0, source.captureIssues ?? 0, source.graphFailures ?? 0,
+        source.discoveryIssues ?? 0, source.captureIssues ?? 0, source.sourceUnavailable ?? 0, source.graphFailures ?? 0,
         Number(source.consecutiveFailures) > 0]);
       const notificationChanged = state !== lastNotificationState;
       lastNotificationState = state;
@@ -893,7 +893,7 @@ export function registerApiTriggers(
             (!!existing.firstPrompt?.trim() && !isCodexInternalAmbientText(existing.firstPrompt)));
         if (reason === "codex_internal_prompt" && hasNormalCapture) {
           const internalTurnId = asNonEmptyString(body.turnId);
-          if (!internalTurnId || internalTurnId === existing.codexCaptureTurnId) {
+          if (existing.codexCaptureTurnId != null && (!internalTurnId || internalTurnId === existing.codexCaptureTurnId)) {
             await kv.update(KV.sessions, sessionId, [
               { type: "set", path: "codexCaptureTurnId", value: null },
               { type: "set", path: "updatedAt", value: new Date().toISOString() },
@@ -1294,11 +1294,11 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::file-context", 
     async (
-      req: ApiRequest<{ sessionId: string; files: string[] }>,
+      req: ApiRequest<{ sessionId: string; files: string[]; project?: string; agentId?: string }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const result = await sdk.trigger({ function_id: "mem::file-context", payload: req.body });
+      const result = await sdk.trigger({ function_id: "mem::file-context", payload: { sessionId: req.body?.sessionId, files: req.body?.files, project: req.body?.project, agentId: req.body?.agentId } });
       return { status_code: 200, body: result };
     },
   );
@@ -1493,10 +1493,10 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::patterns", 
-    async (req: ApiRequest<{ project?: string }>): Promise<Response> => {
+    async (req: ApiRequest<{ project?: string; agentId?: string }>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const result = await sdk.trigger({ function_id: "mem::patterns", payload: req.body });
+      const result = await sdk.trigger({ function_id: "mem::patterns", payload: { project: req.body?.project, agentId: req.body?.agentId } });
       return { status_code: 200, body: result };
     },
   );
@@ -1507,10 +1507,10 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::generate-rules", 
-    async (req: ApiRequest<{ project?: string }>): Promise<Response> => {
+    async (req: ApiRequest<{ project?: string; agentId?: string }>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const result = await sdk.trigger({ function_id: "mem::generate-rules", payload: req.body });
+      const result = await sdk.trigger({ function_id: "mem::generate-rules", payload: { project: req.body?.project, agentId: req.body?.agentId } });
       return { status_code: 200, body: result };
     },
   );
@@ -1673,6 +1673,7 @@ export function registerApiTriggers(
       req: ApiRequest<{
         anchor: string;
         project?: string;
+        agentId?: string;
         before?: number;
         after?: number;
         offset?: number;
@@ -1701,6 +1702,7 @@ export function registerApiTriggers(
       const result = await sdk.trigger({ function_id: "mem::timeline", payload: {
         anchor: body.anchor,
         project: body.project?.trim(),
+        agentId: body.agentId,
         before: body.before,
         after: body.after,
         offset: body.offset,
@@ -1726,7 +1728,7 @@ export function registerApiTriggers(
           body: { error: "project query param is required" },
         };
       }
-      const result = await sdk.trigger({ function_id: "mem::profile", payload: { project } });
+      const result = await sdk.trigger({ function_id: "mem::profile", payload: { project, agentId: req.query_params["agentId"] } });
       return { status_code: 200, body: result };
     },
   );
@@ -2114,7 +2116,8 @@ export function registerApiTriggers(
       const result = await sdk.trigger({ function_id: "mem::archive", payload });
       return { status_code: result && typeof result === "object" && (result as { success?: boolean }).success === false ? 422 : 200, body: result };
     } catch (error) {
-      return { status_code: 422, body: { error: error instanceof Error ? error.message : "Archive operation failed" } };
+      const result = archiveOperationError(error);
+      return { status_code: result.retryable ? 409 : 422, body: result };
     }
   });
   sdk.registerTrigger({ type: "http", function_id: "api::archive",

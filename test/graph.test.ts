@@ -10,7 +10,6 @@ vi.mock("../src/config.js", async (importOriginal) => {
 });
 
 import {
-  inspectGraphSessionReferences,
   persistGraphDelta,
   registerGraphFunction,
 } from "../src/functions/graph.js";
@@ -238,17 +237,6 @@ describe("Graph Functions", () => {
       sourceObservationIds: ["obs_2"],
       sourceSessionIds: ["ses_1"],
     });
-    await sdk.trigger("mem::graph-snapshot-rebuild", { force: true });
-    await expect(
-      inspectGraphSessionReferences(kv as never, ["ses_1", "ses_missing"]),
-    ).resolves.toEqual([
-      {
-        sessionId: "ses_1",
-        nodeIds: expect.arrayContaining([expect.any(String), expect.any(String)]),
-        edgeIds: [expect.any(String)],
-      },
-      { sessionId: "ses_missing", nodeIds: [], edgeIds: [] },
-    ]);
     expect(await kv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
       .toMatchObject({
         semanticGraphThroughObservationId: "obs_2",
@@ -1221,12 +1209,13 @@ describe("Graph Functions", () => {
   });
 
 
-  it.each(["initial", "delta", "noop"])("consumes internal approval input without deriving graph content or deleting the source: %s", async (mode) => {
+  it.each(["initial", "delta", "noop", "page_event", "ui_only"])("consumes internal approval input without deriving graph content or deleting the source: %s", async (mode) => {
     const localSdk = mockSdk(), localKv = mockKV();
     const prefix = mode === "initial"
       ? "The following is the Codex agent history whose request action you are assessing."
       : "The following is the Codex agent history added since your last approval assessment.";
-    const observation = { ...testObs, narrative: prefix + " Synthetic internal review.", concepts: ["must not derive"], files: ["internal-only.ts"] };
+    const narrative = mode === "page_event" ? '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>' : mode === "ui_only" ? '<agentmemory-ambient-ui-state>state</agentmemory-ambient-ui-state>' : prefix + " Synthetic internal review.";
+    const observation = { ...testObs, narrative, concepts: ["must not derive"], files: ["internal-only.ts"] };
     const provider = { name: mode === "noop" ? "noop" : "local-qwen", compress: vi.fn(), summarize: vi.fn() };
     const session = { id: "ses_1", project: "/project-a", status: "completed", observationCount: 1, semanticGraphLastError: "entity contains an invalid key, type, or name" };
     await localKv.set("mem:sessions", "ses_1", session);
@@ -1240,7 +1229,7 @@ describe("Graph Functions", () => {
     expect(await localKv.list("mem:graph:nodes")).toEqual([]);
     expect(await localKv.list("mem:graph:edges")).toEqual([]);
     const audit = (await localKv.list<Record<string, any>>("mem:audit")).find(a => a.functionId === "mem::graph-extract");
-    expect(audit).toMatchObject({ targetIds: [observation.id], details: { processingCompleted: true, semanticCompleted: false, excludedObservationIds: [observation.id], exclusionReason: "codex_approval_review" } });
+    expect(audit).toMatchObject({ targetIds: [observation.id], details: { processingCompleted: true, semanticCompleted: false, excludedObservationIds: [observation.id], exclusionReason: ["page_event", "ui_only"].includes(mode) ? "codex_internal_host_event" : "codex_approval_review" } });
   });
 
   it.each([false, true])("excludes internal sources from mixed batches while preserving exact cursor and citation checks: %s", async (citeInternal) => {
@@ -1277,13 +1266,13 @@ describe("Graph Functions", () => {
     expect(provider.compress).toHaveBeenCalledOnce();
   });
 
-  it("keeps the semantic cursor unchanged when foreground Qwen preempts extraction", async () => {
+  it.each(["foreground_requested", "shutdown"])("keeps the semantic cursor unchanged when Qwen extraction is deferred: %s", async (reason) => {
     const localSdk = mockSdk();
     const localKv = mockKV();
     const provider = {
       name: "local-qwen",
       compress: vi.fn(async () => {
-        throw new Error("local_qwen_deferred:foreground_requested");
+        throw new Error(`local_qwen_deferred:${reason}`);
       }),
       summarize: vi.fn(),
       getRuntimeInfo: () => null,
@@ -1307,12 +1296,12 @@ describe("Graph Functions", () => {
 
     expect(result).toMatchObject({
       semanticCompleted: false,
-      semanticError: "local_qwen_deferred:foreground_requested",
+      semanticError: `local_qwen_deferred:${reason}`,
     });
     expect(await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
       .toMatchObject({
         semanticGraphStatus: "deferred",
-        semanticGraphLastError: "local_qwen_deferred:foreground_requested",
+        semanticGraphLastError: `local_qwen_deferred:${reason}`,
       });
     expect((await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))
       ?.semanticGraphThroughObservationId).toBeUndefined();

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,19 @@ import { codexSessionForTransfer } from "../src/replay/codex-capture-state.js";
 import { retainCodexForgetExclusions, codexExclusionId } from "../src/functions/codex-capture-exclusion.js";
 
 describe("native source capture checkpoints", () => {
+  it("does not persist an unchanged checkpoint but still captures an appended original", async () => {
+    await initialize();
+    await capture(async () => {});
+    const before = await kv.get<Session>(KV.sessions, "s");
+    const writes = vi.spyOn(kv, "set");
+    expect(await capture(async () => {})).toMatchObject({ inserted: 0, status: "caught_up", indexPending: false });
+    expect(writes).not.toHaveBeenCalled();
+    expect(await kv.get(KV.sessions, "s")).toEqual(before);
+    await appendFile(join(root, sourcePath), JSON.stringify(message("appended", 3, "new original")) + "\n");
+    expect(await capture(async () => {})).toMatchObject({ inserted: 1, indexPending: false });
+    expect(writes).toHaveBeenCalled();
+    writes.mockRestore();
+  });
   it.each([false, true])("preserves proven duplicate IDs across archive, restore and capture (raw: %s)", async raw => {
     const first = raw ? rawPrompt("a-original", 1) : legacy("a-original", 1);
     const copy = legacy("b-copy", 1);
@@ -503,6 +516,20 @@ describe("native source capture checkpoints", () => {
     const before = (await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.cursor;
     await expect(captureCodexSourceWindow(kv as never, scope, managed(), { readWindow: async () => { throw Error("source unavailable"); } })).rejects.toThrow("source unavailable");
     expect(await kv.get(KV.sessions, "s")).toMatchObject({ codexNativeCapture: { status: "unknown", issue: "native_source_read_failed", cursor: before } });
+  });
+  it.each(["ENOENT", "EACCES"])("preserves source data and resumes after a %s read error", async code => {
+    await initialize(); await capture();
+    const before = (await kv.get<Session>(KV.sessions, "s"))!;
+    const observations = await kv.list(KV.observations("s"));
+    await expect(captureCodexSourceWindow(kv as never, scope, managed(), {
+      readWindow: async () => { throw Object.assign(Error("source unavailable"), { code }); },
+    })).rejects.toThrow("source unavailable");
+    expect(await kv.get(KV.sessions, "s")).toMatchObject({ codexNativeCapture: { status: "unknown",
+      issue: code === "ENOENT" ? "native_source_missing" : "native_source_read_failed", cursor: before.codexNativeCapture!.cursor } });
+    expect(await kv.list(KV.observations("s"))).toEqual(observations);
+    expect(await capture()).toMatchObject({ status: "caught_up", inserted: 0 });
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.issue).toBeUndefined();
+    expect(await kv.list(KV.observations("s"))).toEqual(observations);
   });
   it("refuses new unbound hook captures instead of duplicating them", async () => {
     await initialize();

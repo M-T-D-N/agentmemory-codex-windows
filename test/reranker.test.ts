@@ -4,7 +4,7 @@ vi.mock("@huggingface/transformers", () => {
   throw new Error("not installed");
 });
 
-import { rerank, isRerankerAvailable } from "../src/state/reranker.js";
+import { rerank } from "../src/state/reranker.js";
 
 describe("reranker", () => {
   it("returns results unchanged when @huggingface/transformers is unavailable", async () => {
@@ -37,10 +37,6 @@ describe("reranker", () => {
 
     const reranked = await rerank("test query", results);
     expect(reranked).toEqual(results);
-  });
-
-  it("isRerankerAvailable returns false when not loaded", () => {
-    expect(isRerankerAvailable()).toBe(false);
   });
 
   it("handles single result gracefully", async () => {

@@ -1,14 +1,15 @@
-import Anthropic from '@anthropic-ai/sdk'
+import type Anthropic from '@anthropic-ai/sdk'
 import type { MemoryProvider } from '../types.js'
 
 export class AnthropicProvider implements MemoryProvider {
   name = 'anthropic'
-  private client: Anthropic
+  private clientPromise: Promise<Anthropic> | null = null
+  private clientOptions: { apiKey: string; baseURL?: string }
   private model: string
   private maxTokens: number
 
   constructor(apiKey: string, model: string, maxTokens: number, baseURL?: string) {
-    this.client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) })
+    this.clientOptions = { apiKey, ...(baseURL ? { baseURL } : {}) }
     this.model = model
     this.maxTokens = maxTokens
   }
@@ -22,7 +23,8 @@ export class AnthropicProvider implements MemoryProvider {
   }
 
   async describeImage(imageData: string, mimeType: string, prompt: string): Promise<string> {
-    const response = await this.client.messages.create({
+    const client = await this.loadClient()
+    const response = await client.messages.create({
       model: this.model,
       max_tokens: this.maxTokens,
       messages: [{
@@ -42,7 +44,8 @@ export class AnthropicProvider implements MemoryProvider {
   }
 
   private async call(systemPrompt: string, userPrompt: string): Promise<string> {
-    const response = await this.client.messages.create({
+    const client = await this.loadClient()
+    const response = await client.messages.create({
       model: this.model,
       max_tokens: this.maxTokens,
       system: systemPrompt,
@@ -51,5 +54,12 @@ export class AnthropicProvider implements MemoryProvider {
 
     const textBlock = response.content.find((b) => b.type === 'text')
     return textBlock?.text ?? ''
+  }
+
+  private loadClient(): Promise<Anthropic> {
+    if (!this.clientPromise) {
+      this.clientPromise = import('@anthropic-ai/sdk').then(({ default: Client }) => new Client(this.clientOptions))
+    }
+    return this.clientPromise
   }
 }

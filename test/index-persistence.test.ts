@@ -83,6 +83,129 @@ async function getBm25Manifest(kv: MockKV): Promise<TestIndexShardManifest> {
 describe("IndexPersistence", () => {
   let kv: ReturnType<typeof mockKV>;
 
+  it("does not publish when the previous manifest cannot be read", async () => {
+    const guardedKv = {
+      ...kv,
+      get: async <T>(scope: string, key: string): Promise<T | null> => {
+        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) throw new Error("manifest read unavailable");
+        return kv.get<T>(scope, key);
+      },
+      set: vi.fn(kv.set),
+      delete: vi.fn(kv.delete),
+    };
+    const persistence = new IndexPersistence(guardedKv as never, makeBm25("kept", "preserved original"), null);
+    await expect(persistence.save({ requireSuccess: true })).rejects.toThrow("manifest read unavailable");
+    expect(guardedKv.set).not.toHaveBeenCalled();
+    expect(guardedKv.delete).not.toHaveBeenCalled();
+    persistence.stop();
+  });
+
+  it("cleans the previous generation when manifest publication committed before its response failed", async () => {
+    await new IndexPersistence(kv as never, makeBm25("old", "previous generation"), null).save({ requireSuccess: true });
+    const previous = await getBm25Manifest(kv);
+    const guardedKv = {
+      ...kv,
+      set: async <T>(scope: string, key: string, value: T): Promise<T> => {
+        const result = await kv.set(scope, key, value);
+        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY && (value as TestIndexShardManifest).shards[0]?.scope !== previous.shards[0].scope) throw new Error("publication response lost");
+        return result;
+      },
+    };
+    const persistence = new IndexPersistence(guardedKv as never, makeBm25("new", "current searchable generation"), null);
+    await expect(persistence.save({ requireSuccess: true })).rejects.toThrow("publication response lost");
+    const loaded = await new IndexPersistence(kv as never, new SearchIndex(), null).load();
+    expect(loaded.bm25?.search("searchable")[0]?.obsId).toBe("new");
+    for (const shard of previous.shards) expect(await kv.get(shard.scope, shard.key)).toBeNull();
+    persistence.stop();
+  });
+
+  it("preserves published shards when publication outcome verification is unavailable", async () => {
+    await new IndexPersistence(kv as never, makeBm25("old", "previous generation"), null).save({ requireSuccess: true });
+    const previous = await getBm25Manifest(kv);
+    let verificationUnavailable = false;
+    const guardedKv = {
+      ...kv,
+      get: async <T>(scope: string, key: string): Promise<T | null> => {
+        if (verificationUnavailable && scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) throw new Error("outcome check unavailable");
+        return kv.get<T>(scope, key);
+      },
+      set: async <T>(scope: string, key: string, value: T): Promise<T> => {
+        const result = await kv.set(scope, key, value);
+        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY && (value as TestIndexShardManifest).shards[0]?.scope !== previous.shards[0].scope) {
+          verificationUnavailable = true;
+          throw new Error("publication response lost");
+        }
+        return result;
+      },
+      delete: vi.fn(kv.delete),
+    };
+    const persistence = new IndexPersistence(guardedKv as never, makeBm25("new", "current searchable generation"), null);
+    await expect(persistence.save({ requireSuccess: true })).rejects.toThrow();
+    expect(guardedKv.delete).not.toHaveBeenCalled();
+    const loaded = await new IndexPersistence(kv as never, new SearchIndex(), null).load();
+    expect(loaded.bm25?.search("searchable")[0]?.obsId).toBe("new");
+    persistence.stop();
+  });
+
+  it.each([false, true])("preserves the prior snapshot when preparation acknowledgement fails (published=%s)", async published => {
+    const old = makeBm25("old", "historical original");
+    if (published) await new IndexPersistence(kv as never, old, null).save({ requireSuccess: true });
+    else await kv.set(BM25_SCOPE, BM25_LEGACY_KEY, old.serialize());
+    const guardedKv = { ...kv, set: vi.fn(async <T>(scope: string, key: string, value: T): Promise<T> => {
+      await kv.set(scope, key, value);
+      if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) throw Error("preparation acknowledgement lost");
+      return value;
+    }), delete: vi.fn(kv.delete) };
+    const next = makeBm25("new", "new searchable addition"), writer = new IndexPersistence(guardedKv as never, next, null);
+    await expect(writer.save({ requireSuccess: true })).rejects.toThrow("preparation acknowledgement lost");
+    writer.stop();
+    expect(guardedKv.set.mock.calls.filter(([scope]) => scope.startsWith(BM25_SCOPE + ":bm25:"))).toHaveLength(0);
+    expect(guardedKv.delete).not.toHaveBeenCalled();
+    expect((await new IndexPersistence(kv as never, new SearchIndex(), null).load()).bm25?.search("historical")[0]?.obsId).toBe("old");
+    await new IndexPersistence(kv as never, next, null).save({ requireSuccess: true });
+    expect((await new IndexPersistence(kv as never, new SearchIndex(), null).load()).bm25?.search("searchable")[0]?.obsId).toBe("new");
+  });
+
+  it("fails closed on a malformed empty pending manifest instead of loading legacy data", async () => {
+    await kv.set(BM25_SCOPE, BM25_LEGACY_KEY, makeBm25("old", "historical original").serialize());
+    await kv.set(BM25_SCOPE, BM25_MANIFEST_KEY, { v: 1, generation: "pending", chars: 0, shards: [],
+      obsoleteShards: [{ scope: "mem:observations:protected", key: "data", chars: 1 }] });
+    const guardedKv = { ...kv, delete: vi.fn(kv.delete) };
+    expect((await new IndexPersistence(guardedKv as never, new SearchIndex(), null).load()).bm25).toBeNull();
+    expect(guardedKv.delete).not.toHaveBeenCalled();
+  });
+  it("reuses verified persisted content after a new persistence instance loads it", async () => {
+    const bm25 = makeBm25("restart-reuse", "durable restart search"), vector = makeVector();
+    await new IndexPersistence(kv as never, bm25, vector).save({ requireSuccess: true });
+    const guardedKv = { ...kv, set: vi.fn(kv.set) };
+    const restartedBm25 = new SearchIndex(), restartedVector = new VectorIndex();
+    const restarted = new IndexPersistence(guardedKv as never, restartedBm25, restartedVector);
+    const loaded = await restarted.load();
+    expect(loaded.bm25?.search("restart")[0]?.obsId).toBe("restart-reuse");
+    expect(loaded.vector?.size).toBe(1);
+    restartedBm25.restoreFrom(loaded.bm25!);
+    restartedVector.restoreFrom(loaded.vector!);
+    await restarted.save({ requireSuccess: true });
+    expect(guardedKv.set).not.toHaveBeenCalled();
+  });
+
+  it("bounds shard reads while loading the complete search snapshot", async () => {
+    const bm25 = makeBm25("bounded-load", "preserved searchable narrative ".repeat(30));
+    await new IndexPersistence(kv as never, bm25, null, { shardChars: 40 }).save({ requireSuccess: true });
+    expect((await getBm25Manifest(kv)).shards.length).toBeGreaterThan(4);
+    let active = 0, peak = 0;
+    const guardedKv = { ...kv, get: async <T>(scope: string, key: string): Promise<T | null> => {
+      if (!scope.startsWith("mem:index:bm25:bm25:")) return kv.get<T>(scope, key);
+      active++; peak = Math.max(peak, active);
+      try { await Promise.resolve(); return await kv.get<T>(scope, key); }
+      finally { active--; }
+    } };
+    const loaded = await new IndexPersistence(guardedKv as never, new SearchIndex(), null).load();
+    expect(loaded.bm25?.search("searchable")[0]?.obsId).toBe("bounded-load");
+    expect(peak).toBeLessThanOrEqual(4);
+    expect(peak).toBeGreaterThan(1);
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     kv = mockKV();
@@ -90,6 +213,156 @@ describe("IndexPersistence", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("skips BM25 serialization after an unchanged revision and manifest are confirmed", async () => {
+    const bm25 = new SearchIndex(), observation = makeObs();
+    bm25.add(observation);
+    const serialize = vi.spyOn(bm25, "serialize");
+    const guardedKv = { ...kv, get: vi.fn(kv.get), set: vi.fn(kv.set) };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, null);
+    await persistence.save({ requireSuccess: true });
+    guardedKv.get.mockClear(); guardedKv.set.mockClear();
+    bm25.add(observation); bm25.remove("missing");
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(1);
+    expect(guardedKv.get).toHaveBeenCalledWith(BM25_SCOPE, BM25_MANIFEST_KEY);
+    expect(guardedKv.set).not.toHaveBeenCalled();
+  });
+
+  it("persists captured direct insertions and later removals and clears", async () => {
+    const bm25 = makeBm25("original", "original snapshot");
+    const serialize = vi.spyOn(bm25, "serialize");
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    await persistence.save({ requireSuccess: true });
+    const source = new SearchIndex(), changes = source.captureChanges();
+    source.add(makeObs({ id: "captured", title: "capturedrevision" }));
+    changes.applyTo(bm25); changes.stop();
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(2);
+    expect((await persistence.load()).bm25?.search("capturedrevision")[0]?.obsId).toBe("captured");
+    bm25.remove("captured");
+    await persistence.save({ requireSuccess: true });
+    bm25.clear();
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(4);
+    expect((await persistence.load()).bm25?.size).toBe(0);
+  });
+
+  it("persists changes made while the unchanged manifest check is pending", async () => {
+    const bm25 = makeBm25("original", "original snapshot");
+    const serialize = vi.spyOn(bm25, "serialize");
+    let release!: () => void, started!: () => void, hold = false;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const checking = new Promise<void>(resolve => { started = resolve; });
+    const guardedKv = { ...kv, get: async <T>(scope: string, key: string): Promise<T | null> => {
+      if (hold && scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) {
+        hold = false; started(); await barrier;
+      }
+      return kv.get<T>(scope, key);
+    } };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, null);
+    await persistence.save({ requireSuccess: true });
+    hold = true;
+    const saving = persistence.save({ requireSuccess: true });
+    await checking;
+    bm25.add(makeObs({ id: "during-check", title: "checkmutation" }));
+    release(); await saving;
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(2);
+    expect((await persistence.load()).bm25?.search("checkmutation")[0]?.obsId).toBe("during-check");
+  });
+
+  it("keeps mutations made during a save dirty until a follow-up flush", async () => {
+    const bm25 = makeBm25("original", "original snapshot");
+    const serialize = vi.spyOn(bm25, "serialize");
+    let release!: () => void, started!: () => void, blocked = false;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const writing = new Promise<void>(resolve => { started = resolve; });
+    const guardedKv = { ...kv, set: async <T>(scope: string, key: string, value: T): Promise<T> => {
+      if (!blocked && scope.startsWith(BM25_SCOPE + ":bm25:")) {
+        blocked = true; started(); await barrier;
+      }
+      return kv.set(scope, key, value);
+    } };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, null);
+    const first = persistence.save({ requireSuccess: true });
+    await writing;
+    bm25.add(makeObs({ id: "during-save", title: "savemutation" }));
+    release(); await first;
+    await persistence.save({ requireSuccess: true });
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(2);
+    expect((await persistence.load()).bm25?.search("savemutation")[0]?.obsId).toBe("during-save");
+  });
+
+  it.each([false, true])("does not mark rejected manifest writes clean (committed=%s)", async committed => {
+    const bm25 = makeBm25("original", "retry snapshot");
+    const serialize = vi.spyOn(bm25, "serialize");
+    let fail = true;
+    const guardedKv = { ...kv, set: async <T>(scope: string, key: string, value: T): Promise<T> => {
+      if (fail && scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) {
+        if (committed) await kv.set(scope, key, value);
+        throw new Error("manifest save failed");
+      }
+      return kv.set(scope, key, value);
+    } };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, null);
+    await expect(persistence.save({ requireSuccess: true })).rejects.toThrow("manifest save failed");
+    fail = false;
+    await persistence.save({ requireSuccess: true });
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(2);
+    expect((await persistence.load()).bm25?.search("retry")[0]?.obsId).toBe("original");
+  });
+
+  it("rewrites a replaced manifest instead of skipping an unchanged revision", async () => {
+    const bm25 = makeBm25("original", "originalsnapshot");
+    const serialize = vi.spyOn(bm25, "serialize");
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    await persistence.save({ requireSuccess: true });
+    await new IndexPersistence(kv as never, makeBm25("foreign", "foreignsnapshot"), null).save({ requireSuccess: true });
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(2);
+    const restored = (await persistence.load()).bm25!;
+    expect(restored.search("originalsnapshot")[0]?.obsId).toBe("original");
+    expect(restored.search("foreignsnapshot")).toEqual([]);
+  });
+
+  it("does not associate a newly loaded manifest with the unchanged live revision", async () => {
+    const bm25 = makeBm25("original", "originalsnapshot");
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+    await persistence.save({ requireSuccess: true });
+    await new IndexPersistence(kv as never, makeBm25("foreign", "foreignsnapshot"), null).save({ requireSuccess: true });
+    expect((await persistence.load()).bm25?.search("foreignsnapshot")[0]?.obsId).toBe("foreign");
+    await persistence.save({ requireSuccess: true });
+    expect((await persistence.load()).bm25?.search("originalsnapshot")[0]?.obsId).toBe("original");
+  });
+
+  it("invalidates a save revision when an overlapping load later replaces its cached manifest", async () => {
+    const bm25 = makeBm25("original", "originalsnapshot");
+    const serialize = vi.spyOn(bm25, "serialize");
+    let release!: () => void, started!: () => void, hold = false;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { started = resolve; });
+    const guardedKv = { ...kv, get: async <T>(scope: string, key: string): Promise<T | null> => {
+      if (hold && scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) {
+        hold = false; started(); await barrier;
+      }
+      return kv.get<T>(scope, key);
+    } };
+    const persistence = new IndexPersistence(guardedKv as never, bm25, null);
+    await persistence.save({ requireSuccess: true });
+    hold = true;
+    const loading = persistence.load();
+    await reading;
+    await persistence.save({ requireSuccess: true });
+    await new IndexPersistence(kv as never, makeBm25("foreign", "foreignsnapshot"), null).save({ requireSuccess: true });
+    release();
+    expect((await loading).bm25?.search("foreignsnapshot")[0]?.obsId).toBe("foreign");
+    await persistence.save({ requireSuccess: true });
+    expect(serialize).toHaveBeenCalledTimes(3);
+    expect((await persistence.load()).bm25?.search("originalsnapshot")[0]?.obsId).toBe("original");
   });
 
   it("saves and loads BM25 index round-trip", async () => {
@@ -547,6 +820,47 @@ describe("IndexPersistence", () => {
     expect((await getBm25Manifest(kv)).generation).not.toBe(old.generation);
   });
 
+  it("retries failed old-shard cleanup after restarting without losing the current index", async () => {
+    const bm25 = makeBm25("old", "old generation");
+    const initial = new IndexPersistence(kv as never, bm25, null);
+    await initial.save({ requireSuccess: true });
+    const old = await getBm25Manifest(kv);
+    const failed = old.shards[0];
+    const guardedKv = { ...kv, delete: async (scope: string, key: string) => {
+      if (scope === failed.scope && key === failed.key) throw new Error("cleanup unavailable");
+      await kv.delete(scope, key);
+    }};
+    bm25.add(makeObs({ id: "new", title: "restart searchable evidence" }));
+    const writer = new IndexPersistence(guardedKv as never, bm25, null);
+    await writer.save({ requireSuccess: true });
+    writer.stop(); initial.stop();
+    expect(await kv.get(failed.scope, failed.key)).not.toBeNull();
+    const loader = new IndexPersistence(kv as never, new SearchIndex(), null);
+    const restored = (await loader.load()).bm25!;
+    expect(restored.search("searchable")[0]?.obsId).toBe("new");
+    const restarted = new IndexPersistence(kv as never, restored, null);
+    await restarted.save({ requireSuccess: true });
+    expect(await kv.get(failed.scope, failed.key)).toBeNull();
+    expect((await restarted.load()).bm25?.search("searchable")[0]?.obsId).toBe("new");
+    restarted.stop(); loader.stop();
+  });
+
+  it.each(["active", "foreign"])("preserves %s state when obsolete descriptors are invalid", async kind => {
+    const initial = new IndexPersistence(kv as never, makeBm25("kept", "protected content"), null);
+    await initial.save({ requireSuccess: true }); initial.stop();
+    const manifest = await getBm25Manifest(kv);
+    const protectedShard = kind === "active" ? manifest.shards[0] : { scope: "user:original", key: "data", chars: 8 };
+    if (kind === "foreign") await kv.set(protectedShard.scope, protectedShard.key, "original");
+    const protectedValue = await kv.get(protectedShard.scope, protectedShard.key);
+    await kv.set(BM25_SCOPE, BM25_MANIFEST_KEY, { ...manifest, obsoleteShards: [protectedShard] });
+    const restarted = new IndexPersistence(kv as never, new SearchIndex(), null);
+    const loaded = (await restarted.load()).bm25!;
+    const writer = new IndexPersistence(kv as never, loaded, null);
+    await expect(writer.save({ requireSuccess: true })).rejects.toThrow("Invalid obsolete index shard descriptor");
+    expect(await kv.get(protectedShard.scope, protectedShard.key)).toEqual(protectedValue);
+    restarted.stop(); writer.stop();
+  });
+
   it("performs the first requested save after loading in a new persistence instance", async () => {
     const bm25 = makeBm25("original", "restart evidence");
     const first = new IndexPersistence(kv as never, bm25, null);
@@ -612,7 +926,7 @@ describe("IndexPersistence", () => {
       createGeneration: () => "gen_new",
     }).save();
 
-    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toEqual(
+    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toMatchObject(
       previousManifest,
     );
     await expect(
@@ -638,7 +952,7 @@ describe("IndexPersistence", () => {
     const failingKv = {
       ...kv,
       set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
-        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) {
+        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY && (data as TestIndexShardManifest).generation === "gen_new") {
           throw new Error("manifest write failed");
         }
         return kv.set(scope, key, data);
@@ -651,7 +965,7 @@ describe("IndexPersistence", () => {
       createGeneration: () => "gen_new",
     }).save();
 
-    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toEqual(
+    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toMatchObject(
       previousManifest,
     );
     await expect(
@@ -676,7 +990,7 @@ describe("IndexPersistence", () => {
     const failingKv = {
       ...kv,
       set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
-        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) {
+        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY && (data as TestIndexShardManifest).generation === "gen_new") {
           await kv.set(scope, key, data);
           throw new Error("manifest write timed out after commit");
         }
@@ -728,7 +1042,7 @@ describe("IndexPersistence", () => {
       createGeneration: () => "gen_new",
     }).save();
 
-    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toEqual(
+    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toMatchObject(
       previousManifest,
     );
     await expect(
@@ -972,7 +1286,7 @@ describe("IndexPersistence", () => {
     vi.useFakeTimers(); const bm25 = makeBm25("outage", "evidence"); const set = vi.fn(async (_scope: string, _key: string, _value: unknown) => { throw Error("offline"); });
     const persistence = new IndexPersistence({ ...kv, set } as never, bm25, null);
     persistence.scheduleSave(); await vi.runAllTimersAsync();
-    expect(set.mock.calls.filter(([scope]) => String(scope).startsWith("mem:index:bm25:bm25:"))).toHaveLength(4); expect(vi.getTimerCount()).toBe(0); persistence.stop(); vi.useRealTimers();
+    expect(set.mock.calls.filter(([scope, key]) => scope === BM25_SCOPE && key === BM25_MANIFEST_KEY)).toHaveLength(4); expect(set.mock.calls.filter(([scope]) => String(scope).startsWith("mem:index:bm25:bm25:"))).toHaveLength(0); expect(vi.getTimerCount()).toBe(0); persistence.stop(); vi.useRealTimers();
   });
 
   it("scheduled save swallows kv.set rejection without unhandledRejection (#204)", async () => {

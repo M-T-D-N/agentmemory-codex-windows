@@ -24,7 +24,9 @@ import {
   estimateGraphExtractionInputTokens,
   toGraphExtractionObservation,
 } from "../src/prompts/graph-extraction.js";
+import { graphObservationDigest } from "../src/functions/graph-observation-result.js";
 import { logger } from "../src/logger.js";
+import { withKeyedLock } from "../src/state/keyed-mutex.js";
 import type { CompressedObservation, Session } from "../src/types.js";
 
 function observations(sessionId: string, count: number): CompressedObservation[] {
@@ -85,6 +87,18 @@ describe("semantic graph backlog", () => {
     expect(kv.get).not.toHaveBeenCalled();
     expect(kv.update).not.toHaveBeenCalled();
     expect(sdk.trigger).not.toHaveBeenCalled();
+  });
+
+  it("does not schedule evaluator sessions or advance their existing graph cursor", async () => {
+    let handler: (payload: {checkOnly: boolean}) => Promise<unknown> = async () => null;
+    const firstPrompt=JSON.stringify({instructions:"You are an independent reasoning-effort evaluator, not the task executor. Return only the supplied JSON schema.", question:"Which reasoning effort is sufficient for the NEXT generation of state.model?", state:{coverage:{source:"native DecisionContext + local projectEvidence"}}}).slice(0,200);
+    const sdk={registerFunction: (_id: string, fn: typeof handler) => {handler=fn;},trigger:vi.fn()};
+    const held=session("machine","A",{firstPrompt,semanticGraphStatus:"deferred",semanticGraphThroughObservationId:"machine_obs_1"});
+    const kv={list:async (scope:string) => scope==="mem:sessions"?[held]:observations("machine",2),get:vi.fn(),update:vi.fn()};
+    registerSemanticGraphBacklogFunction(sdk as never,kv as never);
+    expect(await handler({checkOnly:true})).toMatchObject({skipped:"backlog_empty"});
+    expect(kv.update).not.toHaveBeenCalled(); expect(sdk.trigger).not.toHaveBeenCalled();
+    expect(held.semanticGraphThroughObservationId).toBe("machine_obs_1");
   });
 
   it("automatically cold-starts eligible backlog, drains it, and releases after idle", async () => {
@@ -256,14 +270,14 @@ describe("semantic graph backlog", () => {
     expect(batch).toMatchObject({ cursorMode: "forward", semanticHasMore: true });
   });
 
-  it("excludes internal observations and strips ambient UI blocks before selection", () => {
+  it("retains excluded internal observations for cursor completion and strips mixed UI blocks", () => {
     const items = observations("a", 3);
     items[0]!.narrative = "<environment_context>internal only</environment_context>";
     items[1]!.narrative = '<panel source="ambient-ui-state">transient</panel>Useful decision';
     const batch = selectSemanticGraphBatch(session("a", "A"), items, 2);
 
-    expect(batch?.observations.map((item) => item.id)).toEqual(["a_obs_2", "a_obs_3"]);
-    expect(batch?.observations[0]?.narrative).toBe("Useful decision");
+    expect(batch?.observations.map((item) => item.id)).toEqual(["a_obs_1", "a_obs_2"]);
+    expect(batch?.observations[1]?.narrative).toBe("Useful decision");
   });
 
   it("continues after a legacy cursor that now points to an excluded observation", () => {
@@ -386,7 +400,7 @@ describe("semantic graph backlog", () => {
     expect(batch).toBeNull();
   });
 
-  it("ignores ambient-only observations rejected by provenance validation", () => {
+  it("selects ambient-only observations so official processing can complete them", () => {
     const owned = observations("a", 2);
     const ambient = {
       ...observations("a", 1)[0]!,
@@ -402,7 +416,7 @@ describe("semantic graph backlog", () => {
       [...owned, ambient],
       2,
     );
-    expect(batch).toBeNull();
+    expect(batch?.observations.map(o => o.id)).toEqual(["a_obs_3"]);
   });
 
   it("strips ambient UI blocks before sending an otherwise valid observation", () => {
@@ -468,6 +482,61 @@ describe("semantic graph backlog", () => {
         { type: "set", path: "semanticGraphLastError", value: "" },
       ]),
     );
+  });
+
+  it("validates already-complete version-one sessions once per step without persisting again", async () => {
+    const current = session("a", "A", {
+      semanticGraphStatus: "complete",
+      semanticGraphCompletionVersion: 1,
+      semanticGraphBootstrapSkipped: 0,
+    });
+    const ownedObservations = observations("a", 2);
+    const completions = ownedObservations.map((observation) => ({
+      version: 1,
+      id: observation.id,
+      sessionId: current.id,
+      project: current.project,
+      inputDigest: graphObservationDigest(observation),
+      graphEpoch: "",
+      completedAt: "2026-08-24T00:01:00.000Z",
+      analyzer: "test",
+      outcome: "extracted",
+    }));
+    const handlers = new Map<string, (payload: unknown) => Promise<unknown>>();
+    const trigger = vi.fn();
+    const sdk = {
+      registerFunction: (id: string, handler: (payload: unknown) => Promise<unknown>) => handlers.set(id, handler),
+      trigger,
+    };
+    const get = vi.fn(async (scope: string) => scope === "mem:sessions" ? current : null);
+    const list = vi.fn(async (scope: string) => {
+      if (scope === "mem:sessions") return [current];
+      if (scope === "mem:obs:a") return ownedObservations;
+      if (scope === "mem:graph:results:a") return completions;
+      return [];
+    });
+    const update = vi.fn(async () => undefined);
+    registerSemanticGraphBacklogFunction(sdk as never, { get, list, update } as never);
+    const step = handlers.get("mem::graph-backlog-step")!;
+
+    for (let repeat = 0; repeat < 2; repeat += 1) {
+      expect(await step({})).toMatchObject({
+        normalizedSessions: 0,
+        skipped: "backlog_empty",
+      });
+    }
+    expect(list.mock.calls.filter(([scope]) => scope === "mem:obs:a")).toHaveLength(2);
+    expect(list.mock.calls.filter(([scope]) => scope === "mem:graph:results:a")).toHaveLength(2);
+    expect(get.mock.calls.filter(([scope]) => scope === "mem:graph:snapshot")).toHaveLength(2);
+    expect(get.mock.calls.filter(([scope]) => scope === "mem:sessions")).toHaveLength(2);
+
+    // Completion status must not bypass the first canonical digest validation.
+    ownedObservations[0]!.narrative = "Changed canonical observation";
+    expect(await step({ checkOnly: true })).toMatchObject({ success: true, eligible: true });
+    expect(list.mock.calls.filter(([scope]) => scope === "mem:obs:a")).toHaveLength(3);
+    expect(list.mock.calls.filter(([scope]) => scope === "mem:graph:results:a")).toHaveLength(3);
+    expect(update).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1007,3 +1076,51 @@ it("requires renewed stable readiness after a hold even when the model fingerpri
     await scheduler.tick();expect(trigger).toHaveBeenCalledOnce();
   } finally {await scheduler.stop();vi.useRealTimers();}
 });
+it("coalesces backlog calls until the server handler actually finishes", async () => {
+  let handler!: (request: { checkOnly?: boolean }) => Promise<unknown>;
+  let finish!: (rows: Session[]) => void;
+  const list = vi.fn(() => new Promise<Session[]>(resolve => { finish = resolve; }));
+  const sdk = { registerFunction: (_id: string, fn: typeof handler) => { handler = fn; } };
+  registerSemanticGraphBacklogFunction(sdk as never, { list } as never);
+  const first = handler({}); await Promise.resolve(); await Promise.resolve();
+  try {
+    await expect(Promise.race([first, Promise.reject(Error("caller timeout"))])).rejects.toThrow("caller timeout");
+    expect(await handler({})).toEqual({ success: true, skipped: "backlog_running" });
+    expect(list).toHaveBeenCalledTimes(1);
+  } finally { finish([]); await first; }
+  const next = handler({}); await Promise.resolve(); await Promise.resolve();
+  finish([]); expect(await next).toMatchObject({ skipped: "backlog_empty" });
+});
+
+it("preserves pending backlog while another graph writer owns the graph", async () => {
+  let handler!: (request: { checkOnly?: boolean }) => Promise<unknown>;
+  const list = vi.fn();
+  registerSemanticGraphBacklogFunction({ registerFunction: (_id: string, fn: typeof handler) => { handler = fn; } } as never, { list } as never);
+  let release!: () => void;
+  const held = withKeyedLock("mem:graph-write", () => new Promise<void>(resolve => { release = resolve; }));
+  await Promise.resolve();
+  try {
+    expect(await handler({})).toEqual({ success: true, skipped: "graph_writer_busy" });
+    expect(list).not.toHaveBeenCalled();
+  } finally { release(); await held; }
+});
+
+it.each([{ skipped: "backlog_running" }, { skipped: "graph_writer_busy" },
+  { result: { success: true, skipped: "graph_writer_busy" } }])(
+  "resumes deferred graph work without releasing Qwen or waiting for a user request: %j", async busy => {
+    vi.useFakeTimers();
+    const runtime = { fingerprint: "resume-fixture" };
+    const trigger = vi.fn().mockResolvedValueOnce(busy).mockResolvedValue({ skipped: "backlog_empty" });
+    const release = vi.fn(async () => true);
+    const scheduler = startSemanticGraphBacklogScheduler({ trigger } as never,
+      { probe: async () => runtime } as never, runtime as never,
+      { readyGraceMs: 0, eventDrainCooldownMs: 100, idleReleaseMs: 1000,
+        lifecycle: { start: vi.fn(), release } });
+    try {
+      await scheduler.tick();
+      expect(trigger).toHaveBeenCalledTimes(1); expect(release).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(trigger).toHaveBeenCalledTimes(2); expect(release).not.toHaveBeenCalled();
+    } finally { await scheduler.stop(); }
+  },
+);

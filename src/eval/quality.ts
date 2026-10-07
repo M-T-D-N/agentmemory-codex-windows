@@ -33,19 +33,3 @@ export function scoreSummary(summary: {
   if (summary.concepts && summary.concepts.length > 0) score += 15;
   return Math.min(100, score);
 }
-
-export function scoreContextRelevance(
-  context: string,
-  project: string,
-): number {
-  let score = 0;
-  if (context.length > 0) score += 20;
-  if (project && context.toLowerCase().includes(project.toLowerCase())) score += 20;
-  if (context.includes("<")) score += 15;
-  const sectionCount = (context.match(/<\w+>/g) || []).length;
-  if (sectionCount >= 2) score += 15;
-  if (sectionCount >= 4) score += 10;
-  if (context.length >= 100) score += 10;
-  if (context.length >= 500) score += 10;
-  return Math.min(100, score);
-}

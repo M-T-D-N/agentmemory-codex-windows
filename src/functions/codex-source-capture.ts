@@ -269,7 +269,11 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
       if (!isDeepStrictEqual(window.source, state.source) ||
           (state.captureCwd !== undefined && typeof state.captureCwd !== "string") ||
           canonicalCodexCwd(state.captureCwd ?? window.source.cwd) !== canonicalCodexCwd(session.cwd)) throw Error("Native capture source identity changed");
-    } catch (error) { await markUnknown("native_source_read_failed"); throw error; }
+    } catch (error) {
+      const missing = error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+      await markUnknown(missing ? "native_source_missing" : "native_source_read_failed");
+      throw error;
+    }
     const observations = await kv.list<CompressedObservation>(KV.observations(session.id), { includeDeleted: true });
     const exclusions = await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions);
     let decisions: ReturnType<typeof matchCodexMessages>;
@@ -310,7 +314,11 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
       updatedAt: capturedAt, ...(rows.length ? { semanticGraphStatus: "pending" } : {}),
       codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, indexPending, snapshotBytes: window.snapshotBytes },
     };
-    await kv.set(KV.sessions, session.id, next);
+    const unchangedCheckpoint = rows.length === 0 && !indexPending && state.indexPending === false &&
+      next.observationCount === session.observationCount && status === state.status &&
+      window.issue?.reason === state.issue && window.snapshotBytes === state.snapshotBytes &&
+      isDeepStrictEqual(window.cursor, state.cursor);
+    if (!unchangedCheckpoint) await kv.set(KV.sessions, session.id, next);
     if (options.publish && indexPending) {
       try { await options.publish(indexRows, state.indexPending ? indexRows : rows); indexPending = false; } catch { /* Retry publication from canonical rows, without rewinding capture. */ }
       if (!indexPending) await kv.set(KV.sessions, session.id, { ...next, codexNativeCapture: { ...next.codexNativeCapture!, indexPending: false } });

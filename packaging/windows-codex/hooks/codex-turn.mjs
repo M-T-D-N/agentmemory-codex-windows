@@ -1,3 +1,4 @@
+import { isCodexInternalAmbientText as isInternalCodexAmbientPrompt, isCodexApprovalReviewText as isApprovalReviewPrompt, isExcludedCodexAmbientSession as isExcludedSession, isIncidentalCodexHostEvent as isIncidentalHostEvent, stripCodexAmbientUiBlocks } from "./codex-visibility.mjs";
 import { dirname, join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -95,7 +96,6 @@ const KOREAN_PARTICLE = /(?:에서는|으로는|이라고|이라는|에서|에�
 const GENERIC_KOREAN_ACTION = /^(?:잔여|작업|진행|검토|수정|확인|전달|정리|처리|병행|생각|필요|적절|부탁|완료|추가|사용|요청|설명|결과|내용|적대적|게시|배포|실행|띄워|열어|닫아|보여|켜|꺼|권장안|추천안|권장|추천|나열|분석|재분석|설정|도출)+(?:줘|주세요|줘요|해|해줘|해주세요|하고|하기|해서|하면|한다면|하자|하던|해도|했을|했을때|한|한건|한것|할|할지|할때|하는|하는지|됐는지|했는지|해줄래|해야할까|합니다|한지|하게|한것같은데)?$/u;
 const TERMINAL_GRAPH_STATUSES = new Set(["superseded", "rejected", "blocked"]);
 const OMITTED_RELATION_TYPES = new Set(["belongs_to"]);
-const AMBIENT_UI_CONTEXT_BLOCK = /<([a-z][a-z0-9-]*)\b(?=[^>]*\bsource=(["'])ambient-ui-state\2)[^>]*>[\s\S]*?<\/\1>\s*/gi;
 const CURATION_COMPLETION = /(?:완료(?:했|됐|되었습니다|함)|구현(?:했|됐|되었습니다|함)|수정(?:했|됐|되었습니다|함)|해결(?:했|됐|되었습니다|함)|검증(?:했|됐|되었습니다|함)|적용(?:했|됐|되었습니다|함)|implemented|completed|fixed|resolved|verified|applied)/i;
 const CURATION_DURABLE = /(?:결정|결론|근본\s*원인|교훈|재발|정책|구조|아키텍처|수명주기|워크플로|실패\s*원인|supersed|root cause|decision|lesson|policy|architecture|workflow)/i;
 const CURATION_EVIDENCE = /(?:변경\s*파일|실제\s*(?:조회|실행|검증|회상)|테스트|canary|commit|hash|nodes?|edges?|HTTP|status|경로|파일)/i;
@@ -143,81 +143,14 @@ function isSdkChildContext(payload) {
     || (typeof agentType === "string" && agentType.trim().toLowerCase() !== "main");
 }
 
-function isApprovalReviewPrompt(value) {
-  if (typeof value !== "string") return false;
-  const text = value.trim().toLowerCase();
-  return text.startsWith("the following is the codex agent history whose request action you are assessing.")
-    || text.startsWith("the following is the codex agent history added since your last approval assessment.");
-}
-
-function isIncidentalHostEvent(value) {
-  return typeof value === "string"
-    && /^<external_codex_apps_open_page>\s*\{"page_id":null\}\s*<\/external_codex_apps_open_page>$/u.test(value.trim());
-}
-
 function samePrompt(a, b) {
   return typeof a === "string" && typeof b === "string" && a.trim() === b.trim();
 }
 
-function isInternalCodexAmbientPrompt(value) {
-  if (typeof value !== "string") return false;
-
-  const text = value.trim().toLowerCase();
-  const structuredHostContext = [
-    "<environment_context",
-    "<codex_internal_context",
-    "<heartbeat",
-    "<codex_delegation",
-    "<subagent_notification",
-    "<agentmemory-curation",
-    "<in-app-browser-context",
-    "<hook_prompt",
-    "<recommended_plugins",
-    "<app-context",
-    "<skills_instructions",
-    "<apps_instructions",
-    "<plugins_instructions",
-    "<collaboration_mode",
-    "<permissions instructions",
-    "<turn_aborted",
-    "# agents.md instructions",
-    "# response annotations:",
-    "the following is the codex agent history whose request action you are assessing.",
-    "the following is the codex agent history added since your last approval assessment.",
-  ].some((prefix) => text.startsWith(prefix));
-  const suggestionGenerator = text.startsWith("# overview")
-    && text.includes("hyperpersonalized suggestion");
-  const suggestionSafetyReview = text.startsWith(
-    "you are an expert at upholding safety and compliance standards for codex ambient suggestions.",
-  );
-  const taskTitleGenerator = text.startsWith(
-    "you are a helpful assistant. you will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.",
-  );
-  const structuredDescriptionGenerator = text.startsWith(
-    "you are in a fork of an existing codex thread. fill the structured description field with a compact, search-oriented summary",
-  );
-  const existingConversationTitleGenerator = text.startsWith(
-    "you are a helpful assistant. you will be presented with the most recent messages in an existing conversation",
-  );
-  const activityUpdateGenerator = text.startsWith(
-    "you write the one-line activity update displayed beneath an existing codex task title.",
-  )
-    && text.includes("fill the structured summary field with one plain-text sentence");
-  return structuredHostContext
-    || suggestionGenerator
-    || suggestionSafetyReview
-    || taskTitleGenerator
-    || structuredDescriptionGenerator
-    || existingConversationTitleGenerator
-    || activityUpdateGenerator;
-}
-
 function promptText(value) {
   if (typeof value !== "string") return null;
-  let text = value;
-  if (!text.trim() || isInternalCodexAmbientPrompt(text) || isIncidentalHostEvent(text)) return null;
-  text = text.replace(AMBIENT_UI_CONTEXT_BLOCK, "");
-  if (!text.trim() || isInternalCodexAmbientPrompt(text) || isIncidentalHostEvent(text)) return null;
+  const text = stripCodexAmbientUiBlocks(value);
+  if (!text.trim() || isInternalCodexAmbientPrompt(text)) return null;
   return safeText(text);
 }
 
@@ -307,11 +240,6 @@ function observationCurationSource(observation, sessionId) {
     ...(content !== narrative.trim() ? { excerpt: true } : {}),
     content,
   };
-}
-
-function isExcludedSession(session) {
-  return session?.captureExcluded === true
-    || isInternalCodexAmbientPrompt(session?.firstPrompt ?? "");
 }
 
 function collectHandledObservationIds(memories, lessons, graph) {
@@ -909,7 +837,7 @@ function formatRecallContext(prompt, project, result) {
     const o = entry.observation;
     const label = `[${contextScalar(entry.project)}] ${contextScalar(o.id)} @${contextScalar(o.timestamp ?? "unknown")} ${entry.userSource ? "user" : "derived"}:`;
     const source = ` source=${JSON.stringify({ project: entry.project, obsId: o.id, sessionId: entry.sessionId ?? o.sessionId ?? null })}`;
-    return { label, source: contextScalar(source), text: String(o.narrative ?? o.title ?? "").replaceAll("<", "\\u003c").replaceAll(">", "\\u003e") };
+    return { label, source: contextScalar(source), text: stripCodexAmbientUiBlocks(String(o.narrative ?? o.title ?? "")).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e") };
   });
   const fullSize = estimateContextTokens(header + lines.map(row => `\n- ${row.label} ${row.text}${row.source}`).join("") + footer);
   const ceiling = RECALL_TOKEN_CEILINGS.find(budget => fullSize <= budget) ?? RECALL_TOKEN_CEILINGS.at(-1);
@@ -1168,7 +1096,7 @@ async function handleTurnWithinBudget(event, eventName) {
   if (isPrompt && !text) {
     const prompt = typeof rawPrompt === "string" ? rawPrompt : "";
     if (isIncidentalHostEvent(prompt)) return;
-    const ambientOnly = prompt.trim() && !prompt.replace(AMBIENT_UI_CONTEXT_BLOCK, "").trim();
+    const ambientOnly = prompt.trim() && !stripCodexAmbientUiBlocks(prompt).trim();
     if (isInternalCodexAmbientPrompt(prompt) || ambientOnly) {
       await markSessionExcluded(sessionId, project, cwd, "codex_internal_prompt", turnId);
     }

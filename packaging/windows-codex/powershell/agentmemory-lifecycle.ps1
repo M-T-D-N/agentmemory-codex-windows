@@ -1,5 +1,146 @@
 Set-StrictMode -Version Latest
 
+function Get-AgentMemoryProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    $process = $null
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        if ($process.HasExited) { return [pscustomobject]@{ state = 'absent' } }
+        return [pscustomobject]@{ state = 'present'; creation_date = $process.StartTime.ToUniversalTime().ToString('o') }
+    } catch {
+        if ($null -eq $process -and $_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenId*') {
+            return [pscustomobject]@{ state = 'absent' }
+        }
+        return [pscustomobject]@{ state = 'unknown' }
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
+    }
+}
+
+function Test-AgentMemoryRecordedRunExited {
+    param(
+        [Parameter(Mandatory = $true)]$RuntimeState,
+        [Parameter(Mandatory = $true)][scriptblock]$Probe
+    )
+    $count = 0
+    $exited = $true
+    foreach ($role in @('daemon', 'engine', 'worker')) {
+        $property = $RuntimeState.PSObject.Properties[$role]
+        # Failed starts may have no worker, but every recorded identity matters.
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        $pidProperty = $property.Value.PSObject.Properties['pid']
+        $creationProperty = $property.Value.PSObject.Properties['creation_date']
+        $creationValue = if ($null -ne $creationProperty) { $creationProperty.Value } else { $null }
+        # PS7 ConvertFrom-Json can materialize ISO dates as DateTime objects.
+        if ($creationValue -is [DateTime] -or $creationValue -is [DateTimeOffset]) { $creationValue = $creationValue.ToUniversalTime().ToString('o') }
+        $processId = 0
+        $created = [DateTimeOffset]::MinValue
+        if ($null -eq $pidProperty -or -not [int]::TryParse([string]$pidProperty.Value, [ref]$processId) -or $processId -le 0 -or
+            $null -eq $creationProperty -or -not [DateTimeOffset]::TryParseExact([string]$creationValue, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$created)) {
+            throw "Cannot confirm the recorded AgentMemory $role process identity."
+        }
+        $count++
+        $observed = & $Probe $processId
+        if ($null -eq $observed -or $null -eq $observed.PSObject.Properties['state']) { throw "Cannot confirm the recorded AgentMemory $role process exit." }
+        if ([string]$observed.state -eq 'absent') { continue }
+        if ([string]$observed.state -ne 'present' -or $null -eq $observed.PSObject.Properties['creation_date']) {
+            throw "Cannot confirm the recorded AgentMemory $role process exit."
+        }
+        $currentCreationValue = $observed.creation_date
+        if ($currentCreationValue -is [DateTime] -or $currentCreationValue -is [DateTimeOffset]) { $currentCreationValue = $currentCreationValue.ToUniversalTime().ToString('o') }
+        $currentCreated = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParseExact([string]$currentCreationValue, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$currentCreated)) {
+            throw "Cannot confirm the recorded AgentMemory $role process exit."
+        }
+        # A reused PID is a different process; it must never be terminated here.
+        if ($created.UtcDateTime.Ticks -eq $currentCreated.UtcDateTime.Ticks) { $exited = $false }
+    }
+    if ($count -eq 0) { throw 'Cannot confirm an AgentMemory run with no recorded process identities.' }
+    return $exited
+}
+
+function Get-AgentMemoryTaskSidSuffix {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Sid)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').Substring(0, 12).ToLowerInvariant() }
+    finally { $sha.Dispose(); [Array]::Clear($bytes, 0, $bytes.Length) }
+}
+
+function Resolve-AgentMemoryTaskPrincipalSid {
+    param([Parameter(Mandatory = $true)][string]$UserId)
+    if ($UserId -match '^S-1-') { return (New-Object Security.Principal.SecurityIdentifier($UserId)).Value }
+    return (New-Object Security.Principal.NTAccount($UserId)).Translate([Security.Principal.SecurityIdentifier]).Value
+}
+
+function Assert-AgentMemoryTaskRegistration {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$OwnerSid,
+        [Parameter(Mandatory = $true)][string]$InstallNonce,
+        [Parameter(Mandatory = $true)][ValidateSet('daemon', 'watchdog')][string]$Kind,
+        [Parameter(Mandatory = $true)]$Registration
+    )
+    $expectedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    $label = if ($Kind -eq 'daemon') { 'daemon' } else { 'app watchdog' }
+    $taskKind = if ($Kind -eq 'daemon') { 'Daemon' } else { 'Watchdog' }
+    $expectedName = "AgentMemoryCodex-$taskKind-" + (Get-AgentMemoryTaskSidSuffix -Sid $OwnerSid)
+    $expectedArguments = if ($Kind -eq 'daemon') { 'task' } else { 'watch' }
+    if (
+        [string]$Registration.task_path -ne '\' -or
+        [string]$Registration.task_name -ne $expectedName -or
+        [string]$Registration.owner_sid -ne $OwnerSid -or
+        [string]$Registration.install_nonce -ne $InstallNonce -or
+        [string]$Registration.description -ne "OpenAI Codex AgentMemory $label; install_nonce=$InstallNonce" -or
+        [IO.Path]::GetFullPath([string]$Registration.execute) -ne (Join-Path $expectedRoot 'bin\agentmemory-hidden-launcher.exe') -or
+        [string]$Registration.arguments -ne $expectedArguments -or
+        [IO.Path]::GetFullPath([string]$Registration.working_directory).TrimEnd('\', '/') -ne $expectedRoot
+    ) { throw 'The protected AgentMemory scheduled-task registration does not match this installation.' }
+    if ($Kind -eq 'watchdog' -and (
+        [string]$Registration.trigger_type -ne 'user_logon' -or
+        [string]$Registration.trigger_user_sid -ne $OwnerSid
+    )) { throw 'The protected AgentMemory watchdog trigger does not match this installation.' }
+}
+
+function Assert-AgentMemoryScheduledTaskOwnership {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$OwnerSid,
+        [Parameter(Mandatory = $true)][string]$InstallNonce,
+        [Parameter(Mandatory = $true)][ValidateSet('daemon', 'watchdog')][string]$Kind,
+        [Parameter(Mandatory = $true)]$Registration,
+        [Parameter(Mandatory = $true)]$Task
+    )
+    Assert-AgentMemoryTaskRegistration -Root $Root -OwnerSid $OwnerSid -InstallNonce $InstallNonce -Kind $Kind -Registration $Registration
+    $actions = @($Task.Actions)
+    $triggers = @($Task.Triggers | Where-Object { $null -ne $_ })
+    if (
+        [string]$Task.TaskPath -ne [string]$Registration.task_path -or
+        [string]$Task.TaskName -ne [string]$Registration.task_name -or
+        [string]$Task.Description -ne [string]$Registration.description -or
+        $actions.Count -ne 1 -or
+        [IO.Path]::GetFullPath([string]$actions[0].Execute) -ne [IO.Path]::GetFullPath([string]$Registration.execute) -or
+        [string]$actions[0].Arguments -ne [string]$Registration.arguments -or
+        [IO.Path]::GetFullPath([string]$actions[0].WorkingDirectory).TrimEnd('\', '/') -ne [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') -or
+        (Resolve-AgentMemoryTaskPrincipalSid -UserId ([string]$Task.Principal.UserId)) -ne $OwnerSid -or
+        [string]$Task.Principal.LogonType -notin @('Interactive', 'InteractiveToken') -or
+        [string]$Task.Principal.RunLevel -notin @('Limited', 'LeastPrivilege') -or
+        [string]$Task.Settings.MultipleInstances -ne 'IgnoreNew' -or
+        [string]$Task.Settings.ExecutionTimeLimit -notin @('00:00:00', 'PT0S') -or
+        [int]$Task.Settings.RestartCount -ne 3 -or
+        [string]$Task.Settings.RestartInterval -notin @('00:01:00', 'PT1M') -or
+        -not [bool]$Task.Settings.AllowDemandStart
+    ) { throw 'The installed AgentMemory scheduled task failed its ownership or least-privilege checks.' }
+    if ($Kind -eq 'daemon') {
+        if ($triggers.Count -ne 0) { throw 'The AgentMemory daemon task must have no automatic triggers.' }
+    } elseif (
+        $triggers.Count -ne 1 -or
+        [string]$triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or
+        (Resolve-AgentMemoryTaskPrincipalSid -UserId ([string]$triggers[0].UserId)) -ne $OwnerSid
+    ) { throw 'The AgentMemory watchdog task must use the owned user-logon trigger.' }
+    return $Task
+}
+
 if (-not ('AgentMemory.CodexPackageProbe' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;

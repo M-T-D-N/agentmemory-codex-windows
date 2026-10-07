@@ -27,11 +27,16 @@ export function validateGraphObservationResult(row: GraphObservationResult, sess
       row.importedGraphVerified !== undefined && typeof row.importedGraphVerified !== "boolean") throw Error("Invalid graph observation completion record");
   return row;
 }
-export async function readGraphCompletionContext(kv: StateKV, session: Session): Promise<GraphCompletionContext | undefined> {
-  if (session.semanticGraphCompletionVersion === undefined) return undefined;
-  if (session.semanticGraphCompletionVersion !== 1) throw Error("Unsupported graph observation completion version");
+export async function readGraphCompletionEpoch(kv: StateKV): Promise<string> {
   const snapshot = await kv.get<{ resetAt?: string }>(KV.graphSnapshot, "current");
   const epoch = snapshot?.resetAt ?? "";
+  if (typeof epoch !== "string" || epoch && !Number.isFinite(Date.parse(epoch))) throw Error("Invalid graph completion epoch");
+  return epoch;
+}
+export async function readGraphCompletionContext(kv: StateKV, session: Session, graphEpoch?: string): Promise<GraphCompletionContext | undefined> {
+  if (session.semanticGraphCompletionVersion === undefined) return undefined;
+  if (session.semanticGraphCompletionVersion !== 1) throw Error("Unsupported graph observation completion version");
+  const epoch = graphEpoch ?? await readGraphCompletionEpoch(kv);
   if (typeof epoch !== "string" || epoch && !Number.isFinite(Date.parse(epoch))) throw Error("Invalid graph completion epoch");
   const results = new Map<string, GraphObservationResult>();
   for (const row of await kv.list<GraphObservationResult>(KV.graphObservationResults(session.id))) {

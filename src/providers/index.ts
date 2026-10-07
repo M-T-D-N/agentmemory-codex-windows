@@ -55,8 +55,8 @@ function defaultModelFor(providerType: ProviderConfig["provider"]): string {
   }
 }
 
-export function createProvider(config: ProviderConfig): MemoryProvider {
-  const provider = createBaseProvider(config);
+export function createProvider(config: ProviderConfig, shutdownSignal?: AbortSignal): MemoryProvider {
+  const provider = createBaseProvider(config, shutdownSignal);
   return config.provider === "local-qwen"
     ? provider
     : new ResilientProvider(provider);
@@ -96,7 +96,7 @@ export function createFallbackProvider(
   return new ResilientProvider(providers[0]);
 }
 
-function createBaseProvider(config: ProviderConfig): MemoryProvider {
+function createBaseProvider(config: ProviderConfig, shutdownSignal?: AbortSignal): MemoryProvider {
   switch (config.provider) {
     case "minimax":
       return new MinimaxProvider(
@@ -152,6 +152,7 @@ function createBaseProvider(config: ProviderConfig): MemoryProvider {
         config.model,
         config.maxTokens,
         config.baseURL,
+        shutdownSignal,
       );
     case "noop":
       return new NoopProvider();

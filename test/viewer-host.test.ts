@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createServer, type Server } from "node:http";
+import { createServer, get, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   buildAllowedHosts,
@@ -276,10 +276,14 @@ describe("startViewerServer host binding", () => {
     const addr = server.address() as AddressInfo;
     process.env.VIEWER_ALLOWED_HOSTS = `127.0.0.1:${addr.port}`;
 
-    const res = await fetch(`http://127.0.0.1:${addr.port}/`);
+    const res = await new Promise<IncomingMessage>((resolve, reject) => {
+      get(`http://127.0.0.1:${addr.port}/`, response => {
+        response.resume(); resolve(response);
+      }).on("error", reject);
+    });
     // The HTML shell stays unauthenticated so a browser can fetch it;
     // the embedded JS still needs the bearer for the data calls.
-    expect(res.status).not.toBe(401);
+    expect(res.statusCode).not.toBe(401);
   });
 
   it("logs non-loopback bind mode and inbound auth requirements", async () => {

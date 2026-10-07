@@ -1,9 +1,11 @@
 import type {
   GraphNode,
   GraphEdge,
+  Session,
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
+import { filterCodexGraphSources } from "./observation-visibility.js";
 import { readArchiveVisibility } from "./archive.js";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
@@ -18,6 +20,7 @@ function prepareTraversal(nodes: GraphNode[], edges: GraphEdge[]): TraversalGrap
   for (const edge of edges) {
     const a = edge.sourceNodeId;
     const b = edge.targetNodeId;
+    if (!nodeIndex.has(a) || !nodeIndex.has(b)) continue;
     if (!adjacency.has(a)) adjacency.set(a, []);
     if (!adjacency.has(b)) adjacency.set(b, []);
     adjacency.get(a)!.push({ neighborId: b, edge });
@@ -68,19 +71,25 @@ export class GraphRetrieval {
     maxDepth = 2,
     maxResults = 20,
     project?: string,
+    readSession?: (id: string) => Promise<Session | null>,
   ): Promise<GraphRetrievalResult[]> {
     const archived = await readArchiveVisibility(this.kv);
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) && e.isLatest !== false && !e.reviewRetirement?.active && (!project || e.project === project));
-
-    const matchingNodes = allNodes.filter((n) => {
+    const sourceCache = new Map<string, boolean>();
+    const eligibleNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
+    const matchesEntity = (n: GraphNode) => {
       const nameLower = n.name.toLowerCase();
       return entityNames.some(
         (e) =>
           nameLower.includes(e.toLowerCase()) ||
           e.toLowerCase().includes(nameLower),
       );
-    });
+    };
+    if (!eligibleNodes.some(matchesEntity)) return [];
+    const allNodes = await filterCodexGraphSources(this.kv, eligibleNodes, sourceCache, readSession);
+    const eligibleEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) && e.isLatest !== false && !e.reviewRetirement?.active && (!project || e.project === project));
+    const allEdges = await filterCodexGraphSources(this.kv, eligibleEdges, sourceCache, readSession);
+
+    const matchingNodes = allNodes.filter(matchesEntity);
 
     if (matchingNodes.length === 0) return [];
 
@@ -150,10 +159,14 @@ export class GraphRetrieval {
     maxDepth = 1,
     maxResults = 10,
     project?: string,
+    readSession?: (id: string) => Promise<Session | null>,
   ): Promise<GraphRetrievalResult[]> {
     const archived = await readArchiveVisibility(this.kv);
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) && e.isLatest !== false && !e.reviewRetirement?.active && (!project || e.project === project));
+    const sourceCache = new Map<string, boolean>();
+    const eligibleNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
+    const allNodes = await filterCodexGraphSources(this.kv, eligibleNodes, sourceCache, readSession);
+    const eligibleEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) && e.isLatest !== false && !e.reviewRetirement?.active && (!project || e.project === project));
+    const allEdges = await filterCodexGraphSources(this.kv, eligibleEdges, sourceCache, readSession);
 
     const linkedNodes = allNodes.filter((n) =>
       n.sourceObservationIds.some((id) => obsIds.includes(id)),
@@ -204,9 +217,11 @@ export class GraphRetrieval {
     history: GraphEdge[];
   }> {
     const archived = await readArchiveVisibility(this.kv);
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }));
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) &&
-      !archived({ kind: "graph_node", id: e.sourceNodeId }) && !archived({ kind: "graph_node", id: e.targetNodeId }));
+    const sourceCache = new Map<string, boolean>();
+    const allNodes = (await filterCodexGraphSources(this.kv, await this.kv.list<GraphNode>(KV.graphNodes), sourceCache)).filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }));
+    const visibleNodeIds = new Set(allNodes.map(node => node.id));
+    const allEdges = (await filterCodexGraphSources(this.kv, await this.kv.list<GraphEdge>(KV.graphEdges), sourceCache)).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) &&
+      !archived({ kind: "graph_node", id: e.sourceNodeId }) && !archived({ kind: "graph_node", id: e.targetNodeId })).filter(edge => visibleNodeIds.has(edge.sourceNodeId) && visibleNodeIds.has(edge.targetNodeId));
 
     const entity = allNodes.find(
       (n) => n.name.toLowerCase() === entityName.toLowerCase(),
@@ -285,20 +300,25 @@ export class GraphRetrieval {
     { nodeIndex, adjacency }: TraversalGraph,
     maxDepth: number,
   ): Array<Array<{ node: GraphNode; edge?: GraphEdge }>> {
-    const dist = new Map<string, number>();
-    const pathTo = new Map<string, Array<{ node: GraphNode; edge?: GraphEdge }>>();
-    dist.set(startNode.id, 0);
+    // A cheaper but deeper arrival cannot replace a shallower route: that
+    // route may still reach another node within the remaining hop budget.
+    type Path = Array<{ node: GraphNode; edge?: GraphEdge }>;
+    const dist = new Map<string, Map<number, number>>();
+    const bestCost = new Map<string, number>();
+    const pathTo = new Map<string, Path>();
+    dist.set(startNode.id, new Map([[0, 0]]));
+    bestCost.set(startNode.id, 0);
     pathTo.set(startNode.id, [{ node: startNode }]);
 
-    const heap = new MinHeap<{ nodeId: string; depth: number; cost: number }>(
+    const heap = new MinHeap<{ nodeId: string; depth: number; cost: number; path: Path }>(
       (a, b) => a.cost - b.cost,
     );
-    heap.push({ nodeId: startNode.id, depth: 0, cost: 0 });
+    heap.push({ nodeId: startNode.id, depth: 0, cost: 0, path: pathTo.get(startNode.id)! });
 
     while (heap.size() > 0) {
-      const { nodeId, depth, cost } = heap.pop()!;
+      const { nodeId, depth, cost, path } = heap.pop()!;
       // Skip stale heap entries (cost beaten by a later push).
-      if (cost > (dist.get(nodeId) ?? Infinity)) continue;
+      if (cost > (dist.get(nodeId)?.get(depth) ?? Infinity)) continue;
       if (depth >= maxDepth) continue;
 
       const neighbors = adjacency.get(nodeId) ?? [];
@@ -309,14 +329,17 @@ export class GraphRetrieval {
         // 0.01 is below the documented 0.1 floor.
         const edgeCost = 1 / Math.max(edge.weight, 0.01);
         const newCost = cost + edgeCost;
-        if (newCost < (dist.get(neighborId) ?? Infinity)) {
-          dist.set(neighborId, newCost);
-          pathTo.set(neighborId, [
-            ...pathTo.get(nodeId)!,
-            { node: nextNode, edge },
-          ]);
-          heap.push({ nodeId: neighborId, depth: depth + 1, cost: newCost });
+        const nextDepth = depth + 1;
+        let arrivals = dist.get(neighborId);
+        if (arrivals && [...arrivals].some(([hops, distance]) => hops <= nextDepth && distance <= newCost)) continue;
+        if (!arrivals) dist.set(neighborId, arrivals = new Map());
+        arrivals.set(nextDepth, newCost);
+        const nextPath = [...path, { node: nextNode, edge }];
+        if (newCost < (bestCost.get(neighborId) ?? Infinity)) {
+          bestCost.set(neighborId, newCost);
+          pathTo.set(neighborId, nextPath);
         }
+        heap.push({ nodeId: neighborId, depth: nextDepth, cost: newCost, path: nextPath });
       }
     }
 

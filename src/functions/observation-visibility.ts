@@ -10,79 +10,8 @@ export function observationSourceKind(observation: CompressedObservation): "user
   return undefined;
 }
 
-export function isCodexApprovalReviewText(value: unknown): boolean {
-  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
-  return text.startsWith("the following is the codex agent history whose request action you are assessing.")
-    || text.startsWith("the following is the codex agent history added since your last approval assessment.");
-}
-
-export function isCodexInternalAmbientText(value: unknown): boolean {
-  const original = typeof value === "string" ? value : "";
-  const text = stripCodexAmbientUiBlocks(original).trim().toLowerCase();
-  if (!text) return original.trim().length > 0;
-  if (CODEX_AMBIENT_UI_PREFIX.test(text)) return true;
-  const structuredHostContext = [
-    "<environment_context",
-    "<codex_internal_context",
-    "<heartbeat",
-    "<codex_delegation",
-    "<subagent_notification",
-    "<agentmemory-curation",
-    "<in-app-browser-context",
-    "<hook_prompt",
-    "<recommended_plugins",
-    "<app-context",
-    "<skills_instructions",
-    "<apps_instructions",
-    "<plugins_instructions",
-    "<collaboration_mode",
-    "<permissions instructions",
-    "<turn_aborted",
-    "# agents.md instructions",
-    "# response annotations:",
-  ].some((prefix) => text.startsWith(prefix));
-  return (
-    structuredHostContext ||
-    (text.startsWith("# overview") &&
-      text.includes("hyperpersonalized suggestion")) ||
-    text.startsWith(
-      "you are an expert at upholding safety and compliance standards for codex ambient suggestions",
-    ) ||
-    text.startsWith(
-      "you are a helpful assistant. you will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.",
-    ) ||
-    text.startsWith(
-      "you are in a fork of an existing codex thread. fill the structured description field with a compact, search-oriented summary",
-    ) ||
-    text.startsWith(
-      "you are a helpful assistant. you will be presented with the most recent messages in an existing conversation",
-    ) ||
-    (text.startsWith(
-      "you write the one-line activity update displayed beneath an existing codex task title.",
-    ) &&
-      text.includes("fill the structured summary field with one plain-text sentence"))
-  );
-}
-
-export function isExcludedCodexAmbientSession(
-  session: Session | null | undefined,
-): boolean {
-  return (
-    session?.captureExcluded === true ||
-    isCodexInternalAmbientText(session?.firstPrompt)
-  );
-}
-
-const CODEX_AMBIENT_UI_BLOCK =
-  /<([a-z][a-z0-9-]*)\b(?=[^>]*\bsource=(["'])ambient-ui-state\2)[^>]*>[\s\S]*?<\/\1>\s*/gi;
-const AGENTMEMORY_AMBIENT_BLOCK =
-  /<agentmemory-ambient-ui-state\b[^>]*>[\s\S]*?<\/agentmemory-ambient-ui-state>\s*/gi;
-const CODEX_AMBIENT_UI_PREFIX =
-  /^\s*<([a-z][a-z0-9-]*)\b(?=[^>]*\bsource=(["'])ambient-ui-state\2)[^>]*>/i;
-
-export function stripCodexAmbientUiBlocks(value: string): string {
-  return value.replace(CODEX_AMBIENT_UI_BLOCK, "").replace(AGENTMEMORY_AMBIENT_BLOCK, "");
-}
+import { isCodexInternalAmbientText, isExcludedCodexAmbientSession, stripCodexAmbientUiBlocks } from "../../packaging/windows-codex/hooks/codex-visibility.mjs";
+export { isCodexInternalAmbientText, isCodexApprovalReviewText, isExcludedCodexAmbientSession, isIncidentalCodexHostEvent, stripCodexAmbientUiBlocks } from "../../packaging/windows-codex/hooks/codex-visibility.mjs";
 
 export function sanitizeCodexAmbientObservation<
   T extends CompressedObservation,
@@ -93,13 +22,29 @@ export function sanitizeCodexAmbientObservation<
   }
   if (isCodexInternalAmbientText(observation.narrative)) return null;
   const narrative = stripCodexAmbientUiBlocks(observation.narrative);
-  if (
-    narrative === observation.narrative &&
-    CODEX_AMBIENT_UI_PREFIX.test(observation.narrative)
-  ) {
-    return null;
-  }
   if (narrative === observation.narrative) return observation;
   if (!narrative.trim() || isCodexInternalAmbientText(narrative)) return null;
   return { ...observation, narrative };
+}
+
+export function sanitizeCodexProcessingObservation<T extends CompressedObservation>(observation: T | null | undefined): T | null {
+  if (!observation || observation.emptyDeletion?.state === "deleted") return null;
+  const narrative = typeof observation.narrative === "string" ? stripCodexAmbientUiBlocks(observation.narrative) : observation.narrative;
+  return narrative === observation.narrative || !narrative?.trim() ? observation : { ...observation, narrative };
+}
+
+export async function filterCodexGraphSources<T extends { sourceSessionIds?: string[] }>(
+  kv: Pick<import("../state/kv.js").StateKV, "get">,
+  rows: T[],
+  checked = new Map<string, boolean>(),
+  readSession?: (id: string) => Promise<Session | null>,
+): Promise<T[]> {
+  const ids = [...new Set(rows.flatMap(row => row.sourceSessionIds ?? []))].filter(id => !checked.has(id));
+  for (let start = 0; start < ids.length; start += 8) {
+    await Promise.all(ids.slice(start, start + 8).map(async id => {
+      const session = await (readSession ? readSession(id) : kv.get<Session>("mem:sessions", id));
+      checked.set(id, session?.id === id && isExcludedCodexAmbientSession(session));
+    }));
+  }
+  return rows.filter(row => !row.sourceSessionIds?.length || !row.sourceSessionIds.every(id => checked.get(id) === true));
 }

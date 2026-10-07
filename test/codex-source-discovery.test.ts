@@ -65,7 +65,7 @@ describe("source discovery without a prior Codex hook", () => {
     expect(await discoverCodexSession(kv as never, transitioned, managed())).toEqual({ status: "managed" });
     expect(kv.store).toEqual(before);
     expect(await discoverCodexSession(kv as never, { ...transitioned, cwd: canonicalCodexCwd(join(root, "unproven")) }, managed()))
-      .toEqual({ status: "reconcile_required" });
+      .toEqual({ status: "managed" });
     expect(await discoverCodexSession(kv as never, { ...transitioned, source: "cli" }, managed()))
       .toEqual({ status: "reconcile_required" });
     expect(await discoverCodexSession(kv as never, transitioned, { ...managed(), agentId: "another-agent" }))
@@ -158,15 +158,39 @@ describe("source discovery without a prior Codex hook", () => {
     expect(await kv.list(KV.observations(scope.sessionId))).toHaveLength(3);
     expect(await kv.get(KV.graphNodes, graph.id)).toEqual(graph);
   });
-  it("does not transfer a cursor to a copied or changed source just because its session ID matches", async () => {
+  it.each([false, true])("does not transfer a cursor to a copied source when host cwd changed: %s", async changedCwd => {
     await discoverCodexSession(kv as never, candidate, managed());
     await captureCodexSourceWindow(kv as never, { sessionId: candidate.sessionId, project: "registered-project" }, managed());
     await mkdir(join(root, "archived_sessions"));
-    const archived = { ...candidate, sourcePath: "archived_sessions/rollout-new.jsonl", archived: true };
+    const archived = { ...candidate, sourcePath: "archived_sessions/rollout-new.jsonl", archived: true,
+      ...(changedCwd ? { cwd: canonicalCodexCwd(join(root, "host-resume-directory")) } : {}) };
     const before = structuredClone(kv.store);
     await copyFile(join(root, candidate.sourcePath), join(root, archived.sourcePath));
     await expect(discoverCodexSession(kv as never, archived, managed())).rejects.toThrow("cursor is invalid");
     expect(kv.store).toEqual(before);
+  });
+  it("relocates the proven original when the index cwd changed beyond the saved parser cursor", async () => {
+    await discoverCodexSession(kv as never, candidate, managed());
+    const scope = { sessionId: candidate.sessionId, project: "registered-project" };
+    await captureCodexSourceWindow(kv as never, scope, managed());
+    const before = (await kv.get<Session>(KV.sessions, candidate.sessionId))!;
+    expect(before.codexNativeCapture!.cursor.parser.cwd).toBeUndefined();
+    const extra = { ...user, payload: { ...user.payload, id: "user-after-resume" } };
+    await appendFile(join(root, candidate.sourcePath), JSON.stringify(extra) + "\n");
+    await mkdir(join(root, "archived_sessions"));
+    const moved = { ...candidate, sourcePath: "archived_sessions/rollout-new.jsonl",
+      cwd: canonicalCodexCwd(join(root, "host-resume-directory")) };
+    await rename(join(root, candidate.sourcePath), join(root, moved.sourcePath));
+    expect(await discoverCodexSession(kv as never, moved, managed())).toMatchObject({ status: "relocated" });
+    expect(await kv.get(KV.sessions, candidate.sessionId)).toMatchObject({ project: before.project, cwd: before.cwd,
+      codexNativeCapture: { cursor: before.codexNativeCapture!.cursor } });
+    expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 1, status: "caught_up" });
+    expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 0 });
+    const captured = (await kv.get<Session>(KV.sessions, candidate.sessionId))!;
+    await kv.set(KV.sessions, candidate.sessionId, { ...captured, cwd: join(root, "wrong-owner-directory") });
+    const conflicting = structuredClone(kv.store);
+    expect(await discoverCodexSession(kv as never, moved, managed())).toEqual({ status: "reconcile_required" });
+    expect(kv.store).toEqual(conflicting);
   });
   it.each([false, true])("compares relocated source values after engine key reordering (changed=%s)", async changed => {
     await discoverCodexSession(kv as never, candidate, managed());
@@ -324,6 +348,9 @@ describe("source discovery without a prior Codex hook", () => {
     expect(await discoverCodexSession(kv as never, candidate, managed())).toMatchObject({ status: "created" });
   });
   it("connects discovery to the source drain using the same registered project resolver as hooks", async () => {
+    const now = vi.spyOn(Date, "now");
+    const startedAt = Date.now(); now.mockReturnValue(startedAt);
+    try {
     const registry = join(root, "project-repositories.json");
     await writeFile(registry, JSON.stringify({ schema_version: 1, projects: [{ id: "registry-id", path: "project" }] }));
     vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", root); vi.stubEnv("AGENTMEMORY_WORKSPACE_ROOT", root);
@@ -333,12 +360,15 @@ describe("source discovery without a prior Codex hook", () => {
     sdk.registerFunction("mem::codex-source-capture", input => captureCodexSourceWindow(kv as never, input as never, managed()));
     expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ discovery: { created: 1, cycleComplete: true }, inserted: 2 });
     expect(await kv.get(KV.sessions, candidate.sessionId)).toMatchObject({ project: "registry-id", observationCount: 2 });
-    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ discovery: { managed: 1, created: 0 }, inserted: 0 });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ inserted: 0 });
+    expect(vi.mocked(readCodexThreadIndex)).toHaveBeenCalledTimes(1);
     await mkdir(join(root, "archived_sessions"));
     const moved = { ...candidate, sourcePath: "archived_sessions/rollout-new.jsonl", archived: true };
     await rename(join(root, candidate.sourcePath), join(root, moved.sourcePath));
     vi.mocked(readCodexThreadIndex).mockResolvedValue({ version: 5, checkedAt: stamp, entries: [moved], nextAfterId: null });
+    now.mockReturnValue(startedAt + 60_000);
     expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ discovery: { relocated: 1, reconcileRequired: 0 }, inserted: 0 });
+    } finally { now.mockRestore(); }
   });
   it("advances past failed sources at the inspection limit so a later new task is still discovered", async () => {
     const registry = join(root, "project-repositories.json");

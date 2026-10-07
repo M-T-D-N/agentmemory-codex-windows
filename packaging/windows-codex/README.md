@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.12`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.13`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -102,7 +102,7 @@ from installed qualification and preserves the current engine/data contracts.
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.12`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.13`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -193,7 +193,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.12 -OutputDirectory D:\staging\npm-preview11
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.13 -OutputDirectory D:\staging\npm-preview11
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -219,8 +219,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.12\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.12 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.13\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.13 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -501,6 +501,33 @@ report sourceHoldCount; native health also reports the aggregate sourceHolds.
 completeNativeInventory describes a complete source scan and does not mean
 that a held item acquired a primary message. Observation-level
 unresolvedCaptures remains separate and retains its existing protections.
+An absent local source (`ENOENT`) sets the existing capture issue to
+`native_source_missing`; other read failures retain `native_source_read_failed`.
+Native drain and liveness report `sourceUnavailable` as a subset of
+`captureUnknown`, not an additional number of lost conversations. Missing source
+records remain unknown and require attention. This does not establish deletion,
+data loss, or an empty conversation. Cursors, captured originals and graph
+provenance remain unchanged; normal bounded capture retries resume automatically
+if the same source becomes readable. Do not exclude records from a matching count
+or a dummy title: intentional retirement requires an exact source identity and
+the existing reviewed lifecycle, while unknown absence remains visible.
+An explicit AgentMemory session archive combined with `native_source_missing`
+retires that source from automatic capture and active issue counts. Liveness
+reports it separately as `archivedSourceUnavailable`, a reviewed archive count
+that does not trigger attention. Restoring the session re-enables ordinary source
+checks. A Codex UI archive, a missing file alone, an archived observation alone,
+or another read failure does not qualify; readable archived sessions continue
+their existing capture behavior. No source or observation is deleted.
+
+Cloud Work/Dot conversations do not acquire local JSONL sources from this
+adapter. A deliberate conversation export, a saved durable summary, and a native
+local session are separate artifacts. A summary saved from a local storage chat
+retains that chat and its actual observations as provenance; including a cloud
+conversation ID in its content does not reassign the source session. Recall the
+cloud ID in the approved project to find the summary and its export reference;
+an empty native session listing for that ID alone does not prove memory loss.
+Do not fabricate a native cloud session or install per-turn cloud export based
+on an earlier preference when the latest request asks for a one-time export.
 Held sessions and cursors use version 2. Older readers refuse them rather than
 silently marking their tails caught up; unaffected sessions keep version 1.
 Export/import preserves validated source holds, discards the local cursor and
@@ -586,7 +613,8 @@ sweep resumes after a 100 ms yield instead of waiting a minute per batch. Hooks
 updating a source's checked time cannot move it behind the current sweep.
 Sources with a progressing unread tail request another bounded sweep; unchanged
 partial tails and failed reads do not request rapid retries. Discovery is paged
-until its current cycle ends, then waits for the next capture sweep. Once there
+until its current cycle ends, then starts another cycle after the 60-second
+recovery interval, independently of capture-sweep completion. Once there
 is no progressing backlog or unfinished inventory cycle, ordinary 60-second
 polling remains. The in-memory sweep position is only scheduling state; restart
 begins a fresh sweep using the existing canonical capture cursors and IDs.
@@ -611,7 +639,11 @@ The startup/60-second source drain now discovers tasks from that index before
 capturing initialized sessions. It shares the hook's project registry and Git
 routing implementation. Each discovery pass reads at most 500 index entries,
 inspects at most eight new/uninitialized or moved sources and yields between entries after
-about two seconds; an in-flight source or state call is allowed to finish. The
+about two seconds; an in-flight source or state call is allowed to finish. A
+successfully created, initialized or relocated source ends that discovery batch
+and receives one immediate capture window within the ordinary eight-source limit.
+At least one ordinary sweep source can still advance; priority capture does not
+reset or advance the ordinary sweep position. The
 in-memory index position advances through the page and cycles from the beginning;
 after restart it begins a fresh cycle. This position is not capture-completion evidence.
 
@@ -630,6 +662,12 @@ at the indexed path, then updates only the source location and capture wait stat
 The saved cursor is not advanced by this check. The normal drain captures any
 unread tail, preserving observation IDs and graph provenance. Copies with a new
 file identity are held for reconciliation rather than borrowing the old cursor.
+For an initialized source, the host index's latest working directory is not its
+memory ownership identity. The stored original/capture directory must still match
+the canonical session, and relocation still verifies the exact original and saved
+cursor. A later host directory need not have reached the saved parser cursor;
+the original project and directory remain unchanged. Unowned sources continue to
+require matching index/header directory and verifiable project routing.
 An already owned hook session whose worktree no longer exists can initialize
 using its canonical project and the matching index/header or verified later cwd, after the same
 complete observation correspondence check. It does not infer a new project from
@@ -918,6 +956,10 @@ Native capture uses a strict index flush and keeps failed publication pending.
 Within one persistence instance, fingerprints of successfully stored BM25 and
 vector snapshots let queued or unchanged flush requests avoid duplicate writes
 when the current persisted manifest still matches the committed generation.
+An unchanged BM25 mutation revision also avoids serialization and hashing after
+this instance successfully saves it and rechecks that manifest. The revision is
+checked again after that awaited confirmation; mutations during a save remain
+pending for the next flush. Loading a snapshot does not mark the live index saved.
 The fingerprint covers the serialized content, including externally retained
 vector buffers; it is not based only on request counts or snapshot length.
 Changed snapshots remain serialized, failed publication is retried, and a new
@@ -1221,6 +1263,10 @@ Normal observations in a mixed batch retain strict, separately filtered citation
 validation. New hook capture skips both envelope forms without excluding the
 normal user session.
 
+Local revision r144 applies the shared visibility policy to native reasoning-effort evaluator requests, including the stored first-prompt prefix. Internal sessions remain canonical but are excluded from capture, ordinary recall and semantic backlog scheduling. Graph query, snapshot fallback, traversal and retrieval exclude records whose session provenance is entirely internal; mixed or unknown provenance is retained. Exact edge pagination includes the source-visibility revision and rechecks it. Snapshot statistics report `countsScope: "canonical_storage"`; their counts include retained internal sources and differ from scoped visible query totals.
+
+Qwen lease cleanup retries transient Windows sharing failures with exact owner/token checks. An exhausted own release remains recoverable on the next call, with concurrent recovery serialized; cleanup errors preserve the original request failure. Stream interruptions retain transport cause/address. Daemon startup now reports an exited engine or worker immediately with its exit code and run log paths, preserving the cold-load bounds and owned-process cleanup. The historical Windows 10013 bind cause remains undetermined.
+
 ## Source validation without a release payload
 
 During source iteration, run `packaging/windows-codex/Build-WindowsCodex.ps1 -ValidationOnly`.
@@ -1237,15 +1283,39 @@ creates the same self-contained release. Validation does not activate a runtime.
 ## Release retention and cleanup
 
 After a successful update and readiness confirmation, the installer compacts only
-the new code/config backup into one sibling ZIP. It verifies every archived file
-against SHA-256 before removing that newly created expanded copy; canonical data
-and older backups are untouched. Failed updates retain the expanded backup used
-for rollback. A compaction failure preserves the backup and reports
-backup_compaction_error without undoing an already healthy installation.
-Successful compaction reports backup_archive and clears backup_root.
+the newly created code/config backup. It first checks timestamped sibling ZIPs
+for the exact file and directory set, including empty directories, and SHA-256
+of every file. An exact match is reused; matching release/version metadata alone
+is insufficient. Unreadable, corrupt, differing and reparse archives are left
+untouched. Otherwise it creates one new sibling ZIP without replacing any file.
+The selected archive remains open against writes/replacement and is checked
+unchanged before removing only this installation's expanded copy. Failed updates
+retain the expanded backup used for rollback. A compaction failure preserves the
+backup and reports backup_compaction_error without undoing a healthy installation.
+Successful compaction reports backup_archive, backup_archive_reused and
+backup_archive_created, and clears backup_root.
 For manual recovery, extract the archive into a new empty recovery directory
 before inspecting or restoring its predecessor files; never extract over live data.
 Superseded backup archives still follow the explicit maintenance rules below.
+
+The successful install summary includes release_backup_retention_review with
+exact backup paths and bounded manifest metadata (release revision, data contract
+and source package). The captured pre-cutover installed revision identifies the
+actual distinct immediate predecessor; revision names and timestamps do not
+establish rollback order. Repeated installation of the current revision reports
+predecessor_known=false rather than guessing. Current and predecessor backups
+are protected; older distinct entries are explicit maintenance candidates.
+Unknown, unreadable and omitted entries remain protected. This review never
+deletes backups or determines data-snapshot pins or active consumers.
+
+Before reporting a cutover complete, disposition existing backups against the
+current release, actual immediate predecessor, matching code/data snapshot pairs
+and current consumers. Retain compatible code plus data recovery sets and required
+archive/audit evidence even when they are older. Report unresolved pairings,
+protected paths and maintenance candidates explicitly; successful ZIP compaction
+alone does not finish retention review. Code/config alone is not a data restore.
+Perform any approved maintenance using the workspace storage/approval policy and
+the exact-path checks below, without adding an automatic expiry or runtime gate.
 
 Keep the active package, the immediately preceding rollback package, the
 pristine upstream source archive, and the final qualification artifact for the
@@ -1262,6 +1332,24 @@ canonical data.
 
 ### Runtime responsiveness recovery
 
+Managed audit queries use the existing bounded `state::list_page` route and
+retain only the requested newest matching records. A read captures its initial
+row count rather than chasing subsequent ledger appends. This avoids transferring
+the whole audit scope in a single SDK frame without deleting audit history or
+raising the WebSocket payload limit. Portable hosts retain their existing read.
+
+The Windows/Codex dependency lock applies `patches/iii-sdk@0.11.2.patch` to
+both SDK entry points. Upstream 0.11.2 reconnects its socket without settling
+requests sent on the closed connection. The downstream patch rejects those
+requests immediately and drops only queued requests with rejected invocation IDs.
+It does not retry an interrupted write or reduce the existing long invocation
+timeout. StateKV marks a failed canonical write as uncertain; the existing
+readiness and owned-runtime recovery lifecycle handles that boundary. New
+requests can proceed through the reconnected SDK. This protects against stranded
+locks but does not identify or prevent the host transport disconnect itself.
+The real socket regression and release SDK-byte comparison qualify the shipped
+patch; production code/config backups remain separate from canonical data.
+
 #### Storage acknowledgement and crash qualification
 
 Unmodified iii-engine 0.11.2's file-backed KV acknowledges an in-memory mutation and
@@ -1276,12 +1364,15 @@ It checks owned process identity before forced exit and checks recovery through
 the real StateModule. Enable with `AGENTMEMORY_TEST_ENGINE` and
 `AGENTMEMORY_TEST_ENGINE_SHA256`, and set `AGENTMEMORY_TEST_ENGINE_DURABILITY=required`
 for the patched engine; an optional `AGENTMEMORY_ENGINE_TEST_REPORT`
-receives local evidence. This covers eight crash boundaries and one bounded-page RPC case. It is
-not part of routine unit runs or a test against the live installation.
+receives local evidence for index publication, paged graph intents, graph/archive
+recovery, native capture and bounded original reads. The test runner reports
+suite success; the evidence file records completed cases without a fixed-count
+acceptance flag. This is not part of routine unit runs or a test against the
+live installation.
 An additional opt-in `AGENTMEMORY_TEST_ENGINE_PERFORMANCE=true` case measures
 ten durable writes in one synthetic 20 MiB scope with 80 rows. It can write
-`AGENTMEMORY_ENGINE_PERFORMANCE_REPORT` and is separate from the eight crash
-boundaries. This isolates large-scope persistence cost; it is not a whole-graph
+`AGENTMEMORY_ENGINE_PERFORMANCE_REPORT` and is separate from crash recovery
+checks. This isolates large-scope persistence cost; it is not a whole-graph
 throughput or many-small-records benchmark.
 
 The unmodified engine fails immediate post-acknowledgement crash recovery.
@@ -1394,8 +1485,9 @@ part of memory warning and critical decisions.
 
 #### Existing supervisor
 
-The Windows daemon checks the database-free liveness and MCP metadata routes
-every 30 seconds, with a three-second timeout per route and loopback proxy
+The Windows daemon allows up to 180 seconds for the engine's cold state load and
+the existing 30 seconds for worker readiness. It checks the database-free liveness
+and MCP metadata routes every 30 seconds, with a three-second timeout per route and loopback proxy
 bypass. Three consecutive failures end that owned run with
 `runtime_unresponsive`; a successful check clears the failure count. Cleanup
 uses the existing exact process identity checks and graceful-stop timeout.
@@ -1415,6 +1507,10 @@ existing graph plan before exposing the API; a canonical conflict still refuses
 recovery rather than overwriting the conflicting value. No readiness probe
 starts Qwen or changes its hold and ownership rules.
 
+
+Managed StateKV mutations are sent in order through one worker connection, including the required durability confirmation. Reads retain their bounded concurrency. A failed durable write holds queued writes until canonical recovery and worker restart; concurrency is not restored by swallowing an error.
+
+The pinned engine records WebSocket send and receive failures in its existing run log with a fixed error category, an OS numeric code when available, and numeric message/capacity limits. It does not record payloads, close-reason text or raw errors. These observations distinguish transport and capacity failures; they do not establish their cause or recovery.
 
 ### Stall diagnostics (local r96)
 

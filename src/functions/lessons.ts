@@ -274,13 +274,6 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
           (a.lesson.id < b.lesson.id ? -1 : a.lesson.id > b.lesson.id ? 1 : 0),
       );
 
-      try {
-        await safeAudit(kv, "lesson_recall", "mem::lesson-recall", [], {
-          query: data.query,
-          resultCount: scored.length,
-        });
-      } catch {}
-
       return {
         success: true,
         lessons: scored.slice(0, limit).map((s) => ({

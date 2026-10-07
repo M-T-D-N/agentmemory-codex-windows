@@ -84,6 +84,7 @@ export function registerSmartSearchFunction(
   sdk: ISdk,
   kv: StateKV,
   searchFn: (query: string, limit: number, selection?: SearchCandidateSelection) => Promise<HybridSearchResult[]>,
+  getIndexedSessionId?: (observationId: string) => string | undefined,
 ): void {
   sdk.registerFunction("mem::smart-search",
     async (data: {
@@ -165,7 +166,7 @@ export function registerSmartSearchFunction(
           observation: CompressedObservation;
         }> = [];
 
-        const observations = await findObservations(kv, items, data.exactExpansion);
+        const observations = await findObservations(kv, items, data.exactExpansion, projectFilter, getIndexedSessionId);
         for (let index = 0; index < items.length; index++) {
           const { obsId } = items[index];
           const observation = observations[index];
@@ -230,48 +231,37 @@ export function registerSmartSearchFunction(
       const lessonLimit = Math.min(limit, 10);
       const includeLessons = data.includeLessons !== false;
 
+      const selection = createSearchCandidateSelection(kv, { project: projectFilter, agentId: filterAgentId });
       const [hybridResults, lessons] = await Promise.all([
-        searchFn(data.query, limit, createSearchCandidateSelection(kv, { project: projectFilter, agentId: filterAgentId })),
+        searchFn(data.query, limit, selection),
         includeLessons
           ? recallLessons(sdk, data.query, lessonLimit, projectFilter)
           : Promise.resolve([]),
       ]);
 
-      const archiveHidden = await readArchiveVisibility(kv);
-      const projectScoped: Array<HybridSearchResult & { project?: string }> = [];
-      for (const result of hybridResults) {
-        const session = await kv
-          .get<Session>(KV.sessions, result.sessionId)
-          .catch(() => null);
-        if (isExcludedCodexAmbientSession(session)) continue;
-        const observation = sanitizeCodexAmbientObservation(
-          result.observation,
-        );
-        if (!observation) continue;
-        const memory = await kv.get<Memory>(KV.memories, observation.id);
-        if (archiveHidden(memory ? { kind: "memory", id: observation.id } : { kind: "observation", id: observation.id, sessionId: result.sessionId })) continue;
-        const project = memory?.project ?? session?.project;
-        if (projectFilter && project !== projectFilter) continue;
-        if (filterAgentId && observation.agentId !== filterAgentId) continue;
-        projectScoped.push({ ...result, observation, ...(project ? { project } : {}) });
-        if (projectScoped.length >= limit) break;
+      const compact: CompactSearchResult[] = [];
+      for (let offset = 0; offset < hybridResults.length && compact.length < limit;) {
+        const batch = hybridResults.slice(offset, offset + Math.min(8, limit - compact.length));
+        offset += batch.length;
+        const resolved = await Promise.all(batch.map(result => selection.resolve({
+          obsId: result.observation.id,
+          sessionId: result.sessionId,
+        })));
+        for (let i = 0; i < batch.length; i++) {
+          const canonical = resolved[i];
+          if (!canonical) continue;
+          const observation = canonical.observation;
+          compact.push({
+            obsId: observation.id,
+            sessionId: observation.sessionId,
+            title: observation.title,
+            type: observation.type,
+            score: batch[i].combinedScore,
+            timestamp: observation.timestamp,
+            ...(canonical.project ? { project: canonical.project } : {}),
+          });
+        }
       }
-
-      const filteredHybrid = filterAgentId
-        ? projectScoped
-            .filter((result) => result.observation.agentId === filterAgentId)
-            .slice(0, limit)
-        : projectScoped.slice(0, limit);
-
-      const compact: CompactSearchResult[] = filteredHybrid.map((r) => ({
-        obsId: r.observation.id,
-        sessionId: r.sessionId,
-        title: r.observation.title,
-        type: r.observation.type,
-        score: r.combinedScore,
-        timestamp: r.observation.timestamp,
-        ...(r.project ? { project: r.project } : {}),
-      }));
 
       if (data.trackAccess !== false) {
         void recordAccessBatch(
@@ -420,6 +410,8 @@ async function findObservations(
   kv: StateKV,
   items: Array<{ obsId: string; sessionId?: string }>,
   exactExpansion = false,
+  project?: string,
+  getIndexedSessionId?: (observationId: string) => string | undefined,
 ): Promise<Array<CompressedObservation | null>> {
   const observations: Array<CompressedObservation | null> = items.map(
     () => null,
@@ -441,6 +433,16 @@ async function findObservations(
         .get<CompressedObservation>(KV.observations(sessionId), obsId)
         .catch(() => null);
     }
+    if (!observations[index] && !sessionId && !exactExpansion) {
+      const indexedSessionId = getIndexedSessionId?.(obsId);
+      if (indexedSessionId) {
+        const indexedSession = await kv.get<Session>(KV.sessions, indexedSessionId);
+        if (indexedSession && (!project || indexedSession.project === project)) {
+          const candidate = await kv.get<CompressedObservation>(KV.observations(indexedSessionId), obsId);
+          if (candidate?.id === obsId && candidate.sessionId === indexedSessionId) observations[index] = candidate;
+        }
+      }
+    }
     if (!observations[index]) unresolved.push(index);
   }
 
@@ -449,7 +451,7 @@ async function findObservations(
     await fillMemories();
     return observations.map((observation, index) => observation?.sessionId === items[index].sessionId ? observation : null);
   }
-  const sessions = await kv.list<{ id: string }>(KV.sessions);
+  const sessions = (await kv.list<Session>(KV.sessions)).filter(session => !project || session.project === project);
 
   if (unresolved.length > 1) {
     const indexesByObservationId = new Map<string, number[]>();

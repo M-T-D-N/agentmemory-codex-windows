@@ -206,6 +206,45 @@ describe("Diagnostics Functions", () => {
       expect(result.checks.every((c) => c.status === "pass")).toBe(true);
     });
 
+    it("marks only safely inferable unscoped memories as fixable", async () => {
+      const api = makeSession({ id: "sess_api", project: "api" });
+      const web = makeSession({ id: "sess_web", project: "web" });
+      await kv.set(KV.sessions, api.id, api);
+      await kv.set(KV.sessions, web.id, web);
+      const memories: Memory[] = [
+        makeMemory({ id: "mem_no_sources", sessionIds: [], sourceObservationIds: [] }),
+        makeMemory({ id: "mem_missing", sessionIds: ["sess_missing"] }),
+        makeMemory({ id: "mem_mixed", sessionIds: [api.id, web.id] }),
+        makeMemory({ id: "mem_inferable", sessionIds: [api.id] }),
+      ];
+      for (const memory of memories) await kv.set(KV.memories, memory.id, memory);
+
+      const result = (await sdk.trigger("mem::diagnose", {
+        categories: ["memories"],
+      })) as { checks: DiagnosticCheck[] };
+
+      const check = result.checks.find((item) => item.name === "memory-project-coverage");
+      expect(check?.status).toBe("warn");
+      expect(check?.fixable).toBe(true);
+      expect(check?.message).toContain("1 safely inferable");
+      expect(check?.message).toContain("1 have no session provenance");
+      expect(check?.message).toContain("2 have missing or mixed source sessions");
+    });
+
+    it("does not recommend migration when no unscoped memory has session provenance", async () => {
+      const memory = makeMemory({ id: "mem_no_sources", sessionIds: [], sourceObservationIds: [] });
+      await kv.set(KV.memories, memory.id, memory);
+
+      const result = (await sdk.trigger("mem::diagnose", {
+        categories: ["memories"],
+      })) as { checks: DiagnosticCheck[] };
+
+      const check = result.checks.find((item) => item.name === "memory-project-coverage");
+      expect(check?.fixable).toBe(false);
+      expect(check?.message).not.toContain("run POST /agentmemory/migrate");
+      expect(check?.message).toContain("1 have no session provenance");
+    });
+
     it("active action with no lease produces warn", async () => {
       const action = makeAction({ status: "active" });
       await kv.set(KV.actions, action.id, action);

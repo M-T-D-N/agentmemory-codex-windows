@@ -108,9 +108,6 @@ export function privateIiiBin(home: string): string {
   return join(home, ".agentmemory", "bin", iiiBinFile());
 }
 
-// Back-compat shim for any caller still importing the old name.
-export const localBinIii = privateIiiBin;
-
 function safeSize(path: string): number {
   try {
     return statSync(path).size;

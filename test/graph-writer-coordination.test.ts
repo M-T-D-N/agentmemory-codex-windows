@@ -3,6 +3,7 @@ import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { registerMeshFunction } from "../src/functions/mesh.js";
 import { registerTemporalGraphFunctions } from "../src/functions/temporal-graph.js";
 import * as mutex from "../src/state/keyed-mutex.js";
+import { registerGraphFunction } from "../src/functions/graph.js";
 import { KV } from "../src/state/schema.js";
 
 describe("other graph writers", () => {
@@ -26,4 +27,36 @@ describe("other graph writers", () => {
     expect(await pending).toMatchObject({ success: true });
     expect(await kv.list(KV.graphNodes)).toHaveLength(1);
   });
+});
+
+it.each(["mem::graph-extract", "mem::graph-snapshot-rebuild"])(
+  "%s defers automatic work without queuing canonical reads or writes", async id => {
+    const kv = mockKV(), sdk = mockSdk();
+    registerGraphFunction(sdk as never, kv as never);
+    const get = vi.spyOn(kv, "get"), list = vi.spyOn(kv, "list");
+    let release!: () => void;
+    const held = mutex.withKeyedLock("mem:graph-write", () => new Promise<void>(resolve => { release = resolve; }));
+    await Promise.resolve();
+    try {
+      const result = await sdk.trigger(id, id === "mem::graph-extract"
+        ? { deferIfBusy: true, observations: [] } : { onlyIfIndexUnavailable: true });
+      expect(result).toEqual({ success: true, skipped: "graph_writer_busy" });
+      expect(get).not.toHaveBeenCalled(); expect(list).not.toHaveBeenCalled();
+    } finally { release(); await held; }
+    await Promise.resolve();
+    expect(get).not.toHaveBeenCalled(); expect(list).not.toHaveBeenCalled();
+  },
+);
+
+it("retains writer ownership when a waiting caller abandons its response", async () => {
+  let release!: () => void;
+  const work = mutex.tryWithKeyedLock("caller-abandoned-fixture", () => new Promise<void>(resolve => { release = resolve; }));
+  await Promise.resolve();
+  try {
+    await expect(Promise.race([work, Promise.reject(Error("caller timeout"))])).rejects.toThrow("caller timeout");
+    const duplicate = vi.fn(async () => undefined);
+    expect(await mutex.tryWithKeyedLock("caller-abandoned-fixture", duplicate)).toEqual({ acquired: false });
+    expect(duplicate).not.toHaveBeenCalled();
+  } finally { release(); await work; }
+  expect(await mutex.tryWithKeyedLock("caller-abandoned-fixture", async () => "resumed")).toEqual({ acquired: true, value: "resumed" });
 });

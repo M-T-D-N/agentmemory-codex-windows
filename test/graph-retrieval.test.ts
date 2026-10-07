@@ -223,6 +223,34 @@ describe("GraphRetrieval", () => {
   // of edge weight. Dijkstra picks the highest-weight (lowest
   // 1/weight cost) path, so a one-hop weak edge no longer beats a
   // two-hop chain of strong edges to the same node.
+  it.each(["entities", "chunks"])("keeps a shallower route available within the %s hop limit", async kind => {
+    const nodes = [
+      makeNode("start", "Entry", "concept", ["seed"]),
+      makeNode("mid", "Middle", "concept", ["middle"]),
+      makeNode("junction", "Junction", "concept", ["junction-source"]),
+      makeNode("end", "Destination", "concept", ["reachable"]),
+      makeNode("outside", "Outside", "concept", ["too-far"]),
+    ];
+    const edges = [
+      makeEdge("strong-a", "start", "mid", "related_to", 1),
+      makeEdge("strong-b", "mid", "junction", "related_to", 1),
+      makeEdge("shorter", "start", "junction", "related_to", 0.3),
+      makeEdge("last", "junction", "end", "related_to", 1),
+      makeEdge("outside", "end", "outside", "related_to", 1),
+    ];
+    const retrieval = new GraphRetrieval(mockKV(nodes, edges) as never);
+    const results = kind === "entities"
+      ? await retrieval.searchByEntities(["Entry"], 2)
+      : await retrieval.expandFromChunks(["seed"], 2);
+    const end = results.find(row => row.obsId === "reachable");
+    expect(end).toBeDefined();
+    expect(end?.pathLength).toBe(3);
+    expect(end?.graphContext).toContain("Junction");
+    expect(end?.graphContext).not.toContain("Middle");
+    expect(results.find(row => row.obsId === "junction-source")?.graphContext).toContain("Middle");
+    expect(results.some(row => row.obsId === "too-far")).toBe(false);
+  });
+
   it("picks the weight-optimal path under Dijkstra, not the edge-count-shortest one (#328)", async () => {
     const nodes = [
       makeNode("n1", "Start", "concept", ["obs_start"]),
@@ -329,4 +357,48 @@ describe("GraphRetrieval", () => {
     expect(results.find((r) => r.obsId === "obs_3")).toBeDefined();
     expect(results.find((r) => r.obsId === "obs_4")).toBeUndefined();
   });
+  it.each(["unmatched", "stale", "other-project"])("skips edges and source sessions when no eligible name matches (%s)", async kind => {
+    const node = { ...makeNode("entry", kind === "unmatched" ? "Different" : "Entry"), project: kind === "other-project" ? "other" : "own", sourceSessionIds: ["source"], stale: kind === "stale" };
+    const kv = mockKV([node], [makeEdge("edge", "entry", "entry")]);
+    const list = vi.spyOn(kv, "list");
+    const read = vi.spyOn(kv, "get");
+    expect(await new GraphRetrieval(kv as never).searchByEntities(["Entry"], 2, 20, "own")).toEqual([]);
+    expect(list.mock.calls.some(([scope]) => scope === "mem:graph:edges")).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each(["entities", "chunks"])("keeps ambient and missing-session provenance semantics with an optional session reader (%s)", async kind => {
+    const nodes = [
+      { ...makeNode("entry", "Entry", "concept", ["seed"]), sourceSessionIds: ["own"] },
+      { ...makeNode("visible", "Visible", "concept", ["visible"]), sourceSessionIds: ["own", "ambient"] },
+      { ...makeNode("hidden", "Hidden", "concept", ["hidden"]), sourceSessionIds: ["ambient"] },
+      { ...makeNode("unplaced", "Unplaced", "concept", ["unplaced"]), sourceSessionIds: ["missing"] },
+    ];
+    const edges = [
+      { ...makeEdge("visible", "entry", "visible"), sourceSessionIds: ["own"] },
+      { ...makeEdge("hidden", "entry", "hidden"), sourceSessionIds: ["own"] },
+      { ...makeEdge("unplaced", "entry", "unplaced"), sourceSessionIds: ["missing"] },
+    ];
+    const kv = mockKV(nodes, edges);
+    const own = { id: "own", project: "own", startedAt: "2026-09-13T00:00:00Z", status: "completed", observationCount: 1 };
+    const ambient = { ...own, id: "ambient", captureExcluded: true };
+    await kv.set("mem:sessions", own.id, own); await kv.set("mem:sessions", ambient.id, ambient);
+    const read = vi.spyOn(kv, "get");
+    const retrieval = new GraphRetrieval(kv as never);
+    const baseline = kind === "entities" ? await retrieval.searchByEntities(["Entry"]) : await retrieval.expandFromChunks(["seed"]);
+    expect(baseline.map(row => row.obsId)).toContain("visible");
+    expect(baseline.map(row => row.obsId)).toContain("unplaced");
+    expect(baseline.map(row => row.obsId)).not.toContain("hidden");
+    expect(read.mock.calls.filter(([scope]) => scope === "mem:sessions")).toHaveLength(3);
+    read.mockClear();
+    const sessions = new Map([[own.id, own], [ambient.id, ambient]]);
+    const readSession = vi.fn(async (id: string) => sessions.get(id) ?? null);
+    const reused = kind === "entities"
+      ? await retrieval.searchByEntities(["Entry"], 2, 20, undefined, readSession as never)
+      : await retrieval.expandFromChunks(["seed"], 1, 10, undefined, readSession as never);
+    expect(reused).toEqual(baseline);
+    expect(read).not.toHaveBeenCalled();
+    expect(readSession).toHaveBeenCalledTimes(3);
+  });
+
 });

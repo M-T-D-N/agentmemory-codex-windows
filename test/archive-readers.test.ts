@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
-import type { ArchiveTarget } from "../src/types.js";
+import type { ArchiveTarget, CompressedObservation } from "../src/types.js";
 import { KV } from "../src/state/schema.js";
 import { changeArchiveState } from "../src/functions/archive.js";
 import { registerContextFunction } from "../src/functions/context.js";
+import { SUMMARY_VISIBILITY_REVISION, summarySourceDigest } from "../src/functions/summary-visibility.js";
 import { registerLessonsFunctions, resetLessonIndex } from "../src/functions/lessons.js";
 import { registerMcpEndpoints } from "../src/mcp/server.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
@@ -30,7 +31,10 @@ async function fixture() {
     await kv.set(KV.observations("s"), id, { id, sessionId: "s", agentId: "a", title: content, narrative: content,
       type: "decision", importance: 9, timestamp, facts: [], concepts: [], files: [] });
   }
-  await kv.set(KV.summaries, "s", { sessionId: "s", title: "hidden aggregate", narrative: "hidden summarized content", keyDecisions: [], filesModified: [], createdAt: timestamp });
+  const summarySources = await kv.list<CompressedObservation>(KV.observations("s"));
+  await kv.set(KV.summaries, "s", { sessionId: "s", project: "p", title: "hidden aggregate", narrative: "hidden summarized content",
+    keyDecisions: [], filesModified: [], concepts: [], createdAt: timestamp,
+    visibilityRevision: SUMMARY_VISIBILITY_REVISION, sourceDigest: summarySourceDigest(summarySources), observationCount: summarySources.length });
   const change = async (target: ArchiveTarget, action: "archive" | "restore" = "archive") => {
     const preview = await changeArchiveState(kv as never, { project: "p", target, action });
     return changeArchiveState(kv as never, { project: "p", target, action, dryRun: false,

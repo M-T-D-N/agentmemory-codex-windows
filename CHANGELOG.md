@@ -4,7 +4,180 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
-## Unreleased
+## 0.1.0-preview.13
+
+- Read only the required canonical keyword head when no semantic or graph channel and no reranker can change its rank; continue past invalid or out-of-scope candidates.
+
+- Preserve exact watchdog timestamp identity after PowerShell 7 JSON date conversion so authenticated graceful stop remains compatible with Windows PowerShell 5.1.
+
+- Preserve normal sessions without rewriting or auditing an already absent capture turn; retain audited actual clears and response attribution.
+
+- Keep lesson recall read-only instead of rewriting the entire file-backed audit scope for each search; retain mutation audits and existing audit history.
+
+- Store the derived keyword snapshot with numeric document and term references; retain v2 snapshot reads, posting order and scores.
+- Avoid repeating canonical completion reads when a freshly locked session is already complete, and read the graph reset epoch once per backlog eligibility scan; retain per-session completion and digest validation and fresh epoch checks before writes.
+
+- Read the agent owner once per native source drain and refresh it on the next invocation; preserve ownership filters, discovery and bounded sweep progress.
+- Preserve native source validation while skipping durable session rewrites when the verified capture checkpoint and canonical count are unchanged.
+
+- Run independent keyword, vector and graph candidate reads concurrently within the same request while retaining canonical filtering and fusion order. — 2026-10-07
+
+- Reuse verified compact-search results and update derived Korean vocabulary and
+  document lengths incrementally after individual observation changes.
+- Fuse word and Hangul syllable-bigram ranks for multi-term Korean queries from
+  existing postings; bound prefix-variant rarity by the literal query term's
+  document frequency. Preserve canonical tokens and read compatibility with v2 snapshots.
+- Scale automatically inferred entity graph weight by query-term coverage;
+  explicit entity hints and vector-based graph expansion retain their weight.
+- Reuse canonical observations and session metadata within each search request,
+  limit final enrichment to returned candidates, and skip edge traversal when
+  no eligible graph entity matches. Preserve project, speaker, archive and
+  ambient-source filtering.
+
+- Coalesce backlog execution until its server handler finishes, even when the caller times out.
+- Defer automatic graph extraction and index repair while the graph writer is busy; preserve pending observations and resume through existing events and timers.
+- Retry a deferred index repair on the next health cycle without classifying contention as a failed rebuild.
+
+- Count each query term's strongest prefix match once per document and exclude
+  prefix bonuses when that document already matches the exact term. This prevents
+  variant-heavy documents from displacing more relevant historical originals.
+
+- Infer missing memory projects only when every cited session resolves to the
+  same project. Fail before writes on session-read errors, leave mixed or missing
+  provenance ambiguous, and report only safe migration candidates as fixable.
+
+- Permit memory imports to cite live sources in sessions that contain recoverable
+  observations while retaining protected-target, deleted-source, recovery-metadata
+  and replace-import rejection before writes.
+
+- Derive low-weight Korean syllable-bigram candidates from the existing keyword
+  vocabulary without changing canonical tokens. Cap
+  partial contributions below existing exact contributions and refresh the derived
+  cache after index mutations. This improves inflection coverage; it does not
+  translate English identifiers or resolve ambiguous historical-session queries.
+
+- Preserve ambient-looking XML inside Markdown fenced/inline/indented code and
+  block quotations in both capture and stored observation visibility. Continue
+  excluding actual ambient blocks outside those literal regions.
+
+- Algorithm review considered lexical/hybrid retrieval, filtered ANN, selective
+  classification, provenance, temporal graph memory, duplicate resolution, context
+  construction and retrieval/factual evaluation. Adopt only the above local changes.
+  Korean multi-representation retrieval provides the bigram rationale
+  ([NTCIR-5](https://research.nii.ac.jp/ntcir/workshop/OnlineProceedings5/data/CLIR/NTCIR5-CLIR-NaS.pdf));
+  its reported combined-system results do not establish this adapter's gains.
+  Keep predicate eligibility before limits ([ACORN](https://arxiv.org/abs/2403.04871)),
+  originals alongside derived facts ([LongMemEval](https://arxiv.org/abs/2410.10813)),
+  and source/current-state distinctions ([Zep](https://arxiv.org/abs/2501.13956)).
+  No new embedding/reranking model, graph community store, automatic deletion,
+  inferred time filter or evaluation framework is justified by these papers alone.
+
+- Reclaim replay-import test fixtures in their existing teardown and remove the
+  stale fixed-count acceptance flag from optional physical recovery evidence.
+  Keep the test runner result and per-case process evidence authoritative.
+
+- Match numeric keyword terms exactly so ordinal queries such as `2차` do not
+  accumulate unrelated scores from year and timestamp prefixes. Word and
+  identifier prefix search remains available.
+
+- Preserve fused retrieval score order instead of applying a three-hit session
+  quota. Higher-ranked originals from the same conversation remain eligible in
+  manual search and automatic recall.
+
+- Index the displayed spelling of bare Markdown-escaped underscore identifiers
+  alongside their original tokens. Literal Windows path queries remain available;
+  absolute drive and UNC paths are not joined into identifier aliases.
+
+- Remove the unpublished bulk LLM backfill shell helper, which has no supported
+  CLI, CI, documentation or release consumer. Keep the registered import,
+  summary and consolidation APIs and portable provider behavior.
+
+- Remove the unused reranker availability getter and its getter-only test.
+  Retain actual reranking and unavailable-provider fallback tests.
+
+- Remove the unregistered session-stub migration graph preflight and its
+  helper-only assertion, retaining the semantic graph provenance/cursor test
+  and supported lifecycle reconciliation. Remove seven private, unreferenced
+  type declarations; stored records and exposed tool/REST schemas are unchanged.
+
+- Correct the memory-slots environment example to the boolean value consumed
+  by the existing parser, and align the documented full MCP count to 58.
+
+- Reclaim the existing runner's own empty temporary test home at process exit.
+  Non-empty or unavailable homes remain in place with their path reported.
+
+- Remove ten unconnected input schemas and the unused context scoring helper,
+  along with twelve tests of those unused definitions. Preserve runtime
+  compression/summary output validation and scoring; exercise the existing
+  generic validator against its actual compression output schema.
+
+- Remove eleven unused internal exports and their private remnants after checking
+  source, dynamic imports, adapters, tests and documentation. Quiet startup
+  logging no longer retains an unread buffer; verbose output is unchanged.
+  Keep actual diagnostic/remove paths, CJK segmentation, metric recording,
+  embedding setters and the required test accessors. Remove the environment
+  example for the unused standalone-mode flag.
+
+- Remove the unused dotenv production dependency and its lockfile entries.
+  Configuration already reads environment files through the existing parser
+  in config.ts; retain the parser and its configuration precedence behavior.
+
+- Remove the unused environment-example checker. It is outside CI, package
+  scripts and release inputs; it fails on Windows paths and mistakes unrelated
+  string-array constants and host variables for user configuration. Keep the
+  existing skill/configuration reference generation and supported build checks.
+
+- Remove the unregistered vector migration helper and its helper-only tests.
+  The published entry points already rebuild indexes through the canonical
+  candidate/publication path in search.ts; retain dimension validation tests.
+
+- Preserve shallower weighted graph routes when a stronger route uses more hops.
+  Entity recall and chunk expansion retain every reachable node within the hop
+  limit while choosing the lowest-cost valid path for each returned node.
+
+- Resolve shared graph observation provenance through existing indexed session
+  locations before scanning source sessions. Verify the canonical observation,
+  retain project/agent/speaker visibility and fall back when a hint is stale or
+  absent from graph provenance; no graph candidate is accepted from the index alone.
+
+- Cancel local Qwen requests when worker shutdown begins, including streamed
+  canary and graph responses. Drain the existing graph handler and release its
+  lease while leaving unfinished observation cursors eligible for restart.
+  This prevents inference from consuming the Windows graceful-stop deadline.
+
+- Record unpublished index shards in the existing manifest cleanup list before
+  writing them. Preserve the current search snapshot and legacy first-save data
+  across interruptions, then reclaim incomplete generations on the next save.
+  Physical engine crash tests cover interrupted first saves and replacements.
+
+- Read managed audit history through bounded StateModule pages, retaining only
+  the newest filtered results. Whole audit history no longer crosses one SDK
+  WebSocket frame; the initial row-count cutoff also bounds a growing ledger scan.
+
+- Pin an iii-sdk 0.11.2 disconnect patch: reject interrupted RPCs immediately,
+  discard their unsent requests instead of replaying them, and let uncertain
+  canonical writes enter the existing durability recovery path. Direct socket
+  tests cover cancellation, fresh calls after reconnection and no mutation retry;
+  release smoke verifies that both deployed SDK entry points match the tested patch.
+
+- Deploy the validated workspace lockfile instead of re-resolving production
+  dependencies through legacy deploy. Release smoke rejects direct dependency
+  version or availability differences from the tested source environment.
+- Repeat bounded native source discovery independently of long capture sweeps;
+  ingest newly created, initialized or relocated sources in the discovery batch
+  without resetting the fair capture cursor or continuously rescanning idle sources.
+- Relocate an established original after host working-directory changes using
+  exact source identity, file identity and cursor anchors. Preserve the original
+  project/capture scope; unowned sessions, changed originals and ownership conflicts
+  still require reconciliation.
+- Distinguish absent native source files from other read failures in canonical
+  capture diagnostics and whole-source liveness. Preserve attention, source
+  provenance and retry behavior without assuming deletion or data loss.
+- Retire explicitly archived sessions with confirmed absent source files from
+  automatic capture; keep their originals and archive counts, and resume checks
+  on restore. Other archived sessions and read failures retain their behavior.
+- Document cloud conversation exports, durable summaries and native session
+  identities separately; preserve the actual saving conversation's provenance.
 
 ## 0.1.0-preview.12 — 2026-10-01
 

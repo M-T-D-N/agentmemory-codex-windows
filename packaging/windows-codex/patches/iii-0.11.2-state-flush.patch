@@ -804,3 +804,70 @@ index 3a65ed1227b40217d49b4380067254eb52d39e1d..729573cda05a6f51dca4b4263cc61797
 +        assert_eq!(explicit.limit, 17);
 +    }
  }
+diff --git a/engine/src/engine/mod.rs b/engine/src/engine/mod.rs
+--- a/engine/src/engine/mod.rs
++++ b/engine/src/engine/mod.rs
+@@ -269,6 +269,37 @@
+     fn default() -> Self {
+         Self::new()
+     }
++}
++
++fn websocket_failure_fields(
++    error: &(dyn std::error::Error + 'static),
++) -> (&'static str, Option<i32>, Option<usize>, Option<usize>) {
++    let mut source = Some(error);
++    while let Some(current) = source {
++        if let Some(io) = current.downcast_ref::<std::io::Error>() {
++            return ("io", io.raw_os_error(), None, None);
++        }
++        source = current.source();
++    }
++    let description = error.to_string();
++    if let Some((size, limit)) = description
++        .strip_prefix("Space limit exceeded: Message too long: ")
++        .and_then(|value| value.split_once(" > "))
++    {
++        return ("capacity", None, size.parse().ok(), limit.parse().ok());
++    }
++    let kind = if description.starts_with("WebSocket protocol error:") {
++        "protocol"
++    } else if description.starts_with("UTF-8 encoding error:") {
++        "utf8"
++    } else if description == "Write buffer is full" {
++        "write_buffer_full"
++    } else if description == "Connection closed normally" {
++        "closed"
++    } else {
++        "other"
++    };
++    (kind, None, None, None)
+ }
+ 
+ impl Engine {
+@@ -1321,7 +1352,10 @@
+                     Outbound::Raw(frame) => ws_tx.send(frame).await,
+                 };
+ 
+-                if send_result.is_err() {
++                if let Err(error) = send_result {
++                    let (error_kind, os_error, message_bytes, limit_bytes) =
++                        websocket_failure_fields(&error);
++                    tracing::warn!(peer = %peer, error_kind, os_error, message_bytes, limit_bytes, "Worker websocket send failed");
+                     break;
+                 }
+             }
+@@ -1381,9 +1415,12 @@
+                             let _ = tx.send(Outbound::Raw(WsMessage::Pong(payload))).await;
+                         }
+                         Some(Ok(WsMessage::Pong(_))) => {}
+-                        Some(Err(_)) | None => {
++                        Some(Err(error)) => {
++                            let (error_kind, os_error, message_bytes, limit_bytes) = websocket_failure_fields(&error);
++                            tracing::warn!(peer = %peer, error_kind, os_error, message_bytes, limit_bytes, "Worker websocket receive failed");
+                             break;
+                         }
++                        None => break,
+                     }
+                 }
+                 _ = shutdown_rx.changed() => {
