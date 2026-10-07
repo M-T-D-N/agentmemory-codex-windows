@@ -38,6 +38,16 @@ export interface GraphRetrievalResult {
   pathLength: number;
 }
 
+function retainStrongestCandidate(
+  results: Map<string, GraphRetrievalResult>,
+  candidate: GraphRetrievalResult,
+): void {
+  const existing = results.get(candidate.obsId);
+  if (!existing || candidate.score > existing.score) {
+    results.set(candidate.obsId, candidate);
+  }
+}
+
 function buildGraphContext(
   path: Array<{ node: GraphNode; edge?: GraphEdge }>,
 ): string {
@@ -93,8 +103,7 @@ export class GraphRetrieval {
 
     if (matchingNodes.length === 0) return [];
 
-    const results: GraphRetrievalResult[] = [];
-    const visitedObs = new Set<string>();
+    const results = new Map<string, GraphRetrievalResult>();
     const graph = prepareTraversal(allNodes, allEdges);
     let lastYield = performance.now();
 
@@ -112,9 +121,6 @@ export class GraphRetrieval {
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
         for (const obsId of lastNode.sourceObservationIds) {
-          if (visitedObs.has(obsId)) continue;
-          visitedObs.add(obsId);
-
           const pathLength = path.length;
           const edgeWeights = path
             .filter((s) => s.edge)
@@ -125,7 +131,7 @@ export class GraphRetrieval {
               : 0.5;
           const score = avgWeight * (1 / pathLength);
 
-          results.push({
+          retainStrongestCandidate(results, {
             obsId,
             sessionId: "",
             score,
@@ -137,9 +143,7 @@ export class GraphRetrieval {
       }
 
       for (const obsId of startNode.sourceObservationIds) {
-        if (visitedObs.has(obsId)) continue;
-        visitedObs.add(obsId);
-        results.push({
+        retainStrongestCandidate(results, {
           obsId,
           sessionId: "",
           score: 1.0,
@@ -150,8 +154,7 @@ export class GraphRetrieval {
       }
     }
 
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, maxResults);
+    return Array.from(results.values()).sort((a, b) => b.score - a.score).slice(0, maxResults);
   }
 
   async expandFromChunks(
@@ -172,8 +175,8 @@ export class GraphRetrieval {
       n.sourceObservationIds.some((id) => obsIds.includes(id)),
     );
 
-    const results: GraphRetrievalResult[] = [];
-    const visitedObs = new Set<string>(obsIds);
+    const results = new Map<string, GraphRetrievalResult>();
+    const excludedObs = new Set<string>(obsIds);
     const graph = prepareTraversal(allNodes, allEdges);
     let lastYield = performance.now();
 
@@ -186,13 +189,12 @@ export class GraphRetrieval {
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
         for (const obsId of lastNode.sourceObservationIds) {
-          if (visitedObs.has(obsId)) continue;
-          visitedObs.add(obsId);
+          if (excludedObs.has(obsId)) continue;
 
           const pathLength = path.length;
           const score = 0.5 * (1 / (pathLength + 1));
 
-          results.push({
+          retainStrongestCandidate(results, {
             obsId,
             sessionId: "",
             score,
@@ -204,8 +206,7 @@ export class GraphRetrieval {
       }
     }
 
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, maxResults);
+    return Array.from(results.values()).sort((a, b) => b.score - a.score).slice(0, maxResults);
   }
 
   async temporalQuery(

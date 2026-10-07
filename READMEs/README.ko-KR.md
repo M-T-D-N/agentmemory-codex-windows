@@ -6,7 +6,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
 > [!IMPORTANT]
-> 이 저장소는 독립 Technical Preview `0.1.0-preview.13`입니다.
+> 이 저장소는 독립 Technical Preview `0.1.0-preview.14`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -48,6 +48,29 @@ port 3111의 135 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 공개판 변경은 [변경 기록](../CHANGELOG.md)에 정리합니다. 소스 tag는 공개판을,
 각 빌드 manifest는 해당 산출물의 검증 개정을 식별합니다.
 
+## 검색·필터·인덱스의 동작과 검증 범위
+
+일반 검색은 저장된 원문·lesson과 그래프를 조회하며 Qwen에 답변 생성을 요청하지
+않습니다. Qwen은 별도의 백그라운드 그래프 추출에만 사용합니다. 후보를 최종 건수로
+제한하기 전에 정본의 프로젝트·발화자·보관 상태·주변 UI 출처를 확인하고, 코드·인용문
+안의 원문은 보존합니다. `memory_smart_search` 후보의 `expandIds`로 출처를 확인합니다.
+
+키워드 snapshot과 그래프 조회 shard는 재생성 가능한 인덱스입니다. 표현을 축소해도
+정본 대화·원문·ID는 삭제하지 않습니다. preview.14는 여러 시작점이 같은 원문에
+도달할 때 가장 높은 점수의 후보와 해당 문맥·출처를 함께 유지합니다. 먼저 발견한
+약한 연결이 나중의 직접 일치를 가리던 문제를 수정했습니다.
+
+기존 검사는 검색·필터·수집·그래프 출처·인증·설치·복구를 다룹니다. 이번 회귀 검사는
+시작점의 양쪽 순서, 직접 일치, 더 짧은 확장, 출처 교체와 결과 제한을 확인합니다.
+실제 설치본은 기대 원문 ID가 고정된 과거 질문 50건으로 확인하며 정확한 결과는
+release 설명에 남깁니다. 단위 검사 통과와 실제 환경의 성공을 구분합니다.
+
+preview.13에서 재현된 약 6초 지연은 MCP 완료까지 약 1.4초, 이후 호출 스크립트
+재개까지 약 4.5초가 더 걸린 사례입니다. 완료 이후 구간의 정확한 원인과 다른 대화의
+영향은 미확정이며 이번 순위 수정으로 그 지연이 해결됐다고 주장하지 않습니다.
+AdGuard·리다이렉트 드라이버 호환성도 미검증입니다. 자세한 기능과 검증 한계는
+[영문 설명](../README.md#how-search-filtering-and-indexes-work)을 참조하세요.
+
 ## 그래프 갱신 시점
 
 1. 관리형 훅이 정상 대화를 observation으로 저장합니다. 새 observation의 저장이
@@ -75,7 +98,7 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.13` | 저장소 공개판과 소스 tag |
+| 공개 다운스트림 버전 | `0.1.0-preview.14` | 저장소 공개판과 소스 tag |
 | AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
@@ -85,7 +108,7 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 ## 빌드 없이 설치하기
 
-preview.11 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
+preview.14 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
 [npm/npx 설치 안내](../packaging/windows-codex/npm/README.md)를 사용합니다.
 Windows x64, Node.js 24 이상, Codex가 필요합니다. 빈 설치 폴더의 준비와
 예약 작업·훅 활성화를 별도로 확인하며, 기본 명령은 설치하지 않고 검증만 합니다.
@@ -110,7 +133,7 @@ Windows PowerShell에서 다음과 같이 실행합니다. 출력 폴더는 미�
 됩니다.
 
 ```powershell
-git clone --branch v0.1.0-preview.13 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.14 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

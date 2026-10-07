@@ -7,7 +7,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> `0.1.0-preview.11` です。
+> `0.1.0-preview.14` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -34,8 +34,8 @@ AgentMemory ダウンストリームです。
 - サポート対象プロファイルは認証済み loopback MCP endpoint を使用します。
   stdio launcher は互換性経路としてのみパッケージに含まれます。
 
-アップストリーム互換のソース surface には、57個の MCP tools、6個の
-resources、3個の prompts、port 3111 の134個の REST endpoints、12個の
+アップストリーム互換のソース surface には、58個の MCP tools、6個の
+resources、3個の prompts、port 3111 の135個の REST endpoints、12個の
 portable hooks、17個の skills があります。サポート対象の Windows
 プロファイルで意図的に有効化する管理対象 hook は、上記の4つだけです。
 
@@ -50,6 +50,23 @@ index の更新には明示的な snapshot rebuild を使用します。
 各 node・edge にゼロ起点の `sourceIndexes` を指定するか、共有出典として
 `sharedSources: true` を明示します。空 observation の復元は既存の REST forget
 endpoint で正確な ID・version・graph cursor を保護して行います。
+
+## 検索・フィルタ・インデックスと検証範囲
+
+通常の検索は保存済みの原文・lesson と graph を読み、Qwen に回答生成を依頼しません。
+Qwen は別の背景 graph 抽出に限定します。件数制限前に正規データの project・話者・
+archive・ambient source を確認し、コードと引用文の原文を保持します。候補を
+`expandIds` で展開して出典を確認できます。派生 index の圧縮は正規会話の削除ではありません。
+
+preview.14 は複数の開始点から同じ observation に到達したとき、最高スコアの候補と
+その context・provenance を保持します。弱い経路が後の直接一致を隠す不具合を修正しました。
+回帰検査は両順序、直接一致、短い展開、出典更新と件数制限を確認します。実環境の
+履歴検索には期待する原文 ID が固定された50問を使い、正確な結果を release notes に記録します。
+
+preview.13 の約6秒の遅延は MCP 完了まで約1.4秒、その後の再開まで約4.5秒という記録です。
+完了後の原因と他の会話の影響は未確定で、今回の順位修正が遅延を解決したとは主張しません。
+AdGuard・redirect driver の互換性も未検証です。詳細は
+[英語の説明](../README.md#how-search-filtering-and-indexes-work)を参照してください。
 
 ## グラフが更新されるタイミング
 
@@ -79,7 +96,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.11` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.14` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -96,7 +113,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、ダウンストリーム修正済み iii engine `0.11.2` Windows 実行ファイル
 
-preview.11 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
+preview.14 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
 ## ソースからビルドする
 
@@ -104,7 +121,7 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.11 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.14 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

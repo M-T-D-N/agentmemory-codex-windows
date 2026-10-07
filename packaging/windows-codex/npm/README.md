@@ -15,7 +15,7 @@ your own). This does not depend on a separate npm-registry publication. All
 commands default to dry-run:
 
 ```powershell
-npm exec --yes --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.10/agentmemory-codex-windows-0.1.0-preview.10.tgz" -- agentmemory-codex-windows --fresh --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
+npm exec --yes --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.14/agentmemory-codex-windows-0.1.0-preview.14.tgz" -- agentmemory-codex-windows --fresh --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
 ```
 
 `projects.json` is your existing project registry within the workspace. A minimal
@@ -59,7 +59,7 @@ For an already activated owned installation, omit `--fresh` and
 performs its protected cutover with predecessor backup/rollback. Keep canonical
 data in the same installation root. Do not create another root to update it.
 
-`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.10-win32-x64.zip"`
+`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.14-win32-x64.zip"`
 uses a previously downloaded ZIP, with exactly the same pinned hash check.
 `--help` describes the options without downloading anything.
 

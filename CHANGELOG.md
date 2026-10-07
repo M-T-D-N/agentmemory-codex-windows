@@ -4,6 +4,13 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## 0.1.0-preview.14
+
+- Retain the strongest complete candidate per observation across graph entity and chunk seeds. A weak first path no longer suppresses a later direct match or shorter expansion; context and provenance follow the winning candidate. Input-chunk exclusion and canonical project/visibility guards remain unchanged.
+- Add focused regression cases for both seed orders, direct/shorter matches, provenance/context replacement, deduplication and result limits.
+- Expand English, Korean and Japanese descriptions of retrieval, filtering, derived indexes, Qwen scope and validation limits. Correct stale prebuilt installation links and Japanese tool/endpoint counts.
+- Keep the unresolved post-MCP caller delay separate from graph ranking; no claim that this release resolves that intermittent latency.
+
 ## 0.1.0-preview.13
 
 - Read only the required canonical keyword head when no semantic or graph channel and no reranker can change its rank; continue past invalid or out-of-scope candidates.

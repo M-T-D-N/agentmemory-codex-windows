@@ -336,6 +336,48 @@ describe("GraphRetrieval", () => {
     expect(root!.pathLength).toBe(0);
   });
 
+  it.each(["forward", "reverse"])("retains a later direct match and its provenance across connected entity seeds (%s)", async order => {
+    const first = { ...makeNode("first", "Match A", "concept", []), project: "own" };
+    const direct = { ...makeNode("direct", "Match B", "concept", ["target"]), project: "own", sourceSessionIds: ["direct-session"] };
+    const indirect = { ...makeNode("indirect", "Related", "concept", ["target"]), project: "own", sourceSessionIds: ["indirect-session"] };
+    const competitor = { ...makeNode("competitor", "Neighbor", "concept", ["other"]), project: "own" };
+    const nodes = order === "forward" ? [first, direct, indirect, competitor] : [direct, first, indirect, competitor];
+    const edges = [
+      makeEdge("indirect", first.id, indirect.id, "related_to", 0.8),
+      makeEdge("connected-seeds", first.id, direct.id, "related_to", 0.1),
+      makeEdge("competitor", first.id, competitor.id, "related_to", 0.9),
+    ].map(edge => ({ ...edge, project: "own" }));
+    const retrieval = new GraphRetrieval(mockKV(nodes, edges) as never);
+    const results = await retrieval.searchByEntities(["Match"], 2, 10, "own");
+    const target = results.find(row => row.obsId === "target");
+    expect(results.filter(row => row.obsId === "target")).toHaveLength(1);
+    expect(target).toMatchObject({ score: 1, pathLength: 0, graphContext: "[concept] Match B", sourceSessionIds: ["direct-session"] });
+    expect(await retrieval.searchByEntities(["Match"], 2, 1, "own")).toEqual([target]);
+  });
+
+  it.each(["forward", "reverse"])("retains the shorter expansion and its provenance across connected chunk seeds (%s)", async order => {
+    const first = { ...makeNode("first", "Anchor A", "concept", ["seed-a"]), project: "own" };
+    const second = { ...makeNode("second", "Anchor B", "concept", ["seed-b"]), project: "own" };
+    const middle = { ...makeNode("middle", "Middle", "concept", []), project: "own" };
+    const longer = { ...makeNode("longer", "Long destination", "concept", ["target"]), project: "own", sourceSessionIds: ["long-session"] };
+    const shorter = { ...makeNode("shorter", "Short destination", "concept", ["target"]), project: "own", sourceSessionIds: ["short-session"] };
+    const nodes = [...(order === "forward" ? [first, second] : [second, first]), middle, longer, shorter];
+    const edges = [
+      makeEdge("long-a", first.id, middle.id, "related_to", 1),
+      makeEdge("long-b", middle.id, longer.id, "related_to", 1),
+      makeEdge("connected-seeds", first.id, second.id, "related_to", 0.1),
+      makeEdge("short", second.id, shorter.id, "related_to", 1),
+    ].map(edge => ({ ...edge, project: "own" }));
+    const retrieval = new GraphRetrieval(mockKV(nodes, edges) as never);
+    const results = await retrieval.expandFromChunks(["seed-a", "seed-b"], 2, 1, "own");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ obsId: "target", score: 0.5 / 3, pathLength: 2, sourceSessionIds: ["short-session"] });
+    expect(results[0].graphContext).toContain("Anchor B");
+    expect(results[0].graphContext).toContain("Short destination");
+    expect(results[0].graphContext).not.toContain("Anchor A");
+    expect(results[0].graphContext).not.toContain("Long destination");
+  });
+
   it("respects maxDepth bound (Dijkstra stops at edge-count depth)", async () => {
     // Chain n1 -> n2 -> n3 -> n4. With maxDepth=2 we should reach n3
     // but not n4 — edge-count semantics preserved from the old BFS.

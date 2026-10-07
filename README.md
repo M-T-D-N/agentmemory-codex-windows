@@ -7,7 +7,7 @@ and Codex CLI.
 
 <p align="center">
   <a href="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml"><img src="https://github.com/M-T-D-N/agentmemory-codex-windows/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
-  <img src="https://img.shields.io/badge/release-0.1.0--preview.13-orange" alt="0.1.0-preview.13" />
+  <img src="https://img.shields.io/badge/release-0.1.0--preview.13-orange" alt="0.1.0-preview.14" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" /></a>
 </p>
 
@@ -63,6 +63,60 @@ only an explicit snapshot rebuild refreshes them.
 Release changes are recorded in [CHANGELOG.md](CHANGELOG.md). Source tags
 identify public releases; each build manifest records its own qualification.
 
+## How search, filtering, and indexes work
+
+Normal recall searches stored observations and reusable lessons. Keyword retrieval
+uses BM25 with Korean inflection and literal identifier handling. Where available,
+vector and stored-graph candidates join the same ranked result set. A graph search
+reads existing nodes, edges, and source references; it does not ask local Qwen to
+answer the query. Qwen is used separately for background graph extraction in the
+supported Windows profile.
+
+Search candidates are checked against their canonical observation and session.
+Project, speaker, archive, and ambient-source eligibility apply before selecting
+the returned result count. Literal code and quoted source text are preserved;
+ambient-looking text inside those regions is not automatically discarded. Use
+`memory_smart_search` for compact candidates, then `expandIds` to inspect the
+original observations and their provenance. Use an exact registered project ID;
+`*` is an intentional federated read, not permission for cross-project writes.
+
+The keyword snapshot and graph-query shards are rebuildable derived indexes.
+Compacting the keyword representation does not delete conversations, change
+observation IDs, or remove their canonical source text. Preview.13 reduced the
+measured keyword snapshot text size by 63.6% with preserved posting order and
+scores. Graph output is also derived: verify consequential conclusions against
+source observations rather than treating an extracted relationship as a fact.
+
+Preview.14 fixes multi-seed graph retrieval: when several matched entities or
+source chunks reach the same observation, the strongest candidate wins together
+with its context and provenance. A weak path discovered first can no longer hide
+a later direct match. Expansion continues excluding the input observations, and
+existing project and source-visibility checks remain in place.
+
+## Validation scope and known limitations
+
+The existing checks cover package behavior, managed hooks, capture/filtering,
+authenticated MCP/REST, graph provenance, installer/recovery, and packaged CLI/MCP
+entrypoints. Regression tests exercise connected graph seeds in both orders,
+stronger direct matches, shorter expansion paths, provenance replacement, and
+result limits. The fixed live historical set contains 50 questions with original
+observation IDs; it measures retrieval on the installed runtime rather than
+assuming that unit tests prove live success. Exact release results are published
+in the release notes.
+
+A preview.13 investigation reproduced an intermittent roughly six-second caller
+response. Native MCP completion took about 1.4 seconds; roughly 4.5 seconds followed
+that completion before the calling script resumed. The precise post-completion
+cause and any influence from concurrent conversations remain unknown. Qwen
+inference is not part of that search path. The graph-ranking fix is a separate
+confirmed defect and is not presented as a fix for this intermittent delay.
+
+AdGuard/redirect-driver interoperability remains unqualified. Validation on one
+Windows/Codex host is not certification of every host configuration or every
+upstream-compatible operation. The binaries remain unsigned; SHA-256 checks
+verify artifact integrity, not publisher signing. See the installation guide for
+preparation, activation, update, data preservation, and rollback boundaries.
+
 ## When the graph updates
 
 1. The managed hooks store eligible conversation turns as observations. A new
@@ -96,7 +150,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.13` | Public version and source tag |
+| Downstream release | `0.1.0-preview.14` | Public version and source tag |
 | AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
@@ -106,7 +160,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 ## Install without building
 
-Use the preview.11 GitHub release ZIP or its version-pinned TGZ launcher with the
+Use the preview.14 GitHub release ZIP or its version-pinned TGZ launcher with the
 [pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
 It covers empty-root preparation, separate activation, existing-install updates,
 and offline hash verification. The GitHub TGZ can be run with npm without a
@@ -131,7 +185,7 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.13 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.14 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

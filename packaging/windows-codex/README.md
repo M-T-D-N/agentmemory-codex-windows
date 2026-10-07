@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.13`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.14`, based on upstream AgentMemory `v0.9.29`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -102,7 +102,7 @@ from installed qualification and preserves the current engine/data contracts.
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.13`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.14`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
@@ -193,7 +193,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.13 -OutputDirectory D:\staging\npm-preview11
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.14 -OutputDirectory D:\staging\npm-preview11
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -219,8 +219,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.13\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.13 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.14\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.14 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
