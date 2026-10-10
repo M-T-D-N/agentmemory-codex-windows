@@ -59,7 +59,7 @@ describe("official memory_sessions scope and paging", () => {
   });
   it("keeps REST backlog ordering ascending while MCP returns recent sessions", async () => {
     const rest = await sdk.trigger("api::sessions", { headers: {},
-      query_params: { project: "*", limit: "1" } }) as any;
+      query_params: { project: "*", limit: "1", order: "asc" } }) as any;
     expect(rest.body.sessions[0].id).not.toBe("other");
     expect((await query({ project: "*", limit: 1 })).sessions[0].id).toBe("other");
   });

@@ -1,16 +1,17 @@
 import { availableParallelism } from "node:os";
 import { getHeapStatistics } from "node:v8";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { HealthSnapshot } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { evaluateHealth } from "./thresholds.js";
 import { graphQueryIndexAvailable } from "../functions/graph-query-index.js";
+import type { StreamRelayProbe } from "./stream-relay-probe.js";
 
 export function registerHealthMonitor(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
-  options: { maintainGraphQueryIndex?: boolean } = {},
+  options: { maintainGraphQueryIndex?: boolean; streamRelayProbe?: StreamRelayProbe } = {},
 ): { stop: () => void } {
   let connectionState = "connected";
   let prevCpuUsage = process.cpuUsage();
@@ -21,7 +22,7 @@ export function registerHealthMonitor(
   let graphRetryAt = 0;
   let graphRecoveryError: string | undefined;
 
-  const eventSdk = sdk as ISdk & {
+  const eventSdk = sdk as IIIClient & {
     on?: (event: string, listener: (state?: unknown) => void) => void;
   };
   if (typeof eventSdk.on === "function") {
@@ -32,9 +33,7 @@ export function registerHealthMonitor(
 
   async function collectHealth(): Promise<HealthSnapshot> {
     const mem = process.memoryUsage();
-    const heapSizeLimit = kv.usesManagedState
-      ? getHeapStatistics().heap_size_limit
-      : undefined;
+    const heapSizeLimit = getHeapStatistics().heap_size_limit;
     const currentCpu = process.cpuUsage();
     const now = Date.now();
     const uptime = process.uptime();
@@ -117,11 +116,13 @@ export function registerHealthMonitor(
     }
     const snapshot: HealthSnapshot = {
       connectionState,
+      ...(options.streamRelayProbe ? { streamRelay: await options.streamRelayProbe.check().catch(() => "unknown" as const) } : {}),
       workers,
       memory: {
         heapUsed: mem.heapUsed,
         heapTotal: mem.heapTotal,
-        ...(heapSizeLimit === undefined ? {} : { heapSizeLimit }),
+        heapSizeLimit,
+        heapLimit: heapSizeLimit,
         rss: mem.rss,
         external: mem.external,
       },
@@ -161,7 +162,7 @@ export function registerHealthMonitor(
   interval.unref();
 
   return {
-    stop: () => { stopped = true; clearInterval(interval); },
+    stop: () => { stopped = true; clearInterval(interval); options.streamRelayProbe?.close(); },
   };
 }
 

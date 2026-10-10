@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { ArchiveState, ArchiveTarget } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
@@ -45,7 +45,7 @@ export function parseArchiveToolInput(value: unknown): ArchiveToolInput {
     ...(input.reason !== undefined ? { reason: input.reason as string } : {}) };
 }
 
-export function registerArchiveFunctions(sdk: ISdk, kv: StateKV) {
+export function registerArchiveFunctions(sdk: IIIClient, kv: StateKV) {
   sdk.registerFunction("mem::archive", async (data: unknown) => {
     // iii-engine adds transport metadata after REST/MCP business input validation.
     const payload = data && typeof data === "object" && !Array.isArray(data)

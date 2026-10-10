@@ -4,6 +4,26 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## 0.1.0-preview.15
+
+- Settle intentionally skipped native-managed and excluded captures without creating false dead letters. Preserve real failures and retry limits.
+- Report general and graph provider capabilities separately so the graph-only local Qwen profile does not present disabled summaries as active failures.
+- Exclude app-generated next-message suggestion requests from capture and retrieval while preserving quoted examples and stored originals.
+- Seed the managed viewer stream through bounded key pages instead of transferring all payloads at startup. Use actual stored keys under the existing retention limit; canonical observations and graph data remain separate.
+- Integrate AgentMemory 0.9.30 and iii engine/SDK 0.22.1, retaining the downstream file flush barrier, recovery intents, complete graph provenance, exact project filters and graph-only local Qwen capability.
+- A single Windows installation entry selects fresh installation, managed upgrade or explicitly identified original upstream adoption. Qualified file-state adoption preserves the original directory, copies data with integrity checks and carries authentication and listener ports into the managed installation. A newer unsupported upstream is not silently downgraded.
+- Bring in upstream capture, indexed list pagination, profile derivation, viewer events and client secret discovery. Preserve raw observation sources and verify indexed candidates against canonical state. Export and file import paths reject directory escapes and symbolic-link destinations.
+- Separate worker lifecycle metadata by instance. Keep production installation qualification distinct from unit tests and engine data compatibility fixtures; actual fresh installation, managed upgrade, original upstream 0.9.29/0.9.30 adoption, restart and planned adoption failure recovery have been exercised on the owner's Windows host.
+
+- Close only each successful Windows builder invocation's fresh disposable scratch unit and restore the caller environment. Preserve failed units for diagnosis; dependency stores, source outputs, accepted releases and canonical data are outside automatic cleanup. Document one-shot Cargo qualification without incremental targets accumulating between runs.
+
+### Qualification and limits
+
+- Actual native Windows installation flows on r186 covered a fresh target, an owned managed predecessor, original upstream 0.9.29 and 0.9.30 file-state sources, post-install restart, and deliberate candidate failure with source recovery. Synthetic fixtures are distinct from the owner's live r187 production cutover and viewer-stream qualification. The final public packaging reuses those checks for unchanged installer/runtime inputs; it does not relabel them as a fresh r187/r188 installation matrix. A managed-upgrade controller's initial restored-service read failed during startup, with a later actual MCP read succeeding; its configuration hash comparison was not completed.
+- The pinned patched iii 0.22.1 binary passed 20 synthetic recovery cases, including forced process-crash boundaries through the real StateModule. Its snapshot compatibility and bounded viewer-stream recovery were checked separately. This does not certify Windows power-loss or disk-failure recovery, Redis/Docker adoption, every upstream operation or other PCs.
+- Pre-publication live graph inspection verified current capture progress, no queued/retrying/dead capture items, no pending/deferred graph sessions in the visible session inventory, and source expansion for sampled graph provenance. Canonical totals include archived/retained sources and differ from visible query totals. A sample does not establish whole-graph semantic correctness.
+- Local Qwen remains graph-only; general summaries, consolidation, reflection and compression remain disabled. AdGuard/redirect-driver interoperability and the earlier intermittent post-MCP caller delay remain unqualified. Binaries remain unsigned, and no independent security audit is claimed.
+
 ## 0.1.0-preview.14
 
 - Skip nonimproving repeated node paths and construct winning context lazily once, preserving the strongest-candidate rule without repeated observation allocations.

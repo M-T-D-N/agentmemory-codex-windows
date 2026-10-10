@@ -30,6 +30,11 @@ export function evaluateHealth(
   let critical = false;
   let degraded = false;
 
+  if (snapshot.streamRelay === "down") {
+    alerts.push("stream_relay_down");
+    degraded = true;
+  }
+
   if (snapshot.graphQueryIndex && snapshot.graphQueryIndex.status !== "ready") {
     alerts.push(`graph_query_index_${snapshot.graphQueryIndex.status}`);
     degraded = true;
@@ -64,7 +69,7 @@ export function evaluateHealth(
     degraded = true;
   }
 
-  const heapSizeLimit = snapshot.memory.heapSizeLimit;
+  const heapSizeLimit = snapshot.memory.heapSizeLimit ?? snapshot.memory.heapLimit;
   const heapCapacity =
     typeof heapSizeLimit === "number" &&
     Number.isFinite(heapSizeLimit) &&

@@ -208,11 +208,11 @@ describe("buildSyntheticCompression", () => {
       raw: {},
     });
     expect(synth.files).toContain("/app/src/bar.ts");
-    expect(synth.files).toContain("foo");
+    expect(synth.files).not.toContain("foo");
     expect(synth.type).toBe("file_edit");
   });
 
-  it("preserves long observation narratives", async () => {
+  it("bounds tool narratives while preserving the original source", async () => {
     const { buildSyntheticCompression } = await import(
       "../src/functions/compress-synthetic.js"
     );
@@ -227,8 +227,9 @@ describe("buildSyntheticCompression", () => {
       toolOutput: longInput,
       raw: {},
     });
-    expect(synth.narrative).toContain(longInput);
-    expect(synth.narrative.length).toBeGreaterThan(400);
+    expect(synth.narrative.length).toBeLessThanOrEqual(400);
+    expect(synth.source?.toolInput).toEqual({ command: longInput });
+    expect(synth.source?.toolOutput).toBe(longInput);
   });
 
   it("preserves raw user and final assistant text without separators", async () => {

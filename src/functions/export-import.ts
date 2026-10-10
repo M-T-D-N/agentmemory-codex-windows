@@ -1,6 +1,10 @@
+import { markCaptureEventDeleted } from "../capture/event-record.js";
+import { indexObservationSession, unindexObservationSession } from "../state/obs-index.js";
+import { addSessionToProjectIndex, removeSessionFromProjectIndex } from "../state/session-index.js";
+import { budgetImportedObservationSources } from "./observation-source-budget.js";
 import { profileCacheKey } from "./profile.js";
 import { withObservationRecovery } from "../state/observation-write.js";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type {
   Session,
   CompressedObservation,
@@ -30,7 +34,7 @@ import type {
 import { importOrigin } from "../types.js";
 import { normalizeAccessLog } from "./access-tracker.js";
 import { KV } from "../state/schema.js";
-import { checkPayloadFrameSize } from "../state/frame-guard.js";
+import { SAFE_PAYLOAD_BYTES, payloadByteLength, oversizedPayloadError, type OversizedPayload, checkPayloadFrameSize } from "../state/frame-guard.js";
 import { StateKV } from "../state/kv.js";
 import { VERSION, CODEX_LIFECYCLE_EXPORT_VERSION, ARCHIVE_LIFECYCLE_EXPORT_VERSION } from "../version.js";
 import { collectArchiveExport, prepareArchiveImport, finishArchiveImport } from "./archive-transfer.js";
@@ -71,8 +75,27 @@ async function runChunked<T>(
   }
 }
 
+const EXPORT_OVERSIZE_HINT =
+  "narrow the range with ?maxSessions / ?offset, or export fewer collections; the non-session collections (memories, graph, semantic, actions, lessons, ...) are not yet paginated";
+
+export class ExportBudget {
+  bytes = 0;
+
+  constructor(private readonly limit = SAFE_PAYLOAD_BYTES) {}
+
+  fits(items: readonly unknown[], key = ""): boolean {
+    this.bytes += key.length + 6;
+    for (const item of items) {
+      this.bytes += payloadByteLength(item) + 1;
+      if (this.bytes > this.limit) return false;
+    }
+    return this.bytes <= this.limit;
+  }
+}
+
 export async function captureExportData(
   kv: StateKV, data?: { maxSessions?: number; offset?: number },
+  onCollection?: (items: readonly unknown[], field: string) => void,
 ): Promise<ExportData> {
   return withObservationRecovery(async () => {
       if (await kv.get(KV.graphWritePlan, "current")) throw Error("Graph recovery must finish before export");
@@ -85,21 +108,18 @@ export async function captureExportData(
       const paginatedSessions = maxSessions !== undefined
         ? allSessions.slice(offset, offset + maxSessions)
         : allSessions;
+      const transferSessions = paginatedSessions.map(codexSessionForTransfer);
+      onCollection?.(transferSessions, "sessions");
       const memories = await kv.list<Memory>(KV.memories);
+      onCollection?.(memories, "memories");
       const summaries = await kv.list<SessionSummary>(KV.summaries);
+      onCollection?.(summaries, "summaries");
 
       const observations: Record<string, CompressedObservation[]> = {};
-      const obsResults = await Promise.all(
-        paginatedSessions.map((session) =>
-          kv
-            .list<CompressedObservation>(KV.observations(session.id))
-            .then((obs) => ({ sessionId: session.id, obs })),
-        ),
-      );
-      for (const { sessionId, obs } of obsResults) {
-        if (obs.length > 0) {
-          observations[sessionId] = obs;
-        }
+      for (const session of paginatedSessions) {
+        const obs = await kv.list<CompressedObservation>(KV.observations(session.id));
+        onCollection?.(obs, "observations");
+        if (obs.length > 0) observations[session.id] = obs;
       }
 
       const profiles: ProjectProfile[] = [];
@@ -113,48 +133,48 @@ export async function captureExportData(
         if (profile) profiles.push(profile);
       }
 
-      const [
-        graphNodes,
-        graphEdges,
-        semanticMemories,
-        proceduralMemories,
-        actions,
-        actionEdges,
-        sentinels,
-        sketches,
-        crystals,
-        facets,
-        lessons,
-        insights,
-        routines,
-        signals,
-        checkpoints,
-        accessLogs,
-      ] = await Promise.all([
-        kv.list<GraphNode>(KV.graphNodes),
-        kv.list<GraphEdge>(KV.graphEdges),
-        kv.list<SemanticMemory>(KV.semantic),
-        kv.list<ProceduralMemory>(KV.procedural),
-        kv.list<Action>(KV.actions),
-        kv.list<ActionEdge>(KV.actionEdges),
-        kv.list<Sentinel>(KV.sentinels),
-        kv.list<Sketch>(KV.sketches),
-        kv.list<Crystal>(KV.crystals),
-        kv.list<Facet>(KV.facets),
-        kv.list<Lesson>(KV.lessons),
-        kv.list<Insight>(KV.insights),
-        kv.list<Routine>(KV.routines),
-        kv.list<Signal>(KV.signals),
-        kv.list<Checkpoint>(KV.checkpoints),
-        kv.list<AccessLogExport>(KV.accessLog),
-      ]);
+      onCollection?.(profiles, "profiles");
 
-      const codexCaptureExclusions = (await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions)).map(validateCodexExclusion);
       const graphSnapshot = await kv.get<{ resetAt?: string }>(KV.graphSnapshot, "current");
       const resetAt = graphSnapshot?.resetAt;
       if (resetAt !== undefined && (typeof resetAt !== "string" || !Number.isFinite(Date.parse(resetAt)))) throw Error("Invalid graph reset boundary in export");
       const transferGraphRows = <T extends { stale?: boolean; createdAt?: string }>(rows: T[]): T[] =>
         rows.map(row => isVisibleAfterReset(row, resetAt) ? row : { ...row, stale: true });
+      const graphNodes = transferGraphRows(await kv.list<GraphNode>(KV.graphNodes));
+      onCollection?.(graphNodes, "graphNodes");
+      const graphEdges = transferGraphRows(await kv.list<GraphEdge>(KV.graphEdges));
+      onCollection?.(graphEdges, "graphEdges");
+      const semanticMemories = await kv.list<SemanticMemory>(KV.semantic);
+      onCollection?.(semanticMemories, "semanticMemories");
+      const proceduralMemories = await kv.list<ProceduralMemory>(KV.procedural);
+      onCollection?.(proceduralMemories, "proceduralMemories");
+      const actions = await kv.list<Action>(KV.actions);
+      onCollection?.(actions, "actions");
+      const actionEdges = await kv.list<ActionEdge>(KV.actionEdges);
+      onCollection?.(actionEdges, "actionEdges");
+      const sentinels = await kv.list<Sentinel>(KV.sentinels);
+      onCollection?.(sentinels, "sentinels");
+      const sketches = await kv.list<Sketch>(KV.sketches);
+      onCollection?.(sketches, "sketches");
+      const crystals = await kv.list<Crystal>(KV.crystals);
+      onCollection?.(crystals, "crystals");
+      const facets = await kv.list<Facet>(KV.facets);
+      onCollection?.(facets, "facets");
+      const lessons = await kv.list<Lesson>(KV.lessons);
+      onCollection?.(lessons, "lessons");
+      const insights = await kv.list<Insight>(KV.insights);
+      onCollection?.(insights, "insights");
+      const routines = await kv.list<Routine>(KV.routines);
+      onCollection?.(routines, "routines");
+      const signals = await kv.list<Signal>(KV.signals);
+      onCollection?.(signals, "signals");
+      const checkpoints = await kv.list<Checkpoint>(KV.checkpoints);
+      onCollection?.(checkpoints, "checkpoints");
+      const accessLogs = await kv.list<AccessLogExport>(KV.accessLog);
+      onCollection?.(accessLogs, "accessLogs");
+
+      const codexCaptureExclusions = (await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions)).map(validateCodexExclusion);
+      onCollection?.(codexCaptureExclusions, "codexCaptureExclusions");
       const graphObservationResults: Record<string, GraphObservationResult[]> = {};
       for (const session of paginatedSessions) {
         const completion = await readGraphCompletionContext(kv, session);
@@ -163,19 +183,20 @@ export async function captureExportData(
         graphObservationResults[session.id] = [...completion.results.values()].filter(row => sources.has(row.id))
           .map(row => ({ ...row, importedGraphVerified: graphObservationComplete(session, sources.get(row.id)!, completion) }));
       }
+      for (const [sessionId, rows] of Object.entries(graphObservationResults)) onCollection?.(rows, `graphObservationResults:${sessionId}`);
       const lifecycle = hasNativeCaptureState({ sessions: paginatedSessions, observations, codexCaptureExclusions });
       const exportData: ExportData = {
         version: lifecycle ? CODEX_LIFECYCLE_EXPORT_VERSION : VERSION,
         exportedAt: new Date().toISOString(),
-        sessions: paginatedSessions.map(codexSessionForTransfer),
+        sessions: transferSessions,
         observations,
         ...(codexCaptureExclusions.length ? { codexCaptureExclusions } : {}),
         ...(Object.keys(graphObservationResults).length ? { graphObservationResults } : {}),
         memories,
         summaries,
         profiles: profiles.length > 0 ? profiles : undefined,
-        graphNodes: lifecycle || graphNodes.length > 0 ? transferGraphRows(graphNodes) : undefined,
-        graphEdges: lifecycle || graphEdges.length > 0 ? transferGraphRows(graphEdges) : undefined,
+        graphNodes: lifecycle || graphNodes.length > 0 ? graphNodes : undefined,
+        graphEdges: lifecycle || graphEdges.length > 0 ? graphEdges : undefined,
         semanticMemories:
           semanticMemories.length > 0 ? semanticMemories : undefined,
         proceduralMemories:
@@ -203,6 +224,7 @@ export async function captureExportData(
         };
       }
 
+      if (exportData.pagination) onCollection?.([exportData.pagination], "pagination");
       const totalObs = Object.values(observations).reduce(
         (sum, arr) => sum + arr.length,
         0,
@@ -217,6 +239,7 @@ export async function captureExportData(
 
       assertCodexExclusionContent(exportData, codexCaptureExclusions);
       const archiveStates = await collectArchiveExport(kv, exportData);
+      onCollection?.(archiveStates, "archiveStates");
       if (archiveStates.length) {
         exportData.archiveStates = archiveStates;
         exportData.version = ARCHIVE_LIFECYCLE_EXPORT_VERSION;
@@ -248,6 +271,7 @@ export async function importExportData(
       const supportedVersions = new Set(["0.3.0", "0.4.0", "0.5.0", "0.6.0", "0.6.1", "0.7.0", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6", "0.7.7", "0.7.9", "0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4", "0.8.5", "0.8.6", "0.8.7", "0.8.8", "0.8.9", "0.8.10", "0.8.11", "0.8.12", "0.8.13", "0.9.0", "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7", "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.9.14", "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19", "0.9.20", "0.9.21", "0.9.22", "0.9.23", "0.9.24", "0.9.25", "0.9.26", "0.9.27", "0.9.28", "0.9.29"]);
       supportedVersions.add(CODEX_LIFECYCLE_EXPORT_VERSION);
       supportedVersions.add(ARCHIVE_LIFECYCLE_EXPORT_VERSION);
+      supportedVersions.add("0.9.30");
       if (!supportedVersions.has(importData.version)) {
         return {
           success: false,
@@ -390,6 +414,16 @@ export async function importExportData(
         }
       }
       const archivePlan = await prepareArchiveImport(kv, importData, strategy);
+      let sourceTruncated = 0, sourceOmitted = 0;
+      for (const [sessionId, incoming] of Object.entries(importData.observations)) {
+        const existing = strategy === "replace" ? [] : await kv.list<CompressedObservation>(KV.observations(sessionId));
+        const planned = budgetImportedObservationSources(incoming, existing, strategy);
+        if (!planned.success) return planned;
+        importData.observations[sessionId] = planned.observations;
+        sourceTruncated += planned.sourceTruncated;
+        sourceOmitted += planned.sourceOmitted;
+      }
+
       if (archivePlan.pending.length) await recordAudit(kv, "import", "mem::import", archivePlan.pending.map(row => row.id), {
         phase: "retain-archive-state", count: archivePlan.pending.length,
       });
@@ -419,6 +453,8 @@ export async function importExportData(
         summaries: 0,
         skipped: 0,
         reconciledSessions: 0,
+        sourceTruncated,
+        sourceOmitted,
       };
 
       if (strategy === "replace") {
@@ -427,19 +463,22 @@ export async function importExportData(
         // Collect observation deletes across all sessions, then run them in
         // one bounded pass: a runChunked nested inside a runChunked callback
         // multiplies in-flight deletes to chunk-size squared.
-        const obsDeletes: Array<{ sessionId: string; obsId: string }> = [];
+        const obsDeletes: Array<{ sessionId: string; obsId: string; captureKey?: string }> = [];
         await runChunked(existing, async (session) => {
           await kv.delete(KV.sessions, session.id);
+          await removeSessionFromProjectIndex(kv, session.project, session.id);
           const obs = await kv
             .list<CompressedObservation>(KV.observations(session.id))
             .catch(() => []);
           for (const o of obs) {
-            obsDeletes.push({ sessionId: session.id, obsId: o.id });
+            obsDeletes.push({ sessionId: session.id, obsId: o.id, captureKey: o.captureKey });
           }
         });
-        await runChunked(obsDeletes, (d) =>
-          kv.delete(KV.observations(d.sessionId), d.obsId),
-        );
+        await runChunked(obsDeletes, async d => {
+          await markCaptureEventDeleted(kv, { id: d.obsId, sessionId: d.sessionId, captureKey: d.captureKey });
+          await kv.delete(KV.observations(d.sessionId), d.obsId);
+          await unindexObservationSession(kv, d.obsId);
+        });
         await runChunked(await kv.list<Memory>(KV.memories), (m) =>
           kv.delete(KV.memories, m.id),
         );
@@ -537,6 +576,7 @@ export async function importExportData(
           }
         }
         await kv.set(KV.sessions, session.id, session);
+        await addSessionToProjectIndex(kv, session.project, session);
         stats.sessions++;
       });
 
@@ -553,6 +593,7 @@ export async function importExportData(
           }
           const imported = { ...o, origin: importOrigin(o.origin, o.timestamp) };
           await kv.set(KV.observations(sessionId), o.id, imported);
+          await indexObservationSession(kv, o.id, sessionId);
           changedObservationSessions.add(sessionId);
           stats.observations++;
           indexObs.push(imported);
@@ -861,14 +902,25 @@ export async function importExportData(
 }
 
 export function registerExportImportFunction(
-  sdk: ISdk, kv: StateKV, onObservationsImported?: () => void,
+  sdk: IIIClient, kv: StateKV, onObservationsImported?: () => void,
 ): void {
   sdk.registerFunction("mem::export", async (data?: { maxSessions?: number; offset?: number }) => {
-    const exported = await captureExportData(kv, data);
-    const oversized = checkPayloadFrameSize(exported,
-      "narrow the range with ?maxSessions / ?offset, or export fewer collections; the non-session collections (memories, graph, semantic, actions, lessons, ...) are not yet paginated");
-    if (oversized) logger.warn("Export exceeds transport frame limit", { bytes: oversized.bytes });
-    return oversized ?? exported;
+    const budget = new ExportBudget();
+    let refused: (OversizedPayload & { stoppedAt: string }) | undefined;
+    try {
+      const exported = await captureExportData(kv, data, (items, field) => {
+        if (budget.fits(items, field)) return;
+        refused = { ...oversizedPayloadError(budget.bytes, EXPORT_OVERSIZE_HINT), stoppedAt: field };
+        logger.warn("Export exceeds transport frame limit", { bytesSoFar: budget.bytes, collection: field });
+        throw refused;
+      });
+      const oversized = checkPayloadFrameSize(exported, EXPORT_OVERSIZE_HINT);
+      if (oversized) logger.warn("Export exceeds transport frame limit", { bytes: oversized.bytes });
+      return oversized ?? exported;
+    } catch (error) {
+      if (refused && error === refused) return refused;
+      throw error;
+    }
   });
   sdk.registerFunction("mem::import", (data: Parameters<typeof importExportData>[1]) => importExportData(kv, data, onObservationsImported));
 }

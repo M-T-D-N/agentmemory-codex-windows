@@ -21,6 +21,7 @@ function New-InstallTaskRegistration {
     try { $suffix = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Sid))).Replace('-', '').Substring(0, 12).ToLowerInvariant() }
     finally { $sha.Dispose() }
     $kind = if ($Watchdog) { 'Watchdog' } else { 'Daemon' }
+    if ($servicePorts.rest -ne 3111) { $suffix += "-$($servicePorts.rest)" }
     $label = if ($Watchdog) { 'app watchdog' } else { 'daemon' }
     $registration = [ordered]@{
         schema_version = 1; task_path = '\'; task_name = "AgentMemoryCodex-$kind-$suffix"
@@ -34,7 +35,7 @@ function New-InstallTaskRegistration {
 }
 
 function Get-InstallPortConflicts {
-    return @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -in @(3111, 3112, 3113, 3114, 49134) })
+    return @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -in @($servicePorts.rest, $servicePorts.stream, $servicePorts.viewer, $servicePorts.mcp, $servicePorts.engine) })
 }
 
 function Invoke-FreshInstallation {
@@ -69,6 +70,7 @@ function Invoke-FreshInstallation {
         }
         $nonce = [string]$installed.install_nonce
         $workspaceConfig = Get-Content -Raw -LiteralPath (Join-Path $root 'config\codex-workspace.json') | ConvertFrom-Json
+        if ($workspaceConfig.PSObject.Properties['service_ports']) { $servicePorts = $workspaceConfig.service_ports }
         if ([string]$workspaceConfig.workspace_root -ne $workspace -or [string]$workspaceConfig.project_registry -ne $registry -or
             [string]$installed.node_path -ne $node) { throw 'Prepared installation inputs have changed.' }
         foreach ($file in $releaseManifest.immutable_files) {
@@ -79,7 +81,7 @@ function Invoke-FreshInstallation {
         Add-Type -AssemblyName System.Security
         $plain = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes((Join-Path $root 'config\secret.dpapi')),
             [Text.Encoding]::UTF8.GetBytes('Codex.AgentMemory.v1'), [Security.Cryptography.DataProtectionScope]::CurrentUser)
-        try { if ([Text.Encoding]::UTF8.GetString($plain) -notmatch '^[A-Za-z0-9+/]{43}=$') { throw 'Invalid installation secret.' } }
+        try { if ([Text.Encoding]::UTF8.GetString($plain) -notmatch '^[\x20-\x7e]+$') { throw 'Invalid installation secret.' } }
         finally { [Array]::Clear($plain, 0, $plain.Length) }
     } elseif (Test-Path -LiteralPath $root) {
         if (-not (Test-Path -LiteralPath $root -PathType Container) -or @(Get-ChildItem -Force -LiteralPath $root).Count -ne 0) {
@@ -138,14 +140,14 @@ function Invoke-FreshInstallation {
             $protected = [Security.Cryptography.ProtectedData]::Protect($plain, [Text.Encoding]::UTF8.GetBytes('Codex.AgentMemory.v1'), [Security.Cryptography.DataProtectionScope]::CurrentUser)
             [IO.File]::WriteAllBytes((Join-Path $root 'config\secret.dpapi'), $protected)
         } finally { $rng.Dispose(); [Array]::Clear($random, 0, $random.Length); if ($plain) { [Array]::Clear($plain, 0, $plain.Length) } }
-        Write-Utf8NoBom (Join-Path $root 'config\codex-workspace.json') ([ordered]@{ schema_version = 1; workspace_root = $workspace; project_registry = $registry } | ConvertTo-Json)
+        Write-Utf8NoBom (Join-Path $root 'config\codex-workspace.json') ([ordered]@{ schema_version = 1; workspace_root = $workspace; project_registry = $registry; service_ports = $servicePorts } | ConvertTo-Json)
         Write-Utf8NoBom (Join-Path $root 'config\managed-requirements.toml') $hooks.Toml
         Write-Utf8NoBom (Join-Path $root 'config\codex-hooks.json') $hooks.Json
         Write-Utf8NoBom (Join-Path $root 'config\task-registration.json') ($daemon | ConvertTo-Json)
         Write-Utf8NoBom (Join-Path $root 'config\watchdog-task-registration.json') ($watchdog | ConvertTo-Json)
         $hashes = [ordered]@{}
         foreach ($file in $releaseManifest.immutable_files) { $hashes[([string]$file.path).Replace('/', '\')] = [string]$file.sha256 }
-        $installed = [ordered]@{ schema_version = 1; installation_status = 'prepared'; install_nonce = $nonce; owner_sid = $sid; install_root = $root
+        $installed = [ordered]@{ schema_version = 3; status = 'prepared'; installation_status = 'prepared'; install_nonce = $nonce; owner_sid = $sid; install_root = $root
             product = [string]$releaseManifest.product; product_id = [string]$releaseManifest.product_id
             downstream_version = [string]$releaseManifest.downstream_version; agentmemory_version = [string]$releaseManifest.agentmemory_version
             release_revision = [string]$releaseManifest.release_revision; package_relative_path = [string]$releaseManifest.package_relative_path
@@ -174,6 +176,7 @@ function Invoke-FreshInstallation {
             $createdRequirements = $true
             try { $bytes = [Text.Encoding]::UTF8.GetBytes($hooks.Toml); $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
             $installed.installation_status = 'activated'
+            $installed.status = 'active'
             Write-Utf8NoBom $installManifestPath ($installed | ConvertTo-Json -Depth 12)
         } catch {
             $failure = $_

@@ -1,4 +1,6 @@
-import type { ISdk, ApiRequest } from "iii-sdk";
+import { LESSON_SOURCE_IDS_MAX, normalizeLessonSourceIds } from "../functions/lessons.js";
+import type { IIIClient } from "iii-sdk";
+import type { HttpRequest as ApiRequest } from "@iii-dev/helpers/http";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { parseSessionQuery, selectSessionPage } from "../functions/session-query.js";
@@ -152,7 +154,7 @@ function parseGraphProvenanceTargets(
 }
 
 export function registerMcpEndpoints(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   secret?: string,
 ): void {
@@ -378,6 +380,7 @@ export function registerMcpEndpoints(
             const result = await sdk.trigger({ function_id: "mem::patterns", payload: {
               agentId: agentId.value,
               project: args.project as string,
+          ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
             } });
             return {
               status_code: 200,
@@ -1430,6 +1433,8 @@ export function registerMcpEndpoints(
             if (args.sources !== undefined && !Array.isArray(args.sources)) {
               return { status_code: 400, body: { error: "sources must be an array" } };
             }
+            const normalizedSourceIds = normalizeLessonSourceIds(sourceIds);
+            if (normalizedSourceIds === null) return { status_code: 400, body: { error: "sourceIds must contain at most " + LESSON_SOURCE_IDS_MAX + " valid IDs" } };
             const lessonSaveResult = await sdk.trigger({ function_id: "mem::lesson-save", payload: {
               content: args.content,
               context: args.context || "",
@@ -1437,7 +1442,7 @@ export function registerMcpEndpoints(
               project,
               tags: lessonTags,
               source: "manual",
-              sourceIds,
+              sourceIds: normalizedSourceIds,
               sources: args.sources,
             } });
             if (

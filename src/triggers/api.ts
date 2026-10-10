@@ -1,5 +1,43 @@
-import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
-import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary } from "../types.js";
+import { randomBytes } from "node:crypto";
+import { DEDUP_WINDOW_MS, getDedupSkippedCount } from "../functions/dedup.js";
+import { AUDIT_MIGRATION_STATE_KEY } from "../functions/audit.js";
+import type { ResilientProvider } from "../providers/resilient.js";
+import { addSessionToProjectIndex } from "../state/session-index.js";
+import { isValidEventId } from "../capture/event-id.js";
+import { getCaptureController, type CaptureResult } from "../functions/capture.js";
+import { withoutObservationSource } from "../functions/observation-source.js";
+import { describeGraphNode } from "../functions/graph-node.js";
+import { COMPACT_SCOPES, type GraphCompactScope } from "../functions/graph.js";
+import { getGraphCompactBootStatus } from "../functions/graph-compact-boot.js";
+import { LESSON_SOURCE_IDS_MAX, normalizeLessonSourceIds } from "../functions/lessons.js";
+export { setHttpOriginPorts as setRestOriginPorts, checkBearerAuth as checkAuth } from "../http.js";
+import { CONSOLIDATION_COUNTS_REUSE_MS, CONSOLIDATION_LAST_RUN_KEY, PROCEDURAL_MIN_SESSIONS_PER_PATTERN, describeConsolidation, type ConsolidationRunRecord, type ConsolidationStatus } from "../functions/consolidation-status.js";
+import { UNINDEXED_SCAN_REUSE_MS, evaluateStatus, prefersHtml, renderStatusHtml, singleFlight, type GraphStatsInput, type StatusReport } from "../functions/status.js";
+import {
+  findUnindexedObservations,
+  getKeywordRebuildEpoch,
+  isKeywordRebuildInProgress,
+  getIndexPersistenceStatus,
+  getEmbeddingProvider,
+  getPendingVectorBackfillCount,
+  getVectorBackfillState,
+  getSearchIndex,
+  getVectorIndex,
+  isBm25RebuildIncomplete,
+  rankMemoryIds,
+} from "../functions/search.js";
+import {
+  LIST_PAGE_MAX,
+  encodeCursor,
+  matchesText,
+  pageAfterCursor,
+  pageByOffset,
+  parseListQuery,
+  sortByKeyDesc,
+} from "../state/list-query.js";
+import { InvocationError, TriggerAction, type IIIClient } from "iii-sdk";
+import type { HttpRequest, HttpRequest as ApiRequest } from "@iii-dev/helpers/http";
+import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary, HealthSnapshot, AuditQueryResult, AuditMigrationState } from "../types.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import {
   completeExistingSession,
@@ -19,9 +57,9 @@ import { checkPayloadFrameSize } from "../state/frame-guard.js";
 import { StateKV } from "../state/kv.js";
 import { getLatestHealth } from "../health/monitor.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
-import { VERSION } from "../version.js";
-import { timingSafeCompare } from "../auth.js";
+import { III_PINNED_VERSION, VERSION } from "../version.js";
 import {
+  setHttpOriginPorts,
   asNonEmptyString,
   checkBearerAuth as checkAuth,
   type HttpResponse as Response,
@@ -31,6 +69,7 @@ import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
+import { isNoopProvider } from "../providers/capabilities.js";
 import { readCodexSourceIdentity } from "../functions/codex-source-identity.js";
 import { readCodexInventory } from "../replay/codex-inventory.js";
 import { readCodexThreadIndex } from "../functions/codex-source-index.js";
@@ -53,6 +92,9 @@ import {
   detectLlmProviderKind,
   getAgentId,
   isAgentScopeIsolated,
+  getConsolidationIntervalMs,
+  getConsolidationCooldownMs,
+  getConsolidationDecayDays,
   loadConfig,
 } from "../config.js";
 
@@ -203,8 +245,312 @@ function parseOptionalPositiveInt(value: unknown): number | undefined | null {
   return parsed;
 }
 
+export function captureStatusCode(result: CaptureResult): number {
+  if (result.status === "duplicate") return 200;
+  if (result.status === "accepted") return result.state === "completed" ? 201 : 202;
+  return result.retryable ? 503 : 422;
+}
+
+export function captureResponseBody(
+  result: CaptureResult,
+  durability?: { bootId: string; durableAfterMs: number } | null,
+): Record<string, unknown> {
+  if (result.status === "rejected") return { ...result, success: false };
+  if (!durability) return { ...result };
+  return { ...result, bootId: durability.bootId, acceptedAt: new Date().toISOString(), durableAfterMs: durability.durableAfterMs };
+}
+
+export function buildConfigFlags() {
+  return [
+    {
+      key: "GRAPH_EXTRACTION_ENABLED",
+      label: "Knowledge graph extraction",
+      enabled: isGraphExtractionEnabled(),
+      default: false,
+      affects: ["Graph", "Dashboard"],
+      needsLlm: true,
+      description: "Extracts entities and relations from observations into a knowledge graph.",
+      enableHow: "Set GRAPH_EXTRACTION_ENABLED=true and provide an LLM key, then restart.",
+      docsHref: "https://github.com/rohitg00/agentmemory#knowledge-graph",
+    },
+    {
+      key: "CONSOLIDATION_ENABLED",
+      label: "Memory consolidation",
+      enabled: isConsolidationEnabled(),
+      default: false,
+      affects: ["Dashboard", "Memories", "Crystals"],
+      needsLlm: true,
+      description: "Periodically summarizes sessions into semantic facts + procedures.",
+      enableHow: "Set CONSOLIDATION_ENABLED=true and provide an LLM key, then restart.",
+      docsHref: "https://github.com/rohitg00/agentmemory#consolidation",
+    },
+    {
+      key: "AGENTMEMORY_AUTO_COMPRESS",
+      label: "LLM-powered observation compression",
+      enabled: isAutoCompressEnabled(),
+      default: false,
+      affects: ["Memories", "Timeline"],
+      needsLlm: true,
+      description: "Every observation is compressed by the LLM for richer summaries (costs tokens). OFF uses zero-LLM synthetic compression.",
+      enableHow: "Set AGENTMEMORY_AUTO_COMPRESS=true and provide an LLM key.",
+      docsHref: "https://github.com/rohitg00/agentmemory#environment-variables",
+    },
+    {
+      key: "AGENTMEMORY_INJECT_CONTEXT",
+      label: "In-conversation context injection",
+      enabled: isContextInjectionEnabled(),
+      default: false,
+      affects: ["Hooks"],
+      needsLlm: false,
+      description: "Hooks write recalled context into Claude Code's conversation. OFF captures in the background without injecting.",
+      enableHow: "Set AGENTMEMORY_INJECT_CONTEXT=true and restart.",
+      docsHref: "https://github.com/rohitg00/agentmemory#environment-variables",
+    },
+  ];
+}
+
+function memorySortKey(m: { updatedAt?: string; createdAt?: string }): string {
+  return m.updatedAt || m.createdAt || "";
+}
+
+type FacetCount = { value: string; count: number };
+
+function memoryFacets(
+  memories: Array<{ isLatest?: boolean; project?: string; agentId?: string; type?: string }>,
+): { projects: FacetCount[]; agents: FacetCount[]; types: FacetCount[] } {
+  const tally = (pick: (m: (typeof memories)[number]) => string | undefined) => {
+    const counts = new Map<string, number>();
+    for (const m of memories) {
+      if (m.isLatest === false) continue;
+      const value = pick(m);
+      if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+  };
+  return {
+    projects: tally((m) => m.project),
+    agents: tally((m) => m.agentId),
+    types: tally((m) => m.type),
+  };
+}
+
+function sessionFacets(
+  sessions: Array<{ project?: string; agentId?: string; status?: string }>,
+): { projects: FacetCount[]; agents: FacetCount[]; statuses: FacetCount[] } {
+  const tally = (pick: (s: (typeof sessions)[number]) => string | undefined) => {
+    const counts = new Map<string, number>();
+    for (const s of sessions) {
+      const value = pick(s);
+      if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+  };
+  return {
+    projects: tally((s) => s.project),
+    agents: tally((s) => s.agentId),
+    statuses: tally((s) => s.status),
+  };
+}
+
+function describeEmbeddingProvider(): string {
+  const active = getEmbeddingProvider();
+  if (active) return `${active.name} (${active.dimensions} dims)`;
+  return detectEmbeddingProvider() ?? "none";
+}
+
+const STATUS_CHECK_TIMEOUT_MS = 5000;
+
+async function valueWithin<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([work.catch(() => null), expiry]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function probeStateStore(kv: StateKV): Promise<{ ok: boolean; latencyMs?: number }> {
+  const started = performance.now();
+  const answered = await valueWithin(
+    kv.get(KV.health, "_probe").then(() => true),
+    STATUS_CHECK_TIMEOUT_MS,
+  );
+  if (!answered) return { ok: false };
+  return { ok: true, latencyMs: Math.round((performance.now() - started) * 100) / 100 };
+}
+
+type UnindexedScan = Awaited<ReturnType<typeof findUnindexedObservations>>;
+type UnindexedScanEntry = { epoch: number; run: () => Promise<UnindexedScan>; last: { at: number; value: UnindexedScan } | null };
+const unindexedScans = new WeakMap<StateKV, UnindexedScanEntry>();
+
+function unindexedScanFor(kv: StateKV) {
+  let entry = unindexedScans.get(kv);
+  if (!entry || entry.epoch !== getKeywordRebuildEpoch()) {
+    const created: UnindexedScanEntry = {
+      epoch: getKeywordRebuildEpoch(),
+      run: singleFlight(async () => {
+        const value = await findUnindexedObservations(kv);
+        created.last = { at: Date.now(), value };
+        return value;
+      }, UNINDEXED_SCAN_REUSE_MS),
+      last: null,
+    };
+    unindexedScans.set(kv, created);
+    entry = created;
+  }
+  return entry;
+}
+
+export interface StatusReporterDeps {
+  metricsStore?: MetricsStore;
+  provider?: ResilientProvider | { name?: string; circuitState?: unknown };
+}
+
+export function createStatusReporter(sdk: IIIClient, kv: StateKV, deps: StatusReporterDeps) {
+  return async function statusReport(options: { health?: HealthSnapshot | null; scanMaxAgeMs?: number } = {}): Promise<StatusReport> {
+    const idx = getSearchIndex();
+    const keywordRebuildRunning = isKeywordRebuildInProgress();
+    const scan = unindexedScanFor(kv);
+    const cached = scan.last && options.scanMaxAgeMs !== undefined && Date.now() - scan.last.at < options.scanMaxAgeMs
+      ? scan.last.value
+      : null;
+    const [health, functionMetrics, graph, unindexed, auditMigrationState, stateStore, capture] = await Promise.all([
+      options.health !== undefined ? Promise.resolve(options.health) : valueWithin(getLatestHealth(kv), STATUS_CHECK_TIMEOUT_MS),
+      deps.metricsStore ? valueWithin(deps.metricsStore.getAll(), STATUS_CHECK_TIMEOUT_MS) : Promise.resolve([]),
+      valueWithin(
+        sdk.trigger({ function_id: "mem::graph-stats", payload: {} }) as Promise<GraphStatsInput>,
+        STATUS_CHECK_TIMEOUT_MS,
+      ),
+      keywordRebuildRunning ? Promise.resolve(null) : cached ? Promise.resolve(cached) : valueWithin(scan.run(), STATUS_CHECK_TIMEOUT_MS),
+      valueWithin(
+        kv.get<AuditMigrationState>(KV.auditMonths, AUDIT_MIGRATION_STATE_KEY),
+        STATUS_CHECK_TIMEOUT_MS,
+      ),
+      probeStateStore(kv),
+      valueWithin(getCaptureController()?.status() ?? Promise.resolve(null), STATUS_CHECK_TIMEOUT_MS),
+    ]);
+    const observationsIndexed = [...idx.observationCountsBySession().values()].reduce((a, n) => a + n, 0);
+    const documentKinds = idx.documentKindCounts();
+    const circuit =
+      deps.provider && "circuitState" in deps.provider
+        ? (deps.provider.circuitState as { state?: string; failures?: number } | null)
+        : null;
+    const config = loadConfig();
+    return evaluateStatus({
+      now: new Date(),
+      version: VERSION,
+      engineVersion: III_PINNED_VERSION,
+      uptimeSeconds: Math.round(process.uptime()),
+      stateBackend: kv.backend === "redis" ? "redis" : "file",
+      ports: {
+        rest: config.restPort ?? null,
+        streams: config.streamsPort ?? null,
+        viewer: getViewerSkipped() ? null : (getBoundViewerPort() ?? null),
+      },
+      health: health
+        ? {
+            status: health.status,
+            alerts: health.alerts,
+            notes: health.notes,
+            connectionState: health.connectionState,
+            memory: health.memory,
+            eventLoopLagMs: health.eventLoopLagMs,
+            cpuPercent: health.cpu?.percent,
+          }
+        : null,
+      circuitBreaker: circuit,
+      functionMetrics: functionMetrics ?? [],
+      provider: typeof deps.provider?.name === "string" ? (isNoopProvider({ name: deps.provider.name }) ? "noop" : "llm") : detectLlmProviderKind(),
+      graphProvider: config.provider.provider === "local-qwen" ? "llm" : typeof deps.provider?.name === "string" ? (isNoopProvider({ name: deps.provider.name }) ? "noop" : "llm") : detectLlmProviderKind(),
+      embeddingProvider: describeEmbeddingProvider(),
+      flags: buildConfigFlags(),
+      index: {
+        bm25Documents: idx.size,
+        vectorDocuments: getVectorIndex()?.size ?? null,
+        observationsIndexed,
+        memoriesIndexed: documentKinds.memories,
+        lessonsIndexed: documentKinds.lessons,
+        missingObservations: unindexed ? unindexed.missing.length : null,
+        sessions: unindexed ? unindexed.sessions : null,
+        bm25Incomplete: isBm25RebuildIncomplete(),
+        keywordRebuildRunning,
+        pendingVectorBackfill: getPendingVectorBackfillCount(),
+        vectorBackfillState: getVectorBackfillState(),
+      },
+      graph,
+      graphCompaction: getGraphCompactBootStatus(),
+      graphExtractionEnabled: isGraphExtractionEnabled(),
+      auditLegacy: auditMigrationState
+        ? { status: auditMigrationState.status, sizeBytes: auditMigrationState.legacySizeBytes }
+        : null,
+      indexPersistence: getIndexPersistenceStatus(),
+      stateStore,
+      capture: capture ?? null,
+      observeDedup: { skippedSinceStart: getDedupSkippedCount(), windowSeconds: Math.round(DEDUP_WINDOW_MS / 1000) },
+    });
+  };
+}
+
+export function createConsolidationStatusReader(kv: StateKV) {
+  const counts = singleFlight(async () => {
+    const [summaries, memories, semantic, procedural, relations] = await Promise.all([
+      kv.list(KV.summaries).catch(() => []),
+      kv.list<import("../types.js").Memory>(KV.memories).catch(() => []),
+      kv.list(KV.semantic).catch(() => []),
+      kv.list(KV.procedural).catch(() => []),
+      kv.list(KV.relations).catch(() => []),
+    ]);
+    return {
+      summaries: summaries.length,
+      recurringPatterns: memories.filter(
+        (m) =>
+          m.isLatest &&
+          m.type === "pattern" &&
+          (m.sessionIds?.length ?? 0) >= PROCEDURAL_MIN_SESSIONS_PER_PATTERN,
+      ).length,
+      semanticFacts: semantic.length,
+      procedures: procedural.length,
+      relations: relations.length,
+    };
+  }, CONSOLIDATION_COUNTS_REUSE_MS);
+  return async function consolidationStatus(known: { lastRun?: ConsolidationRunRecord | null } = {}): Promise<ConsolidationStatus> {
+    const [current, lastRun] = await Promise.all([
+      counts(),
+      known.lastRun !== undefined
+        ? Promise.resolve(known.lastRun)
+        : kv.get<ConsolidationRunRecord>(KV.config, CONSOLIDATION_LAST_RUN_KEY).catch(() => null),
+    ]);
+    return describeConsolidation({
+      now: new Date(),
+      enabled: isConsolidationEnabled(),
+      llmConfigured: detectLlmProviderKind() === "llm",
+      ...current,
+      lastRun: lastRun ?? null,
+      schedule: {
+        intervalMs: getConsolidationIntervalMs(),
+        cooldownMs: getConsolidationCooldownMs(),
+        decayDays: getConsolidationDecayDays(),
+      },
+    });
+  };
+}
+
+function statusViewerUrl(req: HttpRequest, viewerPort: number | null): string {
+  const hostHeader = req.headers?.["host"] ?? req.headers?.["Host"];
+  const host = typeof hostHeader === "string" ? hostHeader.replace(/:\d+$/, "") : "";
+  if (viewerPort && host && /^[A-Za-z0-9.\-[\]:]+$/.test(host)) return `http://${host}:${viewerPort}/#health`;
+  return "/agentmemory/viewer#health";
+}
+
 export function registerApiTriggers(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   readContext: ContextReader,
   secret?: string,
@@ -215,22 +561,11 @@ export function registerApiTriggers(
 ): void {
   sdk.registerFunction(
     "middleware::api-auth",
-    async (input: {
-      request?: { headers?: Record<string, string | undefined> };
-    }) => {
-      if (!secret) return { action: "continue" };
-      const headers = input?.request?.headers || {};
-      const auth = headers["authorization"] || headers["Authorization"];
-      if (
-        typeof auth !== "string" ||
-        !timingSafeCompare(auth, `Bearer ${secret}`)
-      ) {
-        return {
-          action: "respond",
-          response: { status_code: 401, body: { error: "unauthorized" } },
-        };
-      }
-      return { action: "continue" };
+    async (input: { request?: ApiRequest }) => {
+      const rejected = checkAuth(input?.request ?? {} as ApiRequest, secret);
+      return rejected
+        ? { action: "respond", response: rejected }
+        : { action: "continue" };
     },
   );
 
@@ -239,7 +574,9 @@ export function registerApiTriggers(
   // target from the server instead of port arithmetic, which broke
   // whenever the viewer bound a fallback port. Config is boot-static,
   // so read it once instead of rebuilding the merged env per request.
-  const bootStreamsPort = loadConfig().streamsPort;
+  const bootConfig = loadConfig();
+  const bootStreamsPort = bootConfig.streamsPort;
+  setHttpOriginPorts(() => [bootConfig.restPort, bootConfig.viewerPort, getBoundViewerPort()]);
   const instanceInfo = () => ({
     service: "agentmemory",
     viewerPort: getBoundViewerPort(),
@@ -274,57 +611,12 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::config-flags",
-    async (req: ApiRequest): Promise<Response> => {
+    async (req: HttpRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const providerKind = detectLlmProviderKind();
-      const embeddingProvider = detectEmbeddingProvider() ? "embeddings" : "none";
-      const flags = [
-        {
-          key: "GRAPH_EXTRACTION_ENABLED",
-          label: "Knowledge graph extraction",
-          enabled: isGraphExtractionEnabled(),
-          default: false,
-          affects: ["Graph", "Dashboard"],
-          needsLlm: true,
-          description: "Extracts entities and relations from observations into a knowledge graph.",
-          enableHow: "Set GRAPH_EXTRACTION_ENABLED=true and provide an LLM key, then restart.",
-          docsHref: "https://github.com/rohitg00/agentmemory#knowledge-graph",
-        },
-        {
-          key: "CONSOLIDATION_ENABLED",
-          label: "Memory consolidation",
-          enabled: isConsolidationEnabled(),
-          default: false,
-          affects: ["Dashboard", "Memories", "Crystals"],
-          needsLlm: true,
-          description: "Periodically summarizes sessions into semantic facts + procedures.",
-          enableHow: "Set CONSOLIDATION_ENABLED=true and provide an LLM key, then restart.",
-          docsHref: "https://github.com/rohitg00/agentmemory#consolidation",
-        },
-        {
-          key: "AGENTMEMORY_AUTO_COMPRESS",
-          label: "LLM-powered observation compression",
-          enabled: isAutoCompressEnabled(),
-          default: false,
-          affects: ["Memories", "Timeline"],
-          needsLlm: true,
-          description: "Every observation is compressed by the LLM for richer summaries (costs tokens). OFF uses zero-LLM synthetic compression.",
-          enableHow: "Set AGENTMEMORY_AUTO_COMPRESS=true and provide an LLM key.",
-          docsHref: "https://github.com/rohitg00/agentmemory/issues/138",
-        },
-        {
-          key: "AGENTMEMORY_INJECT_CONTEXT",
-          label: "In-conversation context injection",
-          enabled: isContextInjectionEnabled(),
-          default: false,
-          affects: ["Hooks"],
-          needsLlm: false,
-          description: "Hooks write recalled context into Claude Code's conversation. OFF captures in the background without injecting.",
-          enableHow: "Set AGENTMEMORY_INJECT_CONTEXT=true and restart.",
-          docsHref: "https://github.com/rohitg00/agentmemory/issues/143",
-        },
-      ];
+      const embeddingProvider = describeEmbeddingProvider();
+      const flags = buildConfigFlags();
       return {
         status_code: 200,
         body: {
@@ -379,8 +671,38 @@ export function registerApiTriggers(
     },
   });
 
+  const statusReport = createStatusReporter(sdk, kv, { metricsStore, provider });
+
+  sdk.registerFunction("api::status",
+    async (req: HttpRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const report = await statusReport();
+      const accept = req.headers?.["accept"] ?? req.headers?.["Accept"];
+      const format = req.query_params?.["format"];
+      if (prefersHtml(typeof accept === "string" ? accept : undefined, typeof format === "string" ? format : undefined)) {
+        const nonce = randomBytes(16).toString("base64");
+        return {
+          status_code: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Security-Policy": `default-src 'none'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+            "Cache-Control": "no-store",
+          },
+          body: renderStatusHtml(report, nonce, { viewerUrl: statusViewerUrl(req, report.service.ports.viewer) }),
+        };
+      }
+      return { status_code: 200, headers: { "Cache-Control": "no-store" }, body: report };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::status",
+    config: { api_path: "/agentmemory/status", http_method: "GET" },
+  });
+
   sdk.registerFunction("api::observe",
-    async (req: ApiRequest<HookPayload>): Promise<Response> => {
+    async (req: HttpRequest<HookPayload>): Promise<Response> => {
       const body = (req.body ?? {}) as unknown as Record<string, unknown>;
       const hookType = asNonEmptyString(body.hookType);
       const sessionId = asNonEmptyString(body.sessionId);
@@ -396,6 +718,16 @@ export function registerApiTriggers(
           },
         };
       }
+      const eventId = body.eventId;
+      if (eventId !== undefined && !isValidEventId(eventId)) {
+        return {
+          status_code: 400,
+          body: {
+            status: "rejected",
+            error: "eventId must be 8 to 128 characters of letters, digits, '_', '.', ':' or '-'",
+          },
+        };
+      }
       const payload: HookPayload = {
         hookType: hookType as HookPayload["hookType"],
         sessionId,
@@ -404,10 +736,77 @@ export function registerApiTriggers(
         timestamp,
         data: body.data,
       };
-      const result = await sdk.trigger({ function_id: "mem::observe", payload });
-      return { status_code: 201, body: result };
+      const result = await sdk.trigger<unknown, CaptureResult>({
+        function_id: "mem::capture",
+        payload: { payload, eventId },
+      });
+      return {
+        status_code: captureStatusCode(result),
+        body: captureResponseBody(result, getCaptureController()?.durability() ?? null),
+      };
     },
   );
+
+  sdk.registerFunction("api::capture",
+    async (req: HttpRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const status = req.query_params?.["status"];
+      const limit = Number(req.query_params?.["limit"]) || 50;
+      const [summary, list] = await Promise.all([
+        getCaptureController()?.status() ?? Promise.resolve(null),
+        sdk.trigger({
+          function_id: "mem::capture-list",
+          payload: {
+            ...(status === "pending" || status === "retrying" || status === "dead" ? { status } : {}),
+            limit,
+          },
+        }),
+      ]);
+      return { status_code: 200, headers: { "Cache-Control": "no-store" }, body: { capture: summary, ...(list as object) } };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::capture",
+    config: { api_path: "/agentmemory/capture", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::capture-retry",
+    async (req: HttpRequest<{ eventId?: string; all?: boolean }>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as { eventId?: unknown; all?: unknown };
+      const eventId = asNonEmptyString(body.eventId);
+      if (!eventId && body.all !== true) {
+        return { status_code: 400, body: { error: "pass an eventId, or all: true to retry every dead or waiting capture" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::capture-retry",
+        payload: eventId ? { eventId } : { all: true },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::capture-retry",
+    config: { api_path: "/agentmemory/capture/retry", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::capture-drain",
+    async (req: HttpRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = await sdk.trigger({ function_id: "mem::capture-drain", payload: {} });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::capture-drain",
+    config: { api_path: "/agentmemory/capture/drain", http_method: "POST" },
+  });
   sdk.registerTrigger({
     type: "http",
     function_id: "api::observe",
@@ -725,8 +1124,8 @@ export function registerApiTriggers(
       publish: async (rows, eventRows) => {
         await indexRecords(rows, []); await flushIndexSave({ requireSuccess: true });
         for (const observation of eventRows) {
-          for (const group_id of [STREAM.group(observation.sessionId), STREAM.viewerGroup]) await sdk.trigger({
-            function_id: "stream::set", payload: { stream_name: STREAM.name, group_id, item_id: observation.id,
+          await sdk.trigger({
+            function_id: "stream::set", payload: { stream_name: STREAM.name, group_id: STREAM.viewerGroup, item_id: observation.id,
               data: { type: "compressed", observation, sessionId: observation.sessionId } },
           });
         }
@@ -813,8 +1212,12 @@ export function registerApiTriggers(
           ...(agentId ? { agentId } : {}),
         });
         if (!prepared.success) return prepared;
-        await kv.set(KV.sessions, sessionId, prepared.session);
-        return prepared;
+          await kv.set(KV.sessions, sessionId, prepared.session);
+          await addSessionToProjectIndex(kv, prepared.session.project, {
+            id: prepared.session.id, startedAt: prepared.session.startedAt,
+            ...(prepared.session.agentId ? { agentId: prepared.session.agentId } : {}),
+          }).catch(error => logger.warn("session project index update failed", { error: String(error) }));
+          return prepared;
       });
       if (!start.success) {
         return { status_code: 409, body: start };
@@ -952,6 +1355,7 @@ export function registerApiTriggers(
       }
       const completed = await completeExistingSession(kv, sessionId);
       if (!completed.success) {
+        if (completed.error === "already_completed") return { status_code: 200, body: { success: true, ended: false, reason: "already_completed" } };
         return { status_code: 200, body: { success: true, skipped: true, reason: "session_missing_or_incomplete" } };
       }
       // Fan out session-stopped lifecycle (non-blocking).
@@ -960,14 +1364,14 @@ export function registerApiTriggers(
           function_id: "event::session::stopped",
           payload: { sessionId },
           action: TriggerAction.Void(),
-        });
+        }).catch(err => logger.warn("event::session::stopped trigger failed", { sessionId, error: String(err) }));
       } catch (err) {
         logger.warn("event::session::stopped trigger failed", {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
-      return { status_code: 200, body: { success: true } };
+      return { status_code: 200, body: { success: true, ended: true } };
     },
   );
   sdk.registerTrigger({
@@ -1185,11 +1589,30 @@ export function registerApiTriggers(
         parseOptionalInt(req.query_params?.["offset"]) ?? 0,
       );
       const archived = await readArchiveVisibility(kv);
-      const selected = selectSessionPage(sessions, {
-        project, sessionId: sessionId ?? undefined, includeExcluded, limit, offset, order: "asc",
+      const listQuery = parseListQuery(req.query_params);
+      const eligible: Session[] = selectSessionPage(sessions, {
+        project, sessionId: sessionId ?? undefined, includeExcluded,
+        limit: sessions.length, offset: 0,
+        order: req.query_params?.["order"] === "asc" ? "asc" : "desc",
+        agentId: typeof req.query_params?.["agentId"] === "string" ? req.query_params["agentId"] : undefined,
+      }, archived).sessions;
+      const facets = req.query_params?.["facets"] === "true" ? sessionFacets(eligible) : undefined;
+      const filtered = eligible.filter(s => !listQuery.status || s.status === listQuery.status)
+        .filter(s => matchesText(listQuery.q, typeof s.summary === "string" ? s.summary : undefined, s.firstPrompt, s.cwd, s.id));
+      const selected = selectSessionPage(filtered, {
+        project, sessionId: sessionId ?? undefined, includeExcluded, limit, offset,
+        order: req.query_params?.["order"] === "asc" ? "asc" : "desc",
         agentId: typeof req.query_params?.["agentId"] === "string" ? req.query_params["agentId"] : undefined,
       }, archived);
-      const page = selected.sessions;
+      let page = selected.sessions;
+      let nextCursor: string | null = null;
+      if (listQuery.cursor) {
+        const paged = pageByOffset(filtered, listQuery.cursor, limit);
+        page = paged.page;
+        nextCursor = paged.nextCursor;
+      } else if (selected.nextOffset !== null) {
+        nextCursor = encodeCursor({ offset: selected.nextOffset });
+      }
       // Bounded fan-out: each kv.get is a full engine invocation, so
       // Promise.all over hundreds of sessions saturates the invocation
       // pool. Batch in chunks of 10 (parallel within a chunk, sequential
@@ -1216,6 +1639,8 @@ export function registerApiTriggers(
           limit,
           offset,
           nextOffset: selected.nextOffset,
+          nextCursor,
+          ...(facets ? { facets } : {}),
         },
       };
     },
@@ -1266,18 +1691,29 @@ export function registerApiTriggers(
           (isAgentScopeIsolated() ? getAgentId() : undefined);
       const limit = Math.max(1, Math.min(500, parseOptionalInt(req.query_params?.["limit"]) ?? 100));
       const offset = Math.max(0, parseOptionalInt(req.query_params?.["offset"]) ?? 0);
+      const listQuery = parseListQuery(req.query_params);
+      const minImportance = parseOptionalFiniteNumber(req.query_params?.["minImportance"]);
+      if (minImportance === null) return { status_code: 400, body: { error: "minImportance must be a finite number" } };
       const filtered = observations
         .filter((observation) => observation.sessionId === sessionId)
         .filter((observation) => !archived({ kind: "observation", id: observation.id, sessionId }))
         .map((observation) => sanitizeCodexAmbientObservation(observation))
         .filter((observation): observation is CompressedObservation => !!observation)
         .filter((observation) => !filterAgentId || observation.agentId === filterAgentId)
-        .sort((a, b) => String(a.timestamp ?? "").localeCompare(String(b.timestamp ?? "")));
-      const page = filtered.slice(offset, offset + limit);
+        .filter(o => !listQuery.type || o.type === listQuery.type)
+        .filter(o => matchesText(listQuery.q, o.title, o.narrative, o.id, ...(o.facts ?? [])))
+        .filter(o => minImportance === undefined || (o.importance ?? 0) >= minImportance)
+        .sort((a, b) => {
+          const comparison = String(a.timestamp ?? "").localeCompare(String(b.timestamp ?? ""));
+          return req.query_params?.["order"] === "asc" ? comparison : -comparison;
+        });
+      const paged = pageByOffset(filtered, listQuery.cursor ?? encodeCursor({ offset }), limit);
+      const page = paged.page;
       return {
         status_code: 200,
         body: {
-          observations: page,
+          observations: page.map(withoutObservationSource),
+          nextCursor: paged.nextCursor,
           total: filtered.length,
           limit,
           offset,
@@ -1290,6 +1726,45 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::observations",
     config: { api_path: "/agentmemory/observations", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::observations-locate",
+    async (req: HttpRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const project = normalizeReadProject(req.query_params?.["project"]);
+      if (!project) return { status_code: 400, body: { error: "project is required; use '*' only for a deliberate cross-project read" } };
+      const archived = await readArchiveVisibility(kv);
+      const agent = typeof req.query_params?.["agentId"] === "string" ? req.query_params["agentId"].trim() : undefined;
+      const filterAgent = agent === "*" ? undefined : agent || (isAgentScopeIsolated() ? getAgentId() : undefined);
+      const raw = req.query_params?.["ids"];
+      const ids = (Array.isArray(raw) ? raw.join(",") : String(raw ?? ""))
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean)
+        .slice(0, 200);
+      if (ids.length === 0) return { status_code: 400, body: { error: "ids required" } };
+      const index = getSearchIndex();
+      const sessions: Record<string, string> = {};
+      for (const id of ids) {
+        const sessionId = index.sessionOf(id);
+        if (!sessionId || id.startsWith("mem_") || sessionId === "lesson") continue;
+        const session = await kv.get<Session>(KV.sessions, sessionId);
+        if (!session || isExcludedCodexAmbientSession(session) || archived({ kind: "session", id: sessionId })
+          || (project !== "*" && session.project !== project) || (filterAgent && session.agentId !== filterAgent)) continue;
+        const observation = await kv.get<CompressedObservation>(KV.observations(sessionId), id);
+        if (!observation || observation.sessionId !== sessionId
+          || archived({ kind: "observation", id, sessionId }) || !sanitizeCodexAmbientObservation(observation)
+          || (filterAgent && observation.agentId !== filterAgent)) continue;
+        sessions[id] = sessionId;
+      }
+      return { status_code: 200, body: { sessions } };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::observations-locate",
+    config: { api_path: "/agentmemory/observations/locate", http_method: "GET" },
   });
 
   sdk.registerFunction("api::file-context", 
@@ -1414,6 +1889,7 @@ export function registerApiTriggers(
           ...(req.body.files !== undefined && { files: req.body.files }),
           ...(req.body.ttlDays !== undefined && { ttlDays: req.body.ttlDays }),
           ...(req.body.sourceObservationIds !== undefined && { sourceObservationIds: req.body.sourceObservationIds }),
+          ...(req.body.sources !== undefined && { sources: req.body.sources }),
           ...(req.body.project !== undefined && { project: req.body.project }),
           ...(typeof req.body.agentId === "string" && req.body.agentId.trim()
             ? { agentId: req.body.agentId.trim() }
@@ -1493,10 +1969,13 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::patterns", 
-    async (req: ApiRequest<{ project?: string; agentId?: string }>): Promise<Response> => {
+    async (req: ApiRequest<{ project?: string; agentId?: string; limit?: number }>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const result = await sdk.trigger({ function_id: "mem::patterns", payload: { project: req.body?.project, agentId: req.body?.agentId } });
+      const result = await sdk.trigger({ function_id: "mem::patterns", payload: {
+        project: req.body?.project, ...(req.body?.agentId !== undefined ? { agentId: req.body.agentId } : {}),
+        ...(req.body?.limit !== undefined ? { limit: req.body.limit } : {}),
+      } });
       return { status_code: 200, body: result };
     },
   );
@@ -1824,6 +2303,7 @@ export function registerApiTriggers(
         memoryId: string;
         newContent: string;
         newTitle?: string;
+        newType?: string;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1834,7 +2314,12 @@ export function registerApiTriggers(
           body: { error: "memoryId and newContent are required" },
         };
       }
-      const result = await sdk.trigger({ function_id: "mem::evolve", payload: req.body });
+        const result = await sdk.trigger({ function_id: "mem::evolve", payload: {
+          memoryId: req.body.memoryId, newContent: req.body.newContent,
+          ...(req.body.newTitle !== undefined ? { newTitle: req.body.newTitle } : {}),
+          ...(req.body.newType !== undefined ? { newType: req.body.newType } : {}),
+        } });
+      if (result?.success === false) return { status_code: result.code === "not_found" ? 404 : result.code === "not_latest" ? 409 : 400, body: result };
       return { status_code: 200, body: result };
     },
   );
@@ -2192,6 +2677,64 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/graph/reset", http_method: "POST" },
   });
 
+  sdk.registerFunction("api::graph-node",
+    async (req: HttpRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const id = asNonEmptyString(req.query_params?.["id"]);
+      if (!id) return { status_code: 400, body: { error: "id required" } };
+      const detail = await describeGraphNode(kv, id);
+      if (!detail) return { status_code: 404, body: { error: "graph node not found", id } };
+      return { status_code: 200, body: detail };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::graph-node",
+    config: { api_path: "/agentmemory/graph/node", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::graph-compact",
+    async (req: HttpRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const { scope, offset, limit } = body;
+      if (scope !== undefined && !COMPACT_SCOPES.includes(scope as GraphCompactScope)) {
+        return { status_code: 400, body: { error: "scope must be nodes, edges, history or snapshot" } };
+      }
+      if (offset !== undefined && !(Number.isInteger(offset) && (offset as number) >= 0)) {
+        return { status_code: 400, body: { error: "offset must be a non-negative integer" } };
+      }
+      if (limit !== undefined && !(Number.isInteger(limit) && (limit as number) >= 1)) {
+        return { status_code: 400, body: { error: "limit must be a positive integer" } };
+      }
+      try {
+        const result = await sdk.trigger({
+          function_id: "mem::graph-compact",
+          payload: { scope, offset, limit },
+        });
+        if ((result as { success?: boolean } | null)?.success === false) {
+          return { status_code: 500, body: { error: "Graph compaction failed" } };
+        }
+        return { status_code: 200, body: result };
+      } catch (err) {
+        if (err instanceof InvocationError && err.code === "TIMEOUT") {
+          return {
+            status_code: 504,
+            body: { error: "Graph compaction timed out; pass scope, offset and limit to run it in slices" },
+          };
+        }
+        return { status_code: 500, body: { error: "Graph compaction failed" } };
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::graph-compact",
+    config: { api_path: "/agentmemory/graph/compact", http_method: "POST" },
+  });
+
   sdk.registerFunction("api::graph-extract",
     async (req: ApiRequest<{
       project?: unknown;
@@ -2354,6 +2897,20 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/graph/import-graphify", http_method: "POST" },
   });
 
+  const consolidationStatus = createConsolidationStatusReader(kv);
+  sdk.registerFunction("api::consolidation-status",
+    async (req: HttpRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      return { status_code: 200, body: await consolidationStatus() };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::consolidation-status",
+    config: { api_path: "/agentmemory/consolidation/status", http_method: "GET" },
+  });
+
   sdk.registerFunction("api::consolidate-pipeline",
     async (req: ApiRequest<{ tier?: string }>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -2441,15 +2998,34 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::audit",
-    async (req: ApiRequest): Promise<Response> => {
+    async (req: HttpRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const parsedLimit = parseOptionalInt(req.query_params?.["limit"]);
-      const entries = await sdk.trigger({ function_id: "mem::audit-query", payload: {
-        operation: req.query_params?.["operation"],
-        limit: parsedLimit ?? 50,
+      const params = req.query_params || {};
+      const parsedLimit = parseOptionalInt(params["limit"]);
+      const dateFrom = asNonEmptyString(params["dateFrom"]);
+      const dateTo = asNonEmptyString(params["dateTo"]);
+      for (const [name, value] of [["dateFrom", dateFrom], ["dateTo", dateTo]] as const) {
+        if (value && Number.isNaN(new Date(value).getTime())) {
+          return { status_code: 400, body: { error: `invalid date: ${name}` } };
+        }
+      }
+      const result = await sdk.trigger<unknown, AuditQueryResult>({ function_id: "mem::audit-query", payload: {
+        operation: asNonEmptyString(params["operation"]),
+        dateFrom,
+        dateTo,
+        query: asNonEmptyString(params["q"]),
+        limit: Math.min(Math.max(parsedLimit ?? 50, 1), 1000),
       } });
-      return { status_code: 200, body: { entries, success: true } };
+      return {
+        status_code: 200,
+        body: {
+          entries: result.entries,
+          legacyFrozen: result.legacyFrozen,
+          legacyFrozenBytes: result.legacyFrozenBytes,
+          success: true,
+        },
+      };
     },
   );
   sdk.registerTrigger({
@@ -2616,6 +3192,37 @@ export function registerApiTriggers(
         );
       }
 
+      const facets = req.query_params?.["facets"] === "true" ? memoryFacets(filtered) : undefined;
+      const listQuery = parseListQuery(req.query_params);
+      if (listQuery.project && listQuery.project !== "*") filtered = filtered.filter((m) => m.project === listQuery.project);
+      if (listQuery.type) filtered = filtered.filter((m) => m.type === listQuery.type);
+      const fromSession = asNonEmptyString(req.query_params?.["sessionId"]);
+      if (fromSession) {
+        const needsObservations = filtered.some(
+          (m) => !(m.sessionIds ?? []).includes(fromSession) && (m.sourceObservationIds?.length ?? 0) > 0,
+        );
+        const sessionObsIds = needsObservations
+          ? new Set(
+              (await kv.list<CompressedObservation>(KV.observations(fromSession)).catch(() => []))
+                .map((o) => o.id),
+            )
+          : new Set<string>();
+        filtered = filtered.filter(
+          (m) =>
+            (m.sessionIds ?? []).includes(fromSession) ||
+            (m.sourceObservationIds ?? []).some((id) => sessionObsIds.has(id)),
+        );
+      }
+      let searchMode: "hybrid" | "keyword" | undefined;
+      if (listQuery.q) {
+        const ranked = await rankMemoryIds(listQuery.q, LIST_PAGE_MAX, new Set(filtered.map(memory => memory.id)));
+        searchMode = ranked.mode;
+        const byId = new Map(filtered.map((m) => [m.id, m]));
+        filtered = ranked.ids
+          .map((id: string) => byId.get(id))
+          .filter((m): m is import("../types.js").Memory => m !== undefined);
+      }
+
       // viewer + `agentmemory status` were hitting this endpoint to
       // count memories. On a real corpus (8K+ memories) the unbounded
       // response either timed out at the iii engine boundary ("Invocation
@@ -2648,8 +3255,39 @@ export function registerApiTriggers(
           : undefined;
       const offset =
         Number.isInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
-      const sliced =
-        limit !== undefined ? filtered.slice(offset, offset + limit) : filtered;
+      let sliced = filtered;
+      let nextCursor: string | null = null;
+      if (listQuery.q) {
+        if (limit !== undefined || listQuery.cursor) {
+          const paged = pageByOffset(
+            filtered,
+            listQuery.cursor ?? (offset > 0 ? encodeCursor({ offset }) : undefined),
+            limit ?? LIST_PAGE_MAX,
+          );
+          sliced = paged.page;
+          nextCursor = paged.nextCursor;
+        }
+      } else {
+        sortByKeyDesc(filtered, memorySortKey, (m) => m.id);
+        if (listQuery.cursor) {
+          const paged = pageAfterCursor(
+            filtered,
+            memorySortKey,
+            (m) => m.id,
+            listQuery.cursor,
+            limit ?? LIST_PAGE_MAX,
+          );
+          sliced = paged.page;
+          nextCursor = paged.nextCursor;
+        } else if (limit !== undefined) {
+          sliced = filtered.slice(offset, offset + limit);
+          const last = sliced[sliced.length - 1];
+          nextCursor =
+            last && offset + limit < filtered.length
+              ? encodeCursor({ key: memorySortKey(last), id: last.id })
+              : null;
+        }
+      }
 
       return {
         status_code: 200,
@@ -2658,6 +3296,9 @@ export function registerApiTriggers(
           total: filtered.length,
           offset,
           limit: limit ?? null,
+          nextCursor,
+          ...(searchMode ? { search: { query: listQuery.q, mode: searchMode } } : {}),
+          ...(facets ? { facets } : {}),
         },
       };
     },
@@ -3853,6 +4494,8 @@ export function registerApiTriggers(
     if (body.sources !== undefined && !Array.isArray(body.sources)) {
       return { status_code: 400, body: { error: "sources must be an array" } };
     }
+    const normalizedSourceIds = normalizeLessonSourceIds(body.sourceIds);
+    if (normalizedSourceIds === null) return { status_code: 400, body: { error: "sourceIds must contain at most " + LESSON_SOURCE_IDS_MAX + " valid IDs" } };
     const result = (await sdk.trigger({
       function_id: "mem::lesson-save",
       payload: {
@@ -3862,7 +4505,7 @@ export function registerApiTriggers(
         project,
         tags,
         source: "manual",
-        ...(body.sourceIds !== undefined && { sourceIds: body.sourceIds }),
+        ...(body.sourceIds !== undefined && { sourceIds: normalizedSourceIds }),
         ...(body.sources !== undefined && { sources: body.sources }),
       },
     })) as { success?: boolean; action?: string };

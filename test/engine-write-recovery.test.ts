@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { registerWorker, type ISdk } from "iii-sdk";
+import { registerWorker, type IIIClient } from "iii-sdk";
 import { StateKV } from "../src/state/kv.js";
 import { IndexPersistence } from "../src/state/index-persistence.js";
 import { SearchIndex } from "../src/state/search-index.js";
@@ -53,7 +53,7 @@ async function fixture(label: string) {
   const root = await mkdtemp(join(tmpdir(), "agentmemory-engine-recovery-")); runs.push(root);
   const executable = await realpath(binary!);
   expect(createHash("sha256").update(await readFile(executable)).digest("hex")).toBe(expectedHash!.toLowerCase());
-  expect(execFileSync(executable, ["--version"], { encoding: "utf8", windowsHide: true }).trim()).toBe("0.11.2");
+  expect(execFileSync(executable, ["--version"], { encoding: "utf8", windowsHide: true }).trim()).toBe("0.22.1");
   const port = await freePort(), config = join(root, "iii-config.yaml");
   await mkdir(join(root, "data"));
   await writeFile(config, `workers:
@@ -69,7 +69,7 @@ async function fixture(label: string) {
           store_method: file_based
           file_path: data/state_store.db
 `);
-  let child: ChildProcess | undefined, owner: Identity | null = null, sdk: ISdk | undefined;
+  let child: ChildProcess | undefined, owner: Identity | null = null, sdk: IIIClient | undefined;
   let crashAt: ((id: string, payload: any) => boolean) | undefined;
   const events: object[] = [];
   let log = "";
@@ -152,7 +152,7 @@ async function fixture(label: string) {
       }
     }
   }
-  return { root, connect, restart, close, events, get sdk(): ISdk {
+  return { root, connect, restart, close, events, get sdk(): IIIClient {
     if (!sdk) throw Error("Isolated engine SDK is not connected");
     return sdk;
   }, arm(predicate: NonNullable<typeof crashAt>) { crashAt = predicate; }, label };
@@ -298,7 +298,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
   }, 90_000);
   afterAll(async () => {
     if (process.env.AGENTMEMORY_ENGINE_TEST_REPORT) await writeFile(process.env.AGENTMEMORY_ENGINE_TEST_REPORT,
-      JSON.stringify({ engineVersion: "0.11.2", engineSha256: expectedHash, nodeVersion: process.version,
+      JSON.stringify({ engineVersion: "0.22.1", engineSha256: expectedHash, nodeVersion: process.version,
         passedCases: report.length, cases: report, runs }, null, 2));
   });
   it.each(["intent", "node", "completion", "intent-removal"])("recovers graph assignments after %s commit and physical engine exit", async boundary => {

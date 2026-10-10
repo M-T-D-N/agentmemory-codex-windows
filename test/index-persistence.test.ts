@@ -2,6 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { IndexPersistence } from "../src/state/index-persistence.js";
 import { SearchIndex } from "../src/state/search-index.js";
 import { VectorIndex } from "../src/state/vector-index.js";
+import { vectorBucketScope } from "../src/state/vector-persistence.js";
+import { queryAudit } from "../src/functions/audit.js";
+import { KV } from "../src/state/schema.js";
+import { payloadByteLength, SAFE_PAYLOAD_BYTES } from "../src/state/frame-guard.js";
 import type { CompressedObservation } from "../src/types.js";
 
 const BM25_SCOPE = "mem:index:bm25";
@@ -9,6 +13,8 @@ const BM25_LEGACY_KEY = "data";
 const BM25_MANIFEST_KEY = "data:manifest";
 const VECTOR_LEGACY_KEY = "vectors";
 const VECTOR_MANIFEST_KEY = "vectors:manifest";
+const VECTOR_META_KEY = "vectors:meta";
+type TestVectorMeta = { v: 3; bucketCount: number; savedAt: string; count: number };
 
 type TestIndexShardManifest = {
   v: 1;
@@ -184,7 +190,7 @@ describe("IndexPersistence", () => {
     expect(loaded.bm25?.search("restart")[0]?.obsId).toBe("restart-reuse");
     expect(loaded.vector?.size).toBe(1);
     restartedBm25.restoreFrom(loaded.bm25!);
-    restartedVector.restoreFrom(loaded.vector!);
+    restartedVector.restoreFrom(loaded.vector!, { persisted: true });
     await restarted.save({ requireSuccess: true });
     expect(guardedKv.set).not.toHaveBeenCalled();
   });
@@ -418,13 +424,17 @@ describe("IndexPersistence", () => {
     const loaded = await new IndexPersistence(
       kv as never,
       new SearchIndex(),
-      null,
+      new VectorIndex(),
     ).load();
 
     expect(loaded.bm25).not.toBeNull();
     expect(loaded.bm25!.search("legacy").length).toBe(1);
     expect(loaded.vector).not.toBeNull();
     expect(loaded.vector!.size).toBe(1);
+    expect(loaded.state).toBe("migrated");
+    expect(await kv.get(BM25_SCOPE, VECTOR_META_KEY)).toMatchObject({ v: 3, count: 1 });
+    expect(await kv.get(BM25_SCOPE, VECTOR_LEGACY_KEY)).toBeNull();
+    expect(await kv.get(BM25_SCOPE, BM25_LEGACY_KEY)).not.toBeNull();
   });
 
   it("fails closed instead of falling back when manifest reads fail", async () => {
@@ -529,19 +539,12 @@ describe("IndexPersistence", () => {
     });
     await persistence.save();
 
-    const manifest = await kv.get<TestIndexShardManifest>(
-      BM25_SCOPE,
-      VECTOR_MANIFEST_KEY,
-    );
-    expect(manifest).not.toBeNull();
-    expect(manifest!.generation).toBe("gen_vector");
-    expect(manifest!.shards.length).toBeGreaterThan(1);
-    expect(manifest!.shards[0].scope).toContain(":gen_vector:");
-    await expect(kv.get(BM25_SCOPE, VECTOR_LEGACY_KEY)).resolves.toBeNull();
-    await expect(
-      kv.get(manifest!.shards[0].scope, manifest!.shards[0].key),
-    ).resolves.toEqual(expect.any(String));
-
+    const meta = await kv.get<TestVectorMeta>(BM25_SCOPE, VECTOR_META_KEY);
+    expect(meta).toMatchObject({ v: 3, count: 1, bucketCount: 1 });
+    expect(vectorBucketScope(0)).not.toBe(BM25_SCOPE);
+    expect(await kv.get(vectorBucketScope(0), "obs_1")).toMatchObject({ id: "obs_1", s: "ses_1", e: expect.any(String) });
+    expect(await kv.get(BM25_SCOPE, VECTOR_MANIFEST_KEY)).toBeNull();
+    expect(await kv.get(BM25_SCOPE, VECTOR_LEGACY_KEY)).toBeNull();
     const loaded = await persistence.load();
     expect(loaded.vector).not.toBeNull();
     expect(loaded.vector!.size).toBe(1);
@@ -556,26 +559,22 @@ describe("IndexPersistence", () => {
     }).save();
 
     const nextBm25 = makeBm25("obs_new", "bravo new snapshot");
-    const emptyVector = new VectorIndex();
-    await new IndexPersistence(kv as never, nextBm25, emptyVector, {
-      shardChars: 80,
-      createGeneration: () => "gen_empty",
-    }).save();
-
-    const vectorManifest = await kv.get<TestIndexShardManifest>(
-      BM25_SCOPE,
-      VECTOR_MANIFEST_KEY,
-    );
-    expect(vectorManifest).not.toBeNull();
-    expect(vectorManifest!.generation).toBe("gen_empty");
-    const loaded = await new IndexPersistence(
-      kv as never,
-      new SearchIndex(),
-      null,
-    ).load();
-    expect(loaded.bm25!.search("bravo").length).toBe(1);
-    expect(loaded.vector).not.toBeNull();
+    const target = new VectorIndex();
+    const writer = new IndexPersistence(kv as never, nextBm25, target);
+    const previous = await writer.load();
+    target.restoreFrom(previous.vector!, { persisted: true });
+    target.clear();
+    await writer.save({ requireSuccess: true });
+    writer.stop();
+    const meta = await kv.get<TestVectorMeta>(BM25_SCOPE, VECTOR_META_KEY);
+    expect(meta).toMatchObject({ v: 3, count: 0 });
+    for (let bucket = 0; bucket < meta!.bucketCount; bucket++) expect(await kv.list(vectorBucketScope(bucket))).toEqual([]);
+    const reader = new IndexPersistence(kv as never, new SearchIndex(), new VectorIndex());
+    const loaded = await reader.load();
+    expect(loaded.bm25!.search("bravo")).toHaveLength(1);
     expect(loaded.vector!.size).toBe(0);
+    expect(loaded.vector!.has("obs_old")).toBe(false);
+    reader.stop();
   });
 
   it("avoids one oversized state::set string payload for persisted indexes", async () => {
@@ -597,6 +596,7 @@ describe("IndexPersistence", () => {
     const guardedKv = {
       ...kv,
       set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (payloadByteLength({ scope, key, data }) > SAFE_PAYLOAD_BYTES) throw Error("oversized vector frame");
         if (
           typeof data === "string" &&
           data.length > maxStringPayloadChars
@@ -615,7 +615,7 @@ describe("IndexPersistence", () => {
     const loaded = await new IndexPersistence(
       kv as never,
       new SearchIndex(),
-      null,
+      new VectorIndex(),
     ).load();
     expect(loaded.bm25!.search("oversized").length).toBe(1);
     expect(loaded.vector!.size).toBe(1);
@@ -742,8 +742,11 @@ describe("IndexPersistence", () => {
     await persistence.save({ requireSuccess: true });
     const writes = guardedKv.set.mock.calls;
     expect(writes.some(([scope, key]) => scope === BM25_SCOPE && key === BM25_MANIFEST_KEY)).toBe(false);
-    expect(writes.some(([scope, key]) => scope === BM25_SCOPE && key === VECTOR_MANIFEST_KEY)).toBe(true);
-    expect((await persistence.load()).vector!.search(new Float32Array([0, 1]))[0]?.score).toBe(1);
+    expect(writes.some(([scope, key]) => scope === BM25_SCOPE && key === VECTOR_META_KEY)).toBe(true);
+    expect(writes.some(([scope, key]) => scope === vectorBucketScope(0) && key === "vector-only")).toBe(true);
+    const reader = new IndexPersistence(kv as never, new SearchIndex(), new VectorIndex());
+    expect((await reader.load()).vector!.search(new Float32Array([0, 1]))[0]?.score).toBe(1);
+    reader.stop();
     guardedKv.set.mockClear();
     await persistence.save({ requireSuccess: true });
     expect(guardedKv.set).not.toHaveBeenCalled();
@@ -754,7 +757,7 @@ describe("IndexPersistence", () => {
     let failVector = true;
     const guardedKv = { ...kv,
       set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
-        if (failVector && scope === BM25_SCOPE && key === VECTOR_MANIFEST_KEY) throw new Error("vector save failed");
+        if (failVector && scope === BM25_SCOPE && key === VECTOR_META_KEY) throw new Error("vector save failed");
         return kv.set(scope, key, data);
       }),
     };
@@ -790,7 +793,8 @@ describe("IndexPersistence", () => {
     failedPath = old.shards[1].scope + "/" + old.shards[1].key;
     bm25.add(makeObs({ id: "new", title: "latest snapshot" }));
     await persistence.save({ requireSuccess: true });
-    const audits = (await kv.list<any>("mem:audit")).filter(row => row.details.reason === "previous_generation_cleanup");
+    const { entries } = await queryAudit(kv as never, { operation: "index_persist", limit: 100 });
+    const audits = entries.filter(row => row.details?.reason === "previous_generation_cleanup");
     expect(audits).toHaveLength(1);
     expect(audits[0].targetIds).toEqual(old.shards.map(row => row.scope + "/" + row.key));
     expect(audits[0].details.result).toBe("partial_failure");
@@ -1088,45 +1092,35 @@ describe("IndexPersistence", () => {
     expect(loaded.bm25!.search("alpha").length).toBe(0);
   });
 
-  it("keeps the previous vector generation when vector save fails after BM25 publish", async () => {
-    const previousBm25 = makeBm25("obs_old", "alpha previous snapshot");
-    const previousVector = makeVector("obs_old");
-    await new IndexPersistence(kv as never, previousBm25, previousVector, {
-      shardChars: 80,
-      createGeneration: () => "gen_old",
-    }).save();
-
-    const failingKv = {
-      ...kv,
-      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
-        if (scope === BM25_SCOPE && key === VECTOR_MANIFEST_KEY) {
-          throw new Error("vector manifest write failed");
-        }
-        return kv.set(scope, key, data);
-      }),
-    };
-    const nextBm25 = makeBm25("obs_new", "bravo new snapshot");
-    const nextVector = new VectorIndex();
-    nextVector.add("obs_new", "ses_1", new Float32Array([0.4, 0.5, 0.6]));
-
-    await new IndexPersistence(failingKv as never, nextBm25, nextVector, {
-      shardChars: 80,
-      createGeneration: () => "gen_new",
-    }).save();
-
-    await expect(
-      kv.get("mem:index:bm25:vectors:gen_new:00000", "data"),
-    ).resolves.toBeNull();
-    const loaded = await new IndexPersistence(
-      kv as never,
-      new SearchIndex(),
-      null,
-    ).load();
-    expect(loaded.bm25!.search("bravo").length).toBe(1);
-    expect(loaded.vector!.size).toBe(1);
-    expect(
-      loaded.vector!.search(new Float32Array([0.1, 0.2, 0.3]))[0]?.obsId,
-    ).toBe("obs_old");
+  it.each(["bucket", "meta"] as const)("recovers durable vector changes after %s checkpoint failure while BM25 publishes", async failurePoint => {
+    const initial = new IndexPersistence(kv as never, makeBm25("obs_old", "alpha previous snapshot"), makeVector("obs_old"));
+    await initial.save({ requireSuccess: true });
+    initial.stop();
+    const failingKv = { ...kv, set: async <T>(scope: string, key: string, data: T): Promise<T> => {
+      if (failurePoint === "meta" ? scope === BM25_SCOPE && key === VECTOR_META_KEY : scope.startsWith(`${BM25_SCOPE}:vec:`)) throw Error("vector checkpoint failed");
+      return kv.set(scope, key, data);
+    }};
+    const target = new VectorIndex();
+    const writer = new IndexPersistence(failingKv as never, makeBm25("obs_new", "bravo new snapshot"), target);
+    const before = await writer.load();
+    target.restoreFrom(before.vector!, { persisted: true });
+    target.remove("obs_old");
+    target.add("obs_new", "ses_1", new Float32Array([0.4, 0.5, 0.6]));
+    await expect(writer.save({ requireSuccess: true })).rejects.toThrow("vector checkpoint failed");
+    writer.stop();
+    expect(await kv.get(KV.vectorPendingLog, "obs_old")).toMatchObject({ id: "obs_old", t: 1 });
+    expect(await kv.get(KV.vectorPendingLog, "obs_new")).toMatchObject({ id: "obs_new", e: expect.any(String) });
+    const restartedTarget = new VectorIndex();
+    const restarted = new IndexPersistence(kv as never, new SearchIndex(), restartedTarget);
+    const checkpoint = await restarted.load();
+    expect(checkpoint.bm25!.search("bravo")).toHaveLength(1);
+    restartedTarget.restoreFrom(checkpoint.vector!, { persisted: true });
+    const replay = await restarted.replayPendingLog(3);
+    expect(replay).toMatchObject({ entries: 2, added: 1, skipped: 0 });
+    expect(restartedTarget.has("obs_old")).toBe(false);
+    expect(restartedTarget.has("obs_new")).toBe(true);
+    expect(restartedTarget.size).toBe(1);
+    restarted.stop();
   });
 
   it("fails closed when a manifest shard is missing", async () => {

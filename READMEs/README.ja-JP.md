@@ -13,8 +13,8 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> `0.1.0-preview.14` です。
-> [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29` を基に
+> `0.1.0-preview.15` です。
+> [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
 > ありません。アップストリームの `npx` コマンドや互換性用プラグイン
@@ -27,7 +27,7 @@ AgentMemory ダウンストリームです。
 ## はじめに
 
 1. Windows x64、Node.js 24+、Windows PowerShell 5.1、Codex desktop を確認し、[固定バージョンのインストールガイド](../packaging/windows-codex/npm/README.md)に従ってください。ビルド済みランタイムを配布しており、ソースビルドは任意です。
-2. 準備 → 有効化 → サービスの確認 → Codex MCP 接続の順で進めます。
+2. dry-run で対象を確認し、`--execute` で適用します。空の対象は既定の経路で準備・有効化・サービス確認まで進みます。`--fresh` と `--activate-prepared` で段階を分けることもできます。確認後に Codex MCP を接続します。
 3. 失敗した場合は[サポート案内](../SUPPORT.md)に従い、バージョン・失敗した段階・機密情報を除いた短いエラーを報告してください。メモリデータベースや認証情報は添付しないでください。
 
 ## このプレビューで提供するもの
@@ -47,7 +47,7 @@ AgentMemory ダウンストリームです。
   stdio launcher は互換性経路としてのみパッケージに含まれます。
 
 アップストリーム互換のソース surface には、58個の MCP tools、6個の
-resources、3個の prompts、port 3111 の135個の REST endpoints、12個の
+resources、3個の prompts、port 3111 の143個の REST endpoints、12個の
 portable hooks、17個の skills があります。サポート対象の Windows
 プロファイルで意図的に有効化する管理対象 hook は、上記の4つだけです。
 
@@ -62,6 +62,18 @@ index の更新には明示的な snapshot rebuild を使用します。
 各 node・edge にゼロ起点の `sourceIndexes` を指定するか、共有出典として
 `sharedSources: true` を明示します。空 observation の復元は既存の REST forget
 endpoint で正確な ID・version・graph cursor を保護して行います。
+
+## preview.15 の変更
+
+AgentMemory 0.9.30 と iii engine/SDK 0.22.1 を統合しました。新規導入、管理対象の更新、
+元の 0.9.29/0.9.30 のファイル保存形式からの引き継ぎを同じ installer で扱います。
+アップストリームの事前導入は不要です。引き継ぎには元の package・data・設定の
+パスを明示し、新しい未対応版を自動的にダウングレードしません。
+修正済み engine は管理対象の書き込みで file flush を待ち、viewer 復旧は制限付き
+key page を使います。意図的な取得除外を false dead letter にせず、graph provider と
+無効化した一般 LLM の状態を区別します。成功した build の専用 scratch は回収し、
+失敗時は診断用に残します。Windows 上の導入・更新・再起動・引き継ぎ・失敗復旧の
+検証範囲と、停電復旧・署名・他の PC の未検証事項は [CHANGELOG](../CHANGELOG.md) に記録します。
 
 ## 検索・フィルタ・インデックスと検証範囲
 
@@ -108,10 +120,10 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.14` | 公開リポジトリ版とソース tag |
-| AgentMemory 互換版 | `0.9.29` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
+| 公開ダウンストリーム版 | `0.1.0-preview.15` | 公開リポジトリ版とソース tag |
+| AgentMemory 互換版 | `0.9.30` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
-| iii engine | `0.11.2` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
+| iii engine | `0.22.1` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
 
 正確なアップストリームの tag、commit、tree、元の package hash は
 [`upstream-source.json`](../upstream-source.json) に記録されています。
@@ -123,9 +135,9 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 - HTTP 回帰テスト用に PATH 上の Python 3（CI は Python 3.12）
 - リポジトリで固定された pnpm `11.19.0`
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
-  の SHA-256 と一致する、ダウンストリーム修正済み iii engine `0.11.2` Windows 実行ファイル
+  の SHA-256 と一致する、ダウンストリーム修正済み iii engine `0.22.1` Windows 実行ファイル
 
-preview.14 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
+preview.15 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
 ## ソースからビルドする
 
@@ -133,13 +145,14 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.14 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.15 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
-  -ReleaseRevision r83
+  -IiiEnginePath D:\inputs\iii-0.22.1.exe `
+  -ScratchDirectory D:\staging\agentmemory-build-temp `
+  -ReleaseRevision r189
 ```
 
 通常のビルドは、native 入力の hash、固定 lockfile、skill の整合性、typecheck、

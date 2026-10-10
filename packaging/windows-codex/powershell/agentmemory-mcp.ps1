@@ -21,7 +21,8 @@ $ownerMarkerPath = Join-Path $resolvedRoot '.agentmemory-install-owner.json'
 $officialCliPath = Join-Path $layout.PackageRoot 'dist\cli.mjs'
 $hiddenLauncherPath = Join-Path $resolvedRoot 'bin\agentmemory-hidden-launcher.exe'
 $startupLockPath = Join-Path $resolvedRoot 'data\startup.lock'
-$reservedPorts = @(3111, 3112, 3113, 3114, 49134)
+$servicePorts = Get-AgentMemoryServicePorts -Root $resolvedRoot
+$reservedPorts = @($servicePorts.rest, $servicePorts.stream, $servicePorts.viewer, $servicePorts.mcp, $servicePorts.engine)
 
 foreach ($requiredFile in @($envScript, $lifecycleScript, $daemonScript, $taskScript, $taskRegistrationPath, $ownerMarkerPath, $officialCliPath, $hiddenLauncherPath, $NodePath)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
@@ -58,7 +59,7 @@ function Get-ReservedConnections {
 function Test-AgentMemoryHealth {
     try {
         $headers = @{ Authorization = "Bearer $($env:AGENTMEMORY_SECRET)" }
-        $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:3111/agentmemory/health' -Headers $headers -TimeoutSec 2
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($servicePorts.rest)/agentmemory/health" -Headers $headers -TimeoutSec 2
         return $response.StatusCode -eq 200
     }
     catch {
@@ -86,12 +87,12 @@ function Test-ServiceReady {
         if (@($connections | Where-Object { -not (Test-IPv4LoopbackAddress -Address $_.LocalAddress) }).Count -gt 0) {
             return $false
         }
-        foreach ($port in @(3111, 3112, 49134)) {
+        foreach ($port in @($servicePorts.rest, $servicePorts.stream, $servicePorts.engine)) {
             if (-not @($connections | Where-Object { $_.LocalPort -eq $port })) {
                 return $false
             }
         }
-        if (-not @($connections | Where-Object { $_.LocalPort -eq 3114 })) {
+        if (-not @($connections | Where-Object { $_.LocalPort -eq $servicePorts.mcp })) {
             return $false
         }
         return $true
@@ -146,22 +147,10 @@ function Assert-OwnedScheduledTaskRegistration {
     $ownerSid = $identity.User.Value
     $ownerMarker = Get-Content -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
     $registration = Get-Content -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
-    $expectedName = 'AgentMemoryCodex-Daemon-' + (Get-AgentMemoryTaskSidSuffix -Sid $ownerSid)
+    Assert-AgentMemoryTaskRegistration -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration
+    $expectedName = [string]$registration.task_name
     $expectedDescription = "OpenAI Codex AgentMemory daemon; install_nonce=$([string]$ownerMarker.install_nonce)"
     $expectedArguments = 'task'
-
-    if (
-        [string]$registration.task_path -ne '\' -or
-        [string]$registration.task_name -ne $expectedName -or
-        [string]$registration.owner_sid -ne $ownerSid -or
-        [string]$registration.install_nonce -ne [string]$ownerMarker.install_nonce -or
-        [string]$registration.description -ne $expectedDescription -or
-        [System.IO.Path]::GetFullPath([string]$registration.execute) -ne $hiddenLauncherPath -or
-        [string]$registration.arguments -ne $expectedArguments -or
-        [System.IO.Path]::GetFullPath([string]$registration.working_directory) -ne $resolvedRoot
-    ) {
-        throw 'The protected AgentMemory scheduled-task registration does not match this installation.'
-    }
 
     $schtasksPath = Join-Path $env:SystemRoot 'System32\schtasks.exe'
     $taskXmlText = @(& $schtasksPath /Query /TN "\$expectedName" /XML ONE 2>$null)

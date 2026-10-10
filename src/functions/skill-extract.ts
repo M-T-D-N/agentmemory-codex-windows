@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type {
   CompressedObservation,
   SessionSummary,
@@ -106,7 +106,7 @@ function parseSkillXml(
 }
 
 export function registerSkillExtractFunctions(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   provider: MemoryProvider,
 ): void {

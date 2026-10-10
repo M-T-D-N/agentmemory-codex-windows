@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import type {
@@ -11,7 +11,7 @@ import {
 } from "./observation-visibility.js";
 import { findVisibleObservation } from "./observation-access.js";
 
-export function registerVerifyFunction(sdk: ISdk, kv: StateKV): void {
+export function registerVerifyFunction(sdk: IIIClient, kv: StateKV): void {
   sdk.registerFunction("mem::verify", 
     async (data: { id: string; project?: string }) => {
       if (!data.id || typeof data.id !== "string") {

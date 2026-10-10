@@ -3,14 +3,14 @@
 AgentMemory and this downstream adapter are provided under Apache-2.0; see
 LICENSE and NOTICE. The npm launcher is also Apache-2.0.
 
-The downloaded Windows runtime includes **iii-engine 0.11.2**, copyright
-2024-present Motia LLC, licensed under **Elastic License 2.0**. Its license is
+The downloaded Windows runtime includes **iii-engine 0.22.1**, copyright
+2025-2026 Motia LLC, licensed under **Elastic License 2.0**. Its license is
 separate from the adapter's Apache license. Read the accompanying
-`iii-LICENSE_ELv2`, including its hosted/managed-service restrictions, before
+`iii-LICENSE_ELv2`, `iii-NOTICE` and `iii-PATENTS`, including its hosted/managed-service restrictions, before
 redistributing or operating the engine for others.
 
 This downstream builds that engine from the pinned upstream source with the
-included `payload/src/iii-0.11.2-state-flush.patch`. It adds an explicit file-store
+included `payload/src/iii-0.22.1-state-flush.patch`. It adds an explicit file-store
 flush operation and serializes it with periodic persistence. This binary is a
 modified downstream build, not the official upstream release binary. The engine
 and its patch retain Elastic License 2.0; the adapter license does not relicense
@@ -20,9 +20,9 @@ build. Process-crash recovery qualification does not certify power-loss recovery
 
 Official source and license:
 
-- https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2
-- https://github.com/iii-hq/iii/blob/iii%2Fv0.11.2/engine/Cargo.toml
-- https://github.com/iii-hq/iii/blob/iii%2Fv0.11.2/LICENSE_ELv2
+- https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.22.1
+- https://github.com/iii-hq/iii/blob/iii%2Fv0.22.1/engine/Cargo.toml
+- https://github.com/iii-hq/iii/blob/iii%2Fv0.22.1/engine/LICENSE
 
 The ZIP also includes production Node dependencies with their package metadata
 and shipped license/notice files. Those components retain their own licenses;
@@ -30,8 +30,8 @@ the adapter's Apache-2.0 license does not relicense them. Node.js itself is a
 user-installed prerequisite and is not bundled. Local Qwen models and runtimes
 are optional, separately installed, and are not included in either artifact.
 
-The production **iii-sdk 0.11.2** (Apache-2.0) includes the downstream
-`patches/iii-sdk@0.11.2.patch` for interrupted RPC settlement on socket close.
+The production **iii-sdk 0.22.1** (Apache-2.0) includes the downstream
+`patches/iii-sdk@0.22.1.patch` for interrupted RPC settlement on socket close.
 This is a modified dependency, not an unmodified upstream SDK. The source
 lockfile identifies the patch and final release qualification compares its
 ESM and CommonJS entry points with the tested source installation.

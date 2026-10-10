@@ -1,14 +1,18 @@
 #!/usr/bin/env node
+import { isSdkChildContext } from "./_runtime.js";
 import { resolveProject, hookCwd } from "./_project.js";
-import { REST_URL, authHeaders, isSdkChildContext } from "./_runtime.js";
+import { captureObservation, isDrainChild, runDrainChild, withEventId } from "./_capture.js";
 
-// Passive telemetry only — nothing reads the response, so the previous
-// `await` was pure latency. Tightened from 2000ms to a defensive cap so a
-// slow/unreachable server can't stack onto every concurrent subagent
-// startup (#221).
-const TIMEOUT_MS = 800;
+// Inlined from ./sdk-guard so each hook bundles to a single self-contained
+// .mjs (matches the pattern used by every other hook entry in tsdown.config).
+
+
+const OBSERVE_TIMEOUT_MS = 800;
+const EXIT_CAP_MS = 1300;
 
 async function main() {
+  if (isSdkChildContext(undefined)) return;
+  if (isDrainChild()) return runDrainChild();
   let input = "";
   for await (const chunk of process.stdin) {
     input += chunk;
@@ -30,23 +34,24 @@ async function main() {
 
   const cwd = hookCwd(data) || process.cwd();
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      hookType: "subagent_start",
-      sessionId,
-      project: resolveProject(cwd),
-      cwd,
-      timestamp: new Date().toISOString(),
-      data: {
-        agent_id: agentId,
-        agent_type: agentType,
+  void captureObservation(
+    withEventId(
+      {
+        hookType: "subagent_start",
+        sessionId,
+        project: resolveProject(cwd),
+        cwd,
+        timestamp: new Date().toISOString(),
+        data: {
+          agent_id: agentId,
+          agent_type: agentType,
+        },
       },
-    }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  }).catch(() => {});
-  setTimeout(() => process.exit(0), 500).unref();
+      data,
+    ),
+    OBSERVE_TIMEOUT_MS,
+  );
+  setTimeout(() => process.exit(0), EXIT_CAP_MS).unref();
 }
 
 main().catch(() => process.exit(0));

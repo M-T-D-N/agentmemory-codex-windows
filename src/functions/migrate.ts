@@ -1,5 +1,6 @@
 import { registerObservationWriter } from "../state/observation-write.js";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
+import { addSessionToProjectIndex } from "../state/session-index.js";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { KV, generateId } from "../state/schema.js";
@@ -67,7 +68,7 @@ export async function inferMemoryProjects(
   return { updated, skipped, ambiguous };
 }
 
-export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
+export function registerMigrateFunction(sdk: IIIClient, kv: StateKV): void {
   registerObservationWriter(sdk, "mem::migrate",
     async (data: { dbPath?: string; step?: string; dryRun?: boolean }) => {
       // In-place KV migration steps (no SQLite dependency).
@@ -160,6 +161,7 @@ export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
             observationCount: 0,
           };
           await kv.set(KV.sessions, session.id, session);
+          await addSessionToProjectIndex(kv, session.project, session);
           sessionCount++;
         }
 

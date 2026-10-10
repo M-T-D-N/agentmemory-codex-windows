@@ -48,6 +48,7 @@ function mockKV() {
 
 const kv = mockKV() as any;
 
+import { rawFromObservationSource } from "../src/functions/observation-source.js";
 import type { RawObservation, CompressedObservation, MemoryProvider } from "../src/types.js";
 
 const originalHome = process.env["HOME"];
@@ -156,7 +157,7 @@ describe("End-to-End Multimodal Flow", () => {
     expect(compressCallback).not.toBeNull();
 
     const rawObsList = await kv.list("mem:obs:test-session");
-    const raw = rawObsList[0] as RawObservation;
+    const raw = rawFromObservationSource(rawObsList[0] as CompressedObservation)!;
 
     expect(raw.modality).toBeDefined();
     expect(raw.imageData).toBe(savedImagePath);

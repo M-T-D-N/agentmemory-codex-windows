@@ -18,14 +18,30 @@ const INJECT_CONTEXT = process.env["AGENTMEMORY_INJECT_CONTEXT"] === "true";
 const INJECT_TIMEOUT_MS = 1500;
 const REGISTER_TIMEOUT_MS = 800;
 
+function isPlainTextHost(): boolean {
+  return Boolean(
+    process.env["FACTORY_PROJECT_DIR"] || process.env["DROID_PLUGIN_ROOT"],
+  );
+}
+
+function wantsStructuredOutput(data: Record<string, unknown>): boolean {
+  if (process.env["DEVIN_PROJECT_DIR"] || data.prompt_id !== undefined) {
+    return true;
+  }
+  return data.hook_event_name === "SessionStart" && !isPlainTextHost();
+}
+
 function contextPayload(data: Record<string, unknown>, context: string): string {
+  if (process.env["COPILOT_PLUGIN_ROOT"] && !data.hook_event_name) {
+    return JSON.stringify({ additionalContext: context });
+  }
   if (
     typeof data.cursor_version === "string" ||
     data.hook_event_name === "sessionStart"
   ) {
     return JSON.stringify({ additional_context: context });
   }
-  if (process.env["DEVIN_PROJECT_DIR"] || data.prompt_id !== undefined) {
+  if (wantsStructuredOutput(data)) {
     return JSON.stringify({
       hookSpecificOutput: {
         hookEventName: "SessionStart",

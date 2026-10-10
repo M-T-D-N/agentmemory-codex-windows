@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import {
   statSync,
   unwatchFile,
@@ -461,7 +461,7 @@ function isBlockedAtCurrentOutputBudget(session: Session): boolean {
 }
 
 export function registerSemanticGraphBacklogFunction(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   provider?: MemoryProvider,
 ): void {
@@ -663,7 +663,7 @@ export function registerSemanticGraphBacklogFunction(
 }
 
 export function startSemanticGraphBacklogScheduler(
-  sdk: ISdk,
+  sdk: IIIClient,
   provider: MemoryProvider,
   initialRuntime: ProviderRuntimeInfo | null,
   options: {

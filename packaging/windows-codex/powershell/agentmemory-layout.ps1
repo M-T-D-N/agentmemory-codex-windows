@@ -1,5 +1,23 @@
 Set-StrictMode -Version Latest
 
+function Get-AgentMemoryServicePorts {
+    param([string]$Root)
+    $ports = [ordered]@{ rest = 3111; stream = 3112; viewer = 3113; mcp = 3114; engine = 49134 }
+    $path = Join-Path $Root 'config\codex-workspace.json'
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $workspace = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        if ($workspace.PSObject.Properties['service_ports']) {
+            foreach ($key in @($ports.Keys)) {
+                $value = $workspace.service_ports.PSObject.Properties[$key]
+                if (-not $value -or $value.Value -isnot [int] -or $value.Value -lt 1 -or $value.Value -gt 65535) { throw 'Invalid AgentMemory service port.' }
+                $ports[$key] = [int]$value.Value
+            }
+        }
+    }
+    if (@($ports.Values | Select-Object -Unique).Count -ne 5) { throw 'AgentMemory service ports must be distinct.' }
+    return [pscustomobject]$ports
+}
+
 function Resolve-AgentMemoryLayout {
     param(
         [string]$Root,

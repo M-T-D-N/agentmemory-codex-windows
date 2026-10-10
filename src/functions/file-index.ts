@@ -1,6 +1,6 @@
 import { readArchiveVisibility } from "./archive.js";
 import { resolveReadAgentId } from "./read-agent-scope.js";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { CompressedObservation, Session } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -25,7 +25,7 @@ interface FileHistory {
   }>;
 }
 
-export function registerFileIndexFunction(sdk: ISdk, kv: StateKV): void {
+export function registerFileIndexFunction(sdk: IIIClient, kv: StateKV): void {
   sdk.registerFunction("mem::file-context", 
     async (
       data: { sessionId?: string; files?: string[]; project?: string; agentId?: string } | undefined,

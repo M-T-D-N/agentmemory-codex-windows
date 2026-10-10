@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { queryAudit } from "../functions/audit.js";
 
 import { InMemoryKV } from "./in-memory-kv.js";
 import { createStdioTransport } from "./transport.js";
@@ -235,6 +236,7 @@ function validate(toolName: string, args: Record<string, unknown>): Validated {
       v.limit = parseLimit(args["limit"], 50);
       return v;
     }
+
     default:
       throw new Error(`Unknown tool: ${toolName}`);
   }
@@ -323,14 +325,8 @@ async function handleLocal(
     }
 
     case "memory_audit": {
-      const entries = await kvInstance.list("mem:audit");
-      const limit = v.limit ?? 50;
-      return textResponse(
-        {
-          entries: (entries as Array<Record<string, unknown>>).slice(0, limit),
-        },
-        true,
-      );
+      const result = await queryAudit(kvInstance as never, { limit: v.limit ?? 50 });
+      return textResponse(result, true);
     }
 
     default:

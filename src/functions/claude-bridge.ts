@@ -2,7 +2,7 @@ import { readCurrentProfile } from "./profile.js";
 import { resolveReadAgentId } from "./read-agent-scope.js";
 import { sanitizeCodexAmbientObservation } from "./observation-visibility.js";
 import { memoryToObservation } from "../state/memory-utils.js";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Memory, ClaudeBridgeConfig } from "../types.js";
@@ -76,7 +76,7 @@ function serializeToMemoryMd(
 }
 
 export function registerClaudeBridgeFunction(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   config: ClaudeBridgeConfig,
 ): void {

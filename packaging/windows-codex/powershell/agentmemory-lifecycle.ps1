@@ -85,6 +85,15 @@ function Assert-AgentMemoryTaskRegistration {
     $label = if ($Kind -eq 'daemon') { 'daemon' } else { 'app watchdog' }
     $taskKind = if ($Kind -eq 'daemon') { 'Daemon' } else { 'Watchdog' }
     $expectedName = "AgentMemoryCodex-$taskKind-" + (Get-AgentMemoryTaskSidSuffix -Sid $OwnerSid)
+    $workspaceConfigPath = Join-Path $expectedRoot 'config\codex-workspace.json'
+    if (Test-Path -LiteralPath $workspaceConfigPath -PathType Leaf) {
+        $workspaceConfig = Get-Content -Raw -LiteralPath $workspaceConfigPath | ConvertFrom-Json
+        if ($workspaceConfig.PSObject.Properties['service_ports']) {
+            $restPort = $workspaceConfig.service_ports.rest
+            if (($restPort -isnot [int] -and $restPort -isnot [long]) -or $restPort -lt 1 -or $restPort -gt 65535) { throw 'Invalid AgentMemory task service port.' }
+            if ($restPort -ne 3111) { $expectedName += "-$restPort" }
+        }
+    }
     $expectedArguments = if ($Kind -eq 'daemon') { 'task' } else { 'watch' }
     if (
         [string]$Registration.task_path -ne '\' -or

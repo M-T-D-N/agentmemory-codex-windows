@@ -12,6 +12,8 @@ vi.mock("../src/config.js", () => ({
   isSummaryEnabled: vi.fn(() => true),
   getGraphBatchSize: vi.fn(() => 10),
   getConsolidationCooldownMs: vi.fn(() => 300000),
+  detectLlmProviderKind: vi.fn(() => "noop"),
+  hasLLMProviderConfigured: vi.fn(() => false),
 }));
 
 vi.mock("../src/functions/slots.js", () => ({
@@ -286,17 +288,17 @@ describe("event::session::stopped consolidation fan-out", () => {
 });
 
 describe("session observation activity fan-out", () => {
-  it("does not register a same-worker state trigger for session writes", () => {
+  it("registers detached state triggers for viewer updates on engine 0.22.1", () => {
     const { sdk, handlers, registerTrigger, trigger } = mockSdk();
     registerEventTriggers(sdk as never, mockKV() as never);
 
-    expect(handlers.has("event::session::observation-count-changed")).toBe(false);
+    expect(handlers.has("event::session::observation-count-changed")).toBe(true);
     expect(
       registerTrigger.mock.calls.some(
         ([registration]) =>
           (registration as { type?: string }).type === "state",
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(trigger).not.toHaveBeenCalled();
   });
 
@@ -307,8 +309,7 @@ describe("session observation activity fan-out", () => {
 
     const ended = handlers.get("event::session::ended")!;
     await expect(ended({ sessionId: "missing" })).resolves.toEqual({
-      success: false,
-      error: "session_not_found",
+      success: true, ended: false, reason: "not_found",
     });
     expect(kv.update).not.toHaveBeenCalled();
   });

@@ -26,7 +26,8 @@ $statePath = Join-Path $resolvedRoot 'data\runtime-state.json'
 $stopPath = Join-Path $resolvedRoot 'data\stop-request.json'
 $startupLockPath = Join-Path $resolvedRoot 'data\startup.lock'
 $logsPath = Join-Path $resolvedRoot 'logs'
-$reservedPorts = @(3111, 3112, 3113, 3114, 49134)
+$servicePorts = Get-AgentMemoryServicePorts -Root $resolvedRoot
+$reservedPorts = @($servicePorts.rest, $servicePorts.stream, $servicePorts.viewer, $servicePorts.mcp, $servicePorts.engine)
 
 foreach ($requiredFile in @($envScript, $lifecycleScript, $enginePath, $engineConfig, $installManifestPath, $NodePath, $workerWrapper, $workerCli)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
@@ -267,7 +268,7 @@ function Assert-LoopbackOnly {
 function Test-AgentMemoryHealth {
     try {
         $headers = @{ Authorization = "Bearer $($env:AGENTMEMORY_SECRET)" }
-        $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:3111/agentmemory/health' -Headers $headers -TimeoutSec 2
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($servicePorts.rest)/agentmemory/health" -Headers $headers -TimeoutSec 2
         return $response.StatusCode -eq 200
     }
     catch {
@@ -482,7 +483,7 @@ function Test-EngineReady {
     try {
         Assert-LoopbackOnly
         $connections = Get-ReservedConnections
-        foreach ($port in @(3111, 3112, 49134)) {
+        foreach ($port in @($servicePorts.rest, $servicePorts.stream, $servicePorts.engine)) {
             if (-not @($connections | Where-Object { $_.LocalPort -eq $port -and $_.OwningProcess -eq $EnginePid })) {
                 return $false
             }
@@ -505,16 +506,16 @@ function Test-ServiceReady {
         }
         Assert-LoopbackOnly
         $connections = Get-ReservedConnections
-        foreach ($port in @(3111, 3112, 49134)) {
+        foreach ($port in @($servicePorts.rest, $servicePorts.stream, $servicePorts.engine)) {
             if (-not @($connections | Where-Object { $_.LocalPort -eq $port -and $_.OwningProcess -eq $EnginePid })) {
                 return $false
             }
         }
-        $viewerConnections = @($connections | Where-Object { $_.LocalPort -eq 3113 })
+        $viewerConnections = @($connections | Where-Object { $_.LocalPort -eq $servicePorts.viewer })
         if ($viewerConnections.Count -gt 0 -and @($viewerConnections | Where-Object { $_.OwningProcess -ne $WorkerPid }).Count -gt 0) {
             return $false
         }
-        if (-not @($connections | Where-Object { $_.LocalPort -eq 3114 -and $_.OwningProcess -eq $WorkerPid })) {
+        if (-not @($connections | Where-Object { $_.LocalPort -eq $servicePorts.mcp -and $_.OwningProcess -eq $WorkerPid })) {
             return $false
         }
         return $true
@@ -526,7 +527,7 @@ function Test-ServiceReady {
 
 function Test-RuntimeResponsive {
     try {
-        foreach ($path in @('http://127.0.0.1:3111/agentmemory/livez', 'http://127.0.0.1:3114/.well-known/oauth-protected-resource')) {
+        foreach ($path in @("http://127.0.0.1:$($servicePorts.rest)/agentmemory/livez", "http://127.0.0.1:$($servicePorts.mcp)/.well-known/oauth-protected-resource")) {
             $request = [System.Net.HttpWebRequest]::Create($path)
             $request.Proxy = $null
             $request.Timeout = 3000
@@ -541,7 +542,7 @@ function Test-RuntimeResponsive {
                     if ($body.status -cne 'ok' -or $body.service -cne 'agentmemory' -or
                         ($body.PSObject.Properties.Name -contains 'writeRecoveryRequired' -and $body.writeRecoveryRequired -eq $true)) { return $false }
                 }
-                elseif ($body.resource -cne 'http://127.0.0.1:3114/mcp') { return $false }
+                elseif ($body.resource -cne "http://127.0.0.1:$($servicePorts.mcp)/mcp") { return $false }
             }
             finally {
                 if ($reader) { $reader.Dispose() }
@@ -729,6 +730,11 @@ try {
         throw "Reserved AgentMemory ports are already in use: $($occupiedPorts.LocalPort -join ', ')"
     }
 
+    $engineTemplate = [IO.File]::ReadAllText($engineConfig)
+    $engineConfig = Join-Path $resolvedRoot 'data\iii-config.managed.yaml'
+    $enginePortTokens = @{ '49134' = $servicePorts.engine; '3111' = $servicePorts.rest; '3112' = $servicePorts.stream; '3113' = $servicePorts.viewer }
+    $engineTemplate = [regex]::Replace($engineTemplate, '\b(?:49134|3111|3112|3113)\b', [Text.RegularExpressions.MatchEvaluator]{ param($match) [string]$enginePortTokens[$match.Value] })
+    [IO.File]::WriteAllText($engineConfig, $engineTemplate, (New-Object Text.UTF8Encoding($false)))
     $engineStart = Start-OwnedProcess -FilePath $enginePath -Arguments @('--config', $engineConfig, '--no-update-check') -StandardOutputPath $engineOut -StandardErrorPath $engineErr
     $engine = $engineStart.Process
     $engineLaunch = $engineStart.Launch
@@ -750,7 +756,7 @@ try {
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_RUN_ID', $runId, 'Process')
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_STOP_FILE', $stopPath, 'Process')
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_STOP_TOKEN', $stopToken, 'Process')
-        $workerStart = Start-OwnedProcess -FilePath $NodePath -Arguments @($workerWrapper, '--no-engine', '--tools', 'all', '--port', '3111') -StandardOutputPath $workerOut -StandardErrorPath $workerErr
+        $workerStart = Start-OwnedProcess -FilePath $NodePath -Arguments @($workerWrapper, '--no-engine', '--tools', 'all', '--port', [string]$servicePorts.rest) -StandardOutputPath $workerOut -StandardErrorPath $workerErr
     }
     finally {
         [Environment]::SetEnvironmentVariable('AGENTMEMORY_DIAGNOSTICS_FILE', $previousDiagnosticsFile, 'Process')

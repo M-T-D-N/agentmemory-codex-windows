@@ -86,6 +86,31 @@ async function fixture(dataContractVersion) {
   return { dir, release, workspace, root };
 }
 
+test('upstream inspection honors the selected home without assigning the PowerShell HOME constant', { skip: !windows }, async () => {
+  const f = await fixture(5);
+  try {
+    const source = path.join(f.dir, 'source'), data = path.join(source, 'data'), home = path.join(source, '.agentmemory');
+    await mkdir(path.join(data, 'state_store.db'), { recursive: true });
+    await mkdir(home);
+    await writeFile(path.join(home, 'iii-config.yaml'), 'workers: []\n');
+    await writeFile(path.join(source, 'package.json'), JSON.stringify({ name: '@agentmemory/agentmemory', version: '0.9.29' }));
+    await writeFile(path.join(home, '.env'), 'AGENTMEMORY_VECTOR_BUCKET_SIZE=128 # operational setting\nAGENTMEMORY_SECRET="fixture-auth#literal" # inline comment\n');
+    const script = path.join(f.dir, 'inspect-upstream.ps1');
+    await writeFile(script, `param($Packaging,$Root,$Package,$Data,$SelectedHome)
+$ErrorActionPreference='Stop'
+. (Join-Path $Packaging 'Initialize-WindowsCodex.ps1')
+. (Join-Path $Packaging 'Adopt-WindowsCodex.ps1')
+$root=$Root; $UpstreamPackageRoot=$Package; $UpstreamDataDir=$Data; $UpstreamHome=$SelectedHome; $UpstreamRuntimeDir=''
+$releaseManifest=@{agentmemory_version='0.9.30'}
+$servicePorts=@{rest=8121;stream=8122;viewer=8123;mcp=8124;engine=54144}
+$result=Get-UpstreamInstallation
+if ($result.Home -ne $SelectedHome -or $result.Runtime -ne $SelectedHome -or $result.ConfigPath -ne (Join-Path $SelectedHome 'iii-config.yaml') -or $result.Environment['AGENTMEMORY_VECTOR_BUCKET_SIZE'] -ne '128' -or $result.Secret -ne 'fixture-auth#literal') {throw 'Selected upstream home, configuration or quoted settings were not preserved'}
+`);
+    const result = spawnSync(ps, powershellArgs(script, { Packaging: packaging, Root: f.root, Package: source, Data: data, SelectedHome: home }), { encoding: 'utf8', timeout: 15_000, windowsHide: true, env: powershellEnvironment() });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
 for (const floor of [2, 3]) test('data-contract downgrade is rejected before backups, runtime actions or data changes (floor ' + floor + ')', { skip: !windows }, async () => {
   const f = await fixture(floor);
   try {
@@ -497,6 +522,17 @@ function Clone-Task {param($Task) return ($Task|ConvertTo-Json -Depth 12|Convert
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $nonce=[Guid]::NewGuid().ToString('N')
 $resolvedRoot=$Root; $ownerMarkerPath=Join-Path $Root '.agentmemory-install-owner.json'
+$servicePorts=@{rest=3111;stream=3112;viewer=3113;mcp=3114;engine=49134}
+$servicePorts.rest=7711
+@{service_ports=$servicePorts}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $Root 'config/codex-workspace.json')
+$custom=New-InstallTaskRegistration -Root $Root -Sid $sid -Nonce $nonce
+Assert-AgentMemoryTaskRegistration -Root $Root -OwnerSid $sid -InstallNonce $nonce -Kind daemon -Registration $custom
+$custom.task_name=$custom.task_name -replace '-7711$',''
+$rejected=$false
+try {Assert-AgentMemoryTaskRegistration -Root $Root -OwnerSid $sid -InstallNonce $nonce -Kind daemon -Registration $custom} catch {$rejected=$true}
+if (!$rejected) {throw 'Custom port accepted the default task name'}
+$servicePorts.rest=3111
+@{service_ports=$servicePorts}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $Root 'config/codex-workspace.json')
 $taskRegistrationPath=Join-Path $Root 'config/task-registration.json'
 @{install_nonce=$nonce}|ConvertTo-Json|Set-Content -LiteralPath $ownerMarkerPath
 $daemon=New-InstallTaskRegistration -Root $Root -Sid $sid -Nonce $nonce
@@ -671,7 +707,7 @@ test('authenticated stop requires released ports and the captured run to exit', 
   const dir = await mkdtemp(path.join(tmpdir(), 'am-stop-proof-'));
   try {
     await mkdir(path.join(dir, 'data')); await mkdir(path.join(dir, 'scripts'));
-    for (const file of ['agentmemory-lifecycle.ps1', 'agentmemory-stop.ps1']) {
+    for (const file of ['agentmemory-lifecycle.ps1', 'agentmemory-layout.ps1', 'agentmemory-stop.ps1']) {
       await copyFile(path.join(packaging, 'powershell', file), path.join(dir, 'scripts', file));
     }
     const creation_date = '2026-10-01T00:00:00.0000000Z';

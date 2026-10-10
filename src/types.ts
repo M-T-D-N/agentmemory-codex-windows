@@ -73,6 +73,7 @@ export interface Session {
   project: string;
   cwd: string;
   startedAt: string;
+  updatedAt?: string;
   endedAt?: string;
   status: "active" | "completed" | "abandoned";
   observationCount: number;
@@ -82,7 +83,6 @@ export interface Session {
   summary?: string;
   commitShas?: string[];
   agentId?: string;
-  updatedAt?: string;
   codexAgentReconciliation?: {
     version: 1;
     state: "pending" | "complete";
@@ -119,6 +119,12 @@ export interface Session {
   semanticGraphDeferredReason?: string;
   semanticGraphBootstrapSkipped?: number;
   semanticGraphBackfillThroughObservationId?: string;
+}
+
+export interface ProjectSessionIndexEntry {
+  id: string;
+  startedAt: string;
+  agentId?: string;
 }
 
 export interface CommitLink {
@@ -178,6 +184,20 @@ export interface RawObservation {
   imageData?: string;
   agentId?: string;
   origin?: Origin;
+  eventId?: string;
+  captureKey?: string;
+}
+
+export interface ObservationSource {
+  hookType: HookType;
+  originalBytes: number;
+  truncated: boolean;
+  toolName?: string;
+  toolInput?: unknown;
+  toolOutput?: unknown;
+  userPrompt?: string;
+  assistantResponse?: string;
+  payload?: unknown;
 }
 
 export interface CompressedObservation {
@@ -193,12 +213,14 @@ export interface CompressedObservation {
   files: string[];
   importance: number;
   confidence?: number;
+  source?: ObservationSource;
   imageRef?: string;
   imageData?: string;
   imageDescription?: string;
   modality?: "text" | "image" | "mixed";
   agentId?: string;
   origin?: Origin;
+  captureKey?: string;
   sourceObservationIds?: string[];
   project?: string;
   codexSource?: {
@@ -300,6 +322,9 @@ export interface HookPayload {
   cwd: string;
   timestamp: string;
   data: unknown;
+  eventId?: string;
+  observationId?: string;
+  captureKey?: string;
 }
 
 export interface ProviderConfig {
@@ -335,6 +360,7 @@ export interface AgentMemoryConfig {
   engineUrl: string;
   restPort: number;
   streamsPort: number;
+  viewerPort: number;
   provider: ProviderConfig;
   tokenBudget: number;
   maxObservationsPerSession: number;
@@ -381,6 +407,7 @@ export interface HealthSnapshot {
     heapUsed: number;
     heapTotal: number;
     heapSizeLimit?: number;
+    heapLimit?: number;
     rss: number;
     external: number;
   };
@@ -388,6 +415,7 @@ export interface HealthSnapshot {
   eventLoopLagMs: number;
   uptimeSeconds: number;
   kvConnectivity?: { status: string; latencyMs?: number; error?: string };
+  streamRelay?: "ok" | "down" | "unknown";
   status: "healthy" | "degraded" | "critical";
   alerts: string[];
   notes?: string[];
@@ -495,7 +523,7 @@ export interface ExportPagination {
 
 export interface ExportData {
   archiveStates?: ArchiveState[];
-  version: typeof import("./version.js").ARCHIVE_LIFECYCLE_EXPORT_VERSION | "0.3.0" | "0.4.0" | "0.5.0" | "0.6.0" | "0.6.1" | "0.7.0" | "0.7.2" | "0.7.3" | "0.7.4" | "0.7.5" | "0.7.6" | "0.7.7" | "0.7.9" | "0.8.0" | "0.8.1" | "0.8.2" | "0.8.3" | "0.8.4" | "0.8.5" | "0.8.6" | "0.8.7" | "0.8.8" | "0.8.9" | "0.8.10" | "0.8.11" | "0.8.12" | "0.8.13" | "0.9.0" | "0.9.1" | "0.9.2" | "0.9.3" | "0.9.4" | "0.9.5" | "0.9.6" | "0.9.7" | "0.9.8" | "0.9.9" | "0.9.10" | "0.9.11" | "0.9.12" | "0.9.13" | "0.9.14" | "0.9.15" | "0.9.16" | "0.9.17" | "0.9.18" | "0.9.19" | "0.9.20" | "0.9.21" | "0.9.22" | "0.9.23" | "0.9.24" | "0.9.25" | "0.9.26" | "0.9.27" | "0.9.28" | "0.9.29" | "0.9.29-codex-lifecycle-1";
+  version: typeof import("./version.js").ARCHIVE_LIFECYCLE_EXPORT_VERSION | "0.3.0" | "0.4.0" | "0.5.0" | "0.6.0" | "0.6.1" | "0.7.0" | "0.7.2" | "0.7.3" | "0.7.4" | "0.7.5" | "0.7.6" | "0.7.7" | "0.7.9" | "0.8.0" | "0.8.1" | "0.8.2" | "0.8.3" | "0.8.4" | "0.8.5" | "0.8.6" | "0.8.7" | "0.8.8" | "0.8.9" | "0.8.10" | "0.8.11" | "0.8.12" | "0.8.13" | "0.9.0" | "0.9.1" | "0.9.2" | "0.9.3" | "0.9.4" | "0.9.5" | "0.9.6" | "0.9.7" | "0.9.8" | "0.9.9" | "0.9.10" | "0.9.11" | "0.9.12" | "0.9.13" | "0.9.14" | "0.9.15" | "0.9.16" | "0.9.17" | "0.9.18" | "0.9.19" | "0.9.20" | "0.9.21" | "0.9.22" | "0.9.23" | "0.9.24" | "0.9.25" | "0.9.26" | "0.9.27" | "0.9.28" | "0.9.29" | "0.9.30" | "0.9.29-codex-lifecycle-1";
   exportedAt: string;
   sessions: Session[];
   observations: Record<string, CompressedObservation[]>;
@@ -649,11 +677,6 @@ export interface GraphQueryResult {
   // revision change means a writer committed between page requests.
   edgeInventoryRevision?: string;
   depth: number;
-  // #753: pagination + truncation signals for large graphs. `total*`
-  // counts reflect the full unbounded result for the given filter so
-  // the viewer can show "showing N of M" without re-querying. `truncated`
-  // is true when the default cap kicked in (operator may have wanted
-  // the full set but didn't ask for one).
   totalNodes?: number;
   totalEdges?: number;
   truncated?: boolean;
@@ -674,13 +697,10 @@ export interface GraphQueryResult {
   queryIndexRebuilt?: boolean;
   // #814: when the exact index is unavailable, expose an explanatory note
   // so clients can distinguish a bounded snapshot from an exact result.
+  degrees?: Record<string, number>;
   warning?: string;
 }
 
-// #814: persisted top-degree subgraph + aggregate counts. Stored under
-// KV.graphSnapshot with a single key "current". `dirty` is set true by
-// mem::graph-extract after writes and flipped false when the snapshot
-// rebuild completes.
 export interface GraphSnapshot {
   version: 1;
   topNodes: GraphNode[];
@@ -699,11 +719,6 @@ export interface GraphSnapshot {
   };
   updatedAt: string;
   dirty: boolean;
-  // #825 follow-up: ISO timestamp set by mem::graph-reset. After
-  // reset, mem::graph-extract treats any pre-resetAt node as an
-  // orphan (skip merge, write fresh) so future extracts don't
-  // silently reconnect to legacy rows via stale name-index entries.
-  // Absent / 1970 epoch = no reset has run.
   resetAt?: string;
 }
 
@@ -718,6 +733,7 @@ export interface SemanticMemory {
   strength: number;
   createdAt: string;
   updatedAt: string;
+  lastDecayedAt?: string;
 }
 
 export interface ProceduralMemory {
@@ -734,6 +750,7 @@ export interface ProceduralMemory {
   strength: number;
   createdAt: string;
   updatedAt: string;
+  lastDecayedAt?: string;
 }
 
 export interface TeamConfig {
@@ -821,12 +838,35 @@ export interface AuditEntry {
     | "graph_provenance_reconcile"
     | "session_exclude"
     | "session_capture_reactivated"
-    | "slot_reflect";
+    | "slot_reflect"
+    | "graph_compact"
+    | "audit_migrate"
+    | "session_sweep";
   userId?: string;
   functionId: string;
   targetIds: string[];
   details: Record<string, unknown>;
   qualityScore?: number;
+}
+
+export interface AuditMonthIndex {
+  months: string[];
+}
+
+export interface AuditMigrationState {
+  status: "too-large" | "unreadable" | "copied" | "done";
+  safeToListLegacy: boolean;
+  legacySizeBytes?: number;
+  migrated: number;
+  purged: number;
+  summaryWritten: boolean;
+  checkedAt: string;
+}
+
+export interface AuditQueryResult {
+  entries: AuditEntry[];
+  legacyFrozen: boolean;
+  legacyFrozenBytes?: number;
 }
 
 export interface GovernanceFilter {
@@ -1097,10 +1137,6 @@ export interface TemporalState {
 
 export interface RetentionScore {
   memoryId: string;
-  // Which KV scope this row came from. Needed by mem::retention-evict
-  // so the delete loop routes to KV.memories or KV.semantic correctly.
-  // Missing on pre-0.8.10 rows — callers must treat `undefined` as
-  // "unknown" and probe both scopes for backwards-compat. See #124.
   source?: "episodic" | "semantic";
   score: number;
   salience: number;

@@ -21,8 +21,8 @@
     },
     {
       "name": "SessionEnd",
-      "timeout_seconds": 5,
-      "work_budget_ms": 3000
+      "timeout_seconds": 3,
+      "work_budget_ms": 2000
     }
   ]
 }

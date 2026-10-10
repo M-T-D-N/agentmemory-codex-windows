@@ -19,7 +19,7 @@ and Codex CLI.
 
 > [!IMPORTANT]
 > This is an independent Technical Preview. It is based on
-> [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`, but it is
+> [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30`, but it is
 > not the official upstream repository, an `@agentmemory/*` npm release, or a
 > promise of upstream support. Do not use an upstream `npx` command or the
 > compatibility plugin manifests as a substitute for the Windows build and
@@ -30,8 +30,10 @@ full disclosure](#ai-development-disclosure).
 
 ## Start here
 
+Preview.15 packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
+
 1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
-2. Follow preparation, activation and MCP connection in order. Validate the service before connecting Codex; see the guide for the expected result.
+2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
 3. If a step fails, use [support and recovery guidance](SUPPORT.md). Report the release and failing phase with a short redacted error; do not attach memory databases or credentials.
 
 ## What this preview does
@@ -61,7 +63,7 @@ only canonical stores.
   stdio launcher only as a compatibility path.
 
 The upstream-compatible source surface contains 58 MCP tools. Its MCP surface
-is 58 tools, 6 resources, and 3 prompts; it also has 135 endpoints on port 3111,
+is 58 tools, 6 resources, and 3 prompts; it also has 143 endpoints on port 3111,
 12 portable hooks, and 17 skills. The supported Windows profile intentionally
 activates only the four managed hooks listed above.
 
@@ -74,6 +76,26 @@ only an explicit snapshot rebuild refreshes them.
 
 Release changes are recorded in [CHANGELOG.md](CHANGELOG.md). Source tags
 identify public releases; each build manifest records its own qualification.
+
+## Changes in preview.15
+
+- Integrates upstream AgentMemory 0.9.30 while preserving canonical source text, exact-project filtering and graph provenance.
+- Uses one installer for new installations, managed updates and qualified original upstream adoption; newer unsupported upstream versions are retained rather than silently downgraded.
+- Pins iii 0.22.1 with the file flush barrier and bounded state/stream pagination. Acknowledged managed writes wait for the barrier; process-crash qualification does not certify power-loss recovery.
+- Settles deliberately skipped captures without false dead letters and distinguishes graph-provider availability from intentionally disabled general LLM features.
+- Removes each successful build invocation's own disposable scratch unit; failures remain available for diagnosis. Shared caches, release packages and canonical data are separate.
+
+See [release notes](CHANGELOG.md) for verification scope and retained limitations.
+
+## Changes in preview.15
+
+- Integrates upstream AgentMemory 0.9.30 while preserving canonical source text, exact-project filtering and graph provenance.
+- Uses one installer for new installations, managed updates and qualified original upstream adoption; newer unsupported upstream versions are retained rather than silently downgraded.
+- Pins iii 0.22.1 with the file flush barrier and bounded state/stream pagination. Acknowledged managed writes wait for the barrier; process-crash qualification does not certify power-loss recovery.
+- Settles deliberately skipped captures without false dead letters and distinguishes graph-provider availability from intentionally disabled general LLM features.
+- Removes each successful build invocation's own disposable scratch unit; failures remain available for diagnosis. Shared caches, release packages and canonical data are separate.
+
+See [release notes](CHANGELOG.md) for verification scope and retained limitations.
 
 ## How search, filtering, and indexes work
 
@@ -162,20 +184,20 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.14` | Public version and source tag |
-| AgentMemory compatibility | `0.9.29` | CLI, MCP, package, API, export, and installed-runtime compatibility |
+| Downstream release | `0.1.0-preview.15` | Public source tag and pinned installer distribution |
+| AgentMemory compatibility | `0.9.30` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
-| iii engine | `0.11.2` | Pinned native runtime input, verified by SHA-256 during the build |
+| iii engine | `0.22.1` | Pinned patched native runtime input, verified by SHA-256 during the build |
 
 The exact upstream tag, commit, tree, and pristine package hash are recorded in
 [`upstream-source.json`](upstream-source.json).
 
 ## Install without building
 
-Use the preview.14 GitHub release ZIP or its version-pinned TGZ launcher with the
+Use the preview.15 GitHub release ZIP or its version-pinned TGZ launcher with the
 [pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
-It covers empty-root preparation, separate activation, existing-install updates,
-and offline hash verification. The GitHub TGZ can be run with npm without a
+It covers automatic empty-root installation, optional separate preparation/activation,
+managed updates, original upstream adoption, and offline hash verification. The GitHub TGZ can be run with npm without a
 separate npm-registry publication. Users need Windows x64, Node.js 24+, and Codex;
 pnpm, Python, and compilers are only needed by source builders.
 
@@ -185,7 +207,7 @@ pnpm, Python, and compilers are only needed by source builders.
 - Node.js 24 or newer
 - Python 3 on PATH for the plaintext HTTP regression tests (CI uses Python 3.12)
 - pnpm `11.19.0` through the repository's pinned package-manager declaration
-- The pinned downstream-patched iii engine `0.11.2` Windows executable whose SHA-256 matches
+- The pinned downstream-patched iii engine `0.22.1` Windows executable whose SHA-256 matches
   [`packaging/windows-codex/config/third-party-inputs.json`](packaging/windows-codex/config/third-party-inputs.json)
 
 The npm launcher uses a prebuilt release ZIP. The binaries are not Authenticode-signed;
@@ -197,13 +219,14 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.14 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.15 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
-  -ReleaseRevision r83
+  -IiiEnginePath D:\inputs\iii-0.22.1.exe `
+  -ScratchDirectory D:\staging\agentmemory-build-temp `
+  -ReleaseRevision r189
 ```
 
 The normal builder verifies the pinned native input, restores the frozen lock,

@@ -1,11 +1,12 @@
 import { constants } from "node:fs";
 import { lstat, open, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { MemoryProvider } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { isNoopProvider } from "../providers/capabilities.js";
+import { confinePath, expandHome } from "./path-guard.js";
 
 const SENSITIVE_PATH_TERMS = [
   "secret",
@@ -94,7 +95,7 @@ function resolveBackupPath(filePath: string): string {
 }
 
 export function registerCompressFileFunction(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
@@ -112,9 +113,9 @@ export function registerCompressFileFunction(
         };
       }
 
-      const absolutePath = resolve(data.filePath);
-      const lowerPath = absolutePath.toLowerCase();
-      if (extname(absolutePath).toLowerCase() !== ".md") {
+      const requestedPath = resolve(expandHome(data.filePath));
+      const lowerPath = requestedPath.toLowerCase();
+      if (extname(requestedPath).toLowerCase() !== ".md") {
         return { success: false, error: "filePath must point to a .md file" };
       }
       if (SENSITIVE_PATH_TERMS.some((term) => lowerPath.includes(term))) {
@@ -122,7 +123,7 @@ export function registerCompressFileFunction(
       }
 
       try {
-        const stat = await lstat(absolutePath);
+        const stat = await lstat(requestedPath);
         if (stat.isSymbolicLink()) {
           return { success: false, error: "symlinks are not supported" };
         }
@@ -130,6 +131,9 @@ export function registerCompressFileFunction(
         return { success: false, error: "file not found" };
       }
 
+      const confined = await confinePath(requestedPath);
+      if (!confined.ok) return { success: false, error: confined.error };
+      const absolutePath = confined.path;
       let original: string;
       try {
         original = await readFile(absolutePath, "utf-8");

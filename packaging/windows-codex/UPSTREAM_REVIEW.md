@@ -1,5 +1,42 @@
 # Upstream compatibility review
 
+## Current 0.9.30 upgrade candidate (2026-10-10)
+
+The selected target is upstream `v0.9.30`, commit
+`8bf0c827aaaada297896b2b6efe2a64651ae9389`, with iii engine/SDK 0.22.1.
+The source merge preserves the managed Windows capture, exact-project filtering,
+complete provenance, scoped Qwen graph extraction and acknowledged file flush.
+The older selective-backport decisions below are historical comparison evidence;
+they do not describe the current candidate's engine or compatibility version.
+
+The single installer selects fresh installation, an owned managed update, or
+explicit adoption of a supported original file-backed 0.9.29/0.9.30 installation.
+Adoption keeps original data, verifies its copied recovery set, carries supported
+operational settings and authentication, and preserves the existing five ports.
+An unqualified newer version is rejected before changing it; unsupported storage
+requires its explicit export/import path. Recovery never guesses process ownership.
+
+Qualification requires actual Windows fresh-install and old-version update runs,
+including original-package adoption, preserved historical records and graph sources,
+authenticated REST/MCP access, filtering, restart persistence and recovery.
+Source/unit checks and isolated engine fixtures are supporting evidence, not a
+substitute for installed-runtime E2E. Diagnostic overlays are not release acceptance.
+
+Actual diagnostic installation exposed custom-port scheduled-task checks and a
+REST `remember` source-forwarding omission; both were repaired and verified through
+the installed REST/MCP paths. Original-package inspection also exposed PowerShell's
+reserved `HOME` name; inspection now uses the selected source home and a scoped
+regression. The public preview.15 remains a candidate until installation E2E completes.
+
+Diagnostic adoption of both official npm 0.9.29 and 0.9.30 preserved 25 original
+REST-written records, observations, engine-API graph fixtures, authentication,
+ports and the vector bucket setting. A deliberately failing startup exercised
+the real original CLI recovery. It exposed leftover candidate registrations and
+requirements; recovery now removes only the verified registrations and unchanged
+requirements created by that attempt, marks `adoption_failed`, and leaves both
+source data and copied recovery data intact. Stopped-install configuration lookup
+and quoted environment settings follow the original CLI's selected inputs.
+
 Role: upgrade guide and fixed comparison evidence, not an installation or migration contract.
 Reviewed 2026-09-30 through 2026-10-01 KST.
 
@@ -158,3 +195,56 @@ versus cleanup failure, and preserved strict archive retry behavior. Final whole
 validation is recorded in the retained task log; deployment qualification is separate.
 
 Final source tests passed 2,695 checks (18 intentionally skipped), plus 88 managed recall/hook checks. Distribution validation exposed a duplicate-case inherited `PSMODULEPATH` key; the existing npm PowerShell environment helper now normalizes Windows keys before applying its native-module override and rejects conflicting inherited duplicates. All 28 distribution/build validation checks then passed. This is a validation-blocking host environment fix, not a service installation. Detailed output remains in the task-owned validation logs.
+
+## Follow-up: managed request hardening (2026-10-10)
+
+Compared previous reviewed main `29ecfde4df5998d913991049629014baa024600a`
+with `da91cc05b3c79c59f6c0480f728bb9c09127e000`: 36 additional commits.
+[Immutable comparison](https://github.com/rohitg00/agentmemory/compare/29ecfde4df5998d913991049629014baa024600a...da91cc05b3c79c59f6c0480f728bb9c09127e000).
+The exact source archive was read; commit purposes were classified. This is not
+an exhaustive manual audit of all changed files.
+
+Adapted [request-hardening commit 194b0501](https://github.com/rohitg00/agentmemory/commit/194b05018dbcea31bd8f3c4431d3a677cce1960e):
+the upstream Origin/JSON-body check now runs in existing common HTTP auth paths
+and before the viewer forwards a request with its server bearer. Authenticated
+no-Origin JSON CLI, hook and MCP clients remain eligible. Viewer Host checks and
+bearer validation remain; allowed REST ports follow configured REST and actual
+viewer ports, including viewer fallback and ephemeral test ports.
+
+Before adaptation, a real local viewer POST from an unrelated Origin reached a
+fixture REST server (HTTP 204), and the common HTTP check accepted non-JSON bodies.
+Three regression checks failed. After adaptation these requests return 403/415
+before proxying; same-origin and no-Origin JSON writes still reach the fixture.
+This local HTTP execution is separate from installed-runtime qualification.
+
+| Additional upstream commits | Managed decision |
+|---|---|
+| 656ed604, df3d4a83: stale sweep, idle finalization and incremental summaries | Defer automatic abandonment and provider summaries; existing native reconciliation and session lifecycle own completion. No live session rewrite. |
+| e950d583, e975353e, 60b88a2a, abb87d2c, 695b7e4f, d03e88f6: capture filtering, transport, spool and host backfill | Retain qualified native capture and exact message IDs. No second spool or replacement portable hooks; other hosts not selected. |
+| 1abb2cb0, 976ad3e5: bounded provenance and boot compaction | Do not truncate retained source provenance or auto-compact canonical data; preserve shared references and cursors. |
+| 1c520555: unknown session end | Already handled by managed completeExistingSession and shared lifecycle locks. |
+| b3d6cf50: portable engine/save limits | Linux arena/fd changes do not apply; interval saves do not replace file-flush-v1. |
+| 194b0501, 803a668d, ae8946e1, 1f644359: hardening, tests/docs and merge | Adapt request Origin/JSON checks. Keep DPAPI and managed source privacy rules. Broader file confinement and write scrubbing require path-specific review. |
+| 461a9004: engine download/CI pins | Existing managed source/license/hash checks cover the engine; no engine replacement or unrelated CI copy. |
+| 525e8968: client secret resolution | Existing managed launcher supplies canonical DPAPI secret; no parallel secret store. |
+| 9d950920, e0339030: scrubbing and atomic confined files | Remain candidates for portable file functions; not copied over managed storage/archive/export contracts without qualification. |
+| cd4ca4eb, af584550, ad9e8899, 89b57716: vector pending log/backfill | Defer alternate persistence/backlog; retain generation publication, startup reconciliation and acknowledged writes. |
+| f40a6c18, 2eaf74f7: packed capture gate and cost benchmarks | Keep existing Windows qualification and real hook tests; no second gate or unmeasured performance claim. |
+| da78ea89: comment/reference cleanup | No runtime benefit; preserve useful failure provenance. |
+| 73fa8e48: dotenv | Not used by managed runtime; no dependency/runtime update. |
+| 2a00e7b3, 007a1a7f: Codex plugins | Keep managed launcher/hook/skill ownership; no duplicate registration. |
+| c51bf3f2: embedding keys, structured context, Docker | External embeddings remain disabled; preserve managed recall output and Windows engine config. |
+| a766b7c7: index audit regression | Retain existing mutation audits and persistence tests; do not copy incompatible newer persistence tests. |
+| 359c30ad, 8bf0c827: 0.9.30 metadata and translations | Preserve 0.9.29 compatibility and independent downstream version; selective backport is not a full release upgrade. |
+| c5549733: exact MCP shim | Managed versioned launcher already binds exact runtime; no latest-shim substitution. |
+| da91cc05: strongest prefix scores and evaluations | Downstream already uses strongest per-term prefix scores, numeric-prefix exclusion and Hangul ranking; retain those semantics. |
+
+Engine/SDK pins, data contract, Qwen ownership and source exclusions are unchanged.
+`upstream-source.json` still identifies the base v0.9.29; this section attributes
+the selective backport. A full 0.9.30 engine/storage upgrade was not performed.
+The historical 5456.393 ms transport outlier is not resolved by this security fix.
+
+Installed acceptance exposed the separately registered hook auth middleware, which
+still duplicated the older bearer-only check. It now calls the same common HTTP
+check as other endpoints; two registered-middleware regressions failed before that
+correction and pass afterward. The first r183 candidate was not accepted as final.

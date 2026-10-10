@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { withObservationWrite } from "../src/state/observation-write.js";
 import { describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
@@ -55,7 +56,7 @@ describe.each([false, true])("official explicit archive inspection and lifecycle
       expectedRevision: preview.expectedRevision, expectedDigest: preview.expectedDigest, reason: "Useful again" } })).toMatchObject({ status_code: 200, body: { changed: 1 } });
     expect((await readArchiveVisibility(f.kv as never))({ kind: "memory", id: "m" })).toBe(false);
     expect(await f.kv.get(KV.memories, "m")).toEqual(f.memory);
-    expect(await f.kv.list(KV.audit)).toHaveLength(2);
+    expect((await queryAudit(f.kv as never)).entries).toHaveLength(2);
   });
   it("lists only exact-project lifecycle metadata with bounded totals and no original content", async () => {
     const f = await fixture(engineMetadata);

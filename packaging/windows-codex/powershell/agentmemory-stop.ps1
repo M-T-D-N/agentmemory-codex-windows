@@ -57,7 +57,9 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($temporaryPath, $request, $utf8NoBom)
 Move-Item -LiteralPath $temporaryPath -Destination $stopPath -Force
 
-$reservedPorts = @(3111, 3112, 3113, 3114, 49134)
+. (Join-Path $PSScriptRoot 'agentmemory-layout.ps1')
+$servicePorts = Get-AgentMemoryServicePorts -Root $resolvedRoot
+$reservedPorts = @($servicePorts.rest, $servicePorts.stream, $servicePorts.viewer, $servicePorts.mcp, $servicePorts.engine)
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 do {
     $listeners = @(Get-StopReservedConnections)

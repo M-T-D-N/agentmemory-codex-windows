@@ -67,7 +67,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     await expect(sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "linked", observationIds: ["a"] } })).rejects.toThrow("all captures linked");
     expect(await kv.list("mem:obs:linked")).toEqual([original, alias]);
     expect(await kv.list("mem:codex:capture-exclusions")).toEqual([]);
-    expect(await kv.list("mem:audit")).toEqual([]);
+    expect(await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).toEqual([]);
     await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "linked", observationIds: ["a", "b"] } });
     expect(await kv.list("mem:obs:linked")).toEqual([]);
   });
@@ -106,7 +106,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     expect(result).toMatchObject({ success: true, referenceCount: 2, actualObservationCount: 2 });
     expect(result.targets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "blank", empty: true }), expect.objectContaining({ id: "raw", empty: false })]));
     expect(await kv.list("mem:obs:s")).toEqual(before);
-    expect(await kv.list("mem:audit")).toEqual([]);
+    expect(await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).toEqual([]);
     expect(await kv.get("mem:sessions", "s")).toMatchObject({ observationCount: 999 });
   });
 
@@ -127,7 +127,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const failed = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "s", observationIds: ["blank"], dryRun: true } });
     expect(failed).toMatchObject({ success: false, error: "LIST_GROUPS_ERROR" });
     expect(await kv.get("mem:obs:s", "blank")).not.toBeNull();
-    expect(await kv.list("mem:audit")).toEqual([]);
+    expect(await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).toEqual([]);
   });
 
   it("never expands empty observationIds to a whole-session deletion", async () => {
@@ -137,7 +137,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const result = await sdk.trigger({ function_id: "mem::forget", payload: { sessionId: "s", observationIds: [] } }) as { success: boolean };
     expect(result.success).toBe(false);
     expect(await kv.get("mem:obs:s", "o")).toMatchObject({ narrative: "keep" });
-    expect(await kv.list("mem:audit")).toEqual([]);
+    expect(await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).toEqual([]);
   });
 
   it("rejects unscoped previews and propagates incomplete reference reads", async () => {
@@ -164,7 +164,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const result = await sdk.trigger({ function_id: "mem::forget", payload: { memoryId: memory.id } }) as { deleted: number; cleanupFailures: Array<{ step: string }> };
     expect(result.deleted).toBe(1); expect(await get("mem:memories", memory.id)).toBeNull(); expect(getSearchIndex().has(memory.id)).toBe(false);
     expect(result.cleanupFailures.map(x => x.step)).toEqual(["image", "access"]);
-    const audit = await kv.list<{ targetIds: string[]; details: { cleanupFailed: number } }>("mem:audit");
+    const audit = await kv.list<{ targetIds: string[]; details: { cleanupFailed: number } }>(`mem:audit:${new Date().toISOString().slice(0, 7)}`);
     expect(audit).toHaveLength(1); expect(audit[0].targetIds).toContain(memory.id); expect(audit[0].details.cleanupFailed).toBe(2);
   });
 
@@ -177,7 +177,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const result = await sdk.trigger({ function_id: "mem::forget", payload: { project: "p", sessionId: "cleanup-session" } }) as { deleted: number; cleanupFailed: number };
     expect(result).toMatchObject({ deleted: 4, cleanupFailed: 1 }); expect(await kv.list("mem:obs:cleanup-session")).toEqual([]);
     expect(await get("mem:sessions", "cleanup-session")).toBeNull(); expect(await get("mem:summaries", "cleanup-session")).toBeNull();
-    expect(await kv.list("mem:audit")).toHaveLength(1);
+    expect(await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).toHaveLength(1);
   });
 
   it("discloses failed persistence without falsely reporting the confirmed deletion as failed", async () => {
@@ -187,7 +187,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     try {
       const result = await sdk.trigger({ function_id: "mem::forget", payload: { memoryId: "cleanup" } });
       expect(result).toMatchObject({ success: true, deleted: 1, cleanupFailed: 1, cleanupFailures: [{ step: "persistence" }] });
-      expect(save).toHaveBeenCalledOnce(); expect(save).toHaveBeenCalledWith({ requireSuccess: true }); expect(await kv.list("mem:audit")).toHaveLength(1);
+      expect(save).toHaveBeenCalledOnce(); expect(save).toHaveBeenCalledWith({ requireSuccess: true }); expect(await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).toHaveLength(1);
     } finally { setIndexPersistence(null); }
   });
 
@@ -196,7 +196,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     await kv.set("mem:memories", "cleanup", { id: "cleanup", content: "original" });
     kv.delete = async () => { throw Error("primary deletion failed"); };
     await expect(sdk.trigger({ function_id: "mem::forget", payload: { memoryId: "cleanup" } })).rejects.toThrow("primary deletion failed");
-    expect(await kv.get("mem:memories", "cleanup")).not.toBeNull(); expect(await kv.list("mem:audit")).toHaveLength(0);
+    expect(await kv.get("mem:memories", "cleanup")).not.toBeNull(); expect(await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).toHaveLength(0);
   });
 
   it("emits a single audit row when a memory is forgotten", async () => {
@@ -217,7 +217,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
       functionId: string;
       targetIds: string[];
       details: Record<string, unknown>;
-    }>("mem:audit");
+    }>(`mem:audit:${new Date().toISOString().slice(0, 7)}`);
     expect(auditRows).toHaveLength(1);
     const [row] = auditRows;
     expect(row.operation).toBe("forget");
@@ -253,7 +253,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const auditRows = await kv.list<{
       targetIds: string[];
       details: Record<string, unknown>;
-    }>("mem:audit");
+    }>(`mem:audit:${new Date().toISOString().slice(0, 7)}`);
     expect(auditRows).toHaveLength(1);
     const [row] = auditRows;
     expect([...row.targetIds].sort()).toEqual(["obs_a", "obs_b"]);
@@ -273,7 +273,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
       payload: { sessionId: undefined, memoryId: undefined },
     });
 
-    const auditRows = await kv.list("mem:audit");
+    const auditRows = await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`);
     expect(auditRows).toHaveLength(0);
   });
 
@@ -307,7 +307,7 @@ describe("mem::forget audit coverage (issue #125)", () => {
       payload: { memoryId: "lsn_4f9cb07017a7c8ac" },
     });
 
-    const auditRows = await kv.list("mem:audit");
+    const auditRows = await kv.list(`mem:audit:${new Date().toISOString().slice(0, 7)}`);
     expect(auditRows).toHaveLength(0);
   });
 });

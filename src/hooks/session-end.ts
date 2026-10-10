@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { resolveProject, hookCwd } from "./_project.js";
-import { REST_URL, authHeaders, isSdkChildContext } from "./_runtime.js";
+import { isSdkChildContext } from "./_runtime.js";
+import { REST_URL, authHeaders, captureObservation, isDrainChild, runDrainChild, withEventId } from "./_capture.js";
 
 function extractTranscriptPrompts(data: Record<string, unknown>): string[] {
   const path = data.transcript_path;
@@ -17,11 +18,21 @@ function extractTranscriptPrompts(data: Record<string, unknown>): string[] {
     if (!line.trim()) continue;
     let msg: {
       role?: string;
+      type?: string;
+      source?: string;
+      content?: unknown;
       message?: { content?: Array<{ type?: string; text?: string }> };
     };
     try {
       msg = JSON.parse(line);
     } catch {
+      continue;
+    }
+    if (msg.type === "USER_INPUT" && msg.source === "USER_EXPLICIT" && typeof msg.content === "string") {
+      if (prompts.length >= 50) return prompts;
+      const match = msg.content.match(/<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/);
+      const text = (match ? match[1] : msg.content).trim();
+      if (text) prompts.push(text.slice(0, 8000));
       continue;
     }
     if (msg.role !== "user") continue;
@@ -37,6 +48,8 @@ function extractTranscriptPrompts(data: Record<string, unknown>): string[] {
 }
 
 async function main() {
+  if (isSdkChildContext(undefined)) return;
+  if (isDrainChild()) return runDrainChild();
   let input = "";
   for await (const chunk of process.stdin) {
     input += chunk;
@@ -60,26 +73,13 @@ async function main() {
     const project = resolveProject(cwd);
     const timestamp = new Date().toISOString();
     const deadline = Date.now() + 3000;
-    for (const prompt of transcriptPrompts) {
+    for (const [index, prompt] of transcriptPrompts.entries()) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) break;
-      try {
-        await fetch(`${REST_URL}/agentmemory/observe`, {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            hookType: "prompt_submit",
-            sessionId,
-            project,
-            cwd,
-            timestamp,
-            data: { prompt },
-          }),
-          signal: AbortSignal.timeout(remainingMs),
-        });
-      } catch {
-        break;
-      }
+      await captureObservation(withEventId({
+        hookType: "prompt_submit", sessionId, project, cwd, timestamp,
+        data: { prompt, backfill: true },
+      }, {}, { source: "transcript", transcript: data.transcript_path, index, prompt }, { stable: true }), remainingMs);
     }
   }
 

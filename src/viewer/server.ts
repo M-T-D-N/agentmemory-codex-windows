@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderViewerDocument } from "./document.js";
-import { timingSafeCompare } from "../auth.js";
+import { checkRequestGuard, configuredAllowedOrigins, timingSafeCompare } from "../auth.js";
 
 // Self-host the viewer favicon at /favicon.svg instead of an inline
 // data: URI so the viewer CSP can stay tight at `img-src 'self'`.
@@ -307,6 +307,17 @@ export function startViewerServer(
         "WWW-Authenticate": 'Bearer realm="agentmemory-viewer"',
       });
       res.end("unauthorized");
+      return;
+    }
+
+    const rejected = checkRequestGuard({
+      method,
+      headers: req.headers,
+      allowedOrigins: configuredAllowedOrigins([resolvedRestPort, getBoundViewerPort()]),
+      sameOriginHost: req.headers.host,
+    });
+    if (rejected) {
+      json(res, rejected.status_code, rejected.body, req);
       return;
     }
 

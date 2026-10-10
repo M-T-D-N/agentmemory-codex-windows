@@ -1,3 +1,5 @@
+import { getSearchIndex } from "../src/functions/search.js";
+import { archiveTargetAddress } from "../src/functions/archive.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/logger.js", () => ({
@@ -63,6 +65,12 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", sourceKind: "other" } })).toMatchObject({ status_code: 400 });
     expect(await sdk.trigger("api::search", { body: { query: "rounding", project: "*", searchMode: "other" } })).toMatchObject({ status_code: 400 });
     expect(sdk.downstream.length).toBe(count);
+  });
+
+  it("carries explicit session and observation provenance through REST remember", async () => {
+    const sources = [{ sessionId: "source-session", observationIds: ["source-observation"] }];
+    expect(await sdk.trigger("api::remember", { body: { project: "project-a", content: "Preserve the decision's original evidence", sources, ignored: "drop" } })).toMatchObject({ status_code: 201 });
+    expect(sdk.downstream.at(-1)).toEqual({ functionId: "mem::remember", payload: { project: "project-a", content: "Preserve the decision's original evidence", sources } });
   });
 
   it("preserves the official non-reinforcing search option and rejects non-boolean values", async () => {
@@ -183,7 +191,7 @@ describe("REST exact-project and provenance boundaries", () => {
       body: { sessionId: "session-end" },
     })) as { status_code: number; body: unknown };
 
-    expect(response).toEqual({ status_code: 200, body: { success: true } });
+    expect(response).toEqual({ status_code: 200, body: { success: true, ended: true } });
     expect(await kv.get<Record<string, unknown>>("mem:sessions", "session-end"))
       .toMatchObject({ status: "completed", observationCount: 3 });
     expect(sdk.downstream).toEqual([
@@ -613,7 +621,7 @@ describe("REST exact-project and provenance boundaries", () => {
       "mem:sessions",
       "session-excluded",
     );
-    const auditRows = await kv.list<Record<string, unknown>>("mem:audit");
+    const auditRows = await kv.list<Record<string, unknown>>(`mem:audit:${new Date().toISOString().slice(0, 7)}`);
 
     expect(response.status_code).toBe(200);
     expect(response.body.success).toBe(true);
@@ -650,7 +658,7 @@ describe("REST exact-project and provenance boundaries", () => {
       "mem:sessions",
       "session-internal-only",
     );
-    const auditRows = await kv.list<Record<string, unknown>>("mem:audit");
+    const auditRows = await kv.list<Record<string, unknown>>(`mem:audit:${new Date().toISOString().slice(0, 7)}`);
 
     expect(response.status_code).toBe(200);
     expect(response.body.success).toBe(true);
@@ -730,4 +738,49 @@ describe("REST exact-project and provenance boundaries", () => {
     expect(response.status_code).toBe(statusCode);
     expect(session?.captureExcluded).toBeUndefined();
   });
+  it("routes validated upstream event IDs through capture and rejects invalid IDs", async () => {
+    let captured: unknown;
+    sdk.registerFunction("mem::capture", async payload => {
+      captured = payload;
+      return { status: "accepted", state: "completed", eventId: "ev_fixture_030", observationId: "obs_capture", attempts: 1 };
+    });
+    const payload = { hookType: "post_tool_use", sessionId: "capture-session", project: "billing", cwd: "/repo", timestamp: "2026-01-01T00:00:00Z", data: { toolName: "Read" } };
+    expect(await sdk.trigger("api::observe", { body: { ...payload, eventId: "ev_fixture_030", arbitrary: "drop" } }))
+      .toMatchObject({ status_code: 201, body: { status: "accepted", eventId: "ev_fixture_030" } });
+    expect(captured).toEqual({ payload, eventId: "ev_fixture_030" });
+    captured = undefined;
+    expect(await sdk.trigger("api::observe", { body: { ...payload, eventId: "bad id" } })).toMatchObject({ status_code: 400 });
+    expect(captured).toBeUndefined();
+  });
+
+  it("locates observations only within project, agent, archive and exclusion boundaries", async () => {
+    const ids = ["visible", "wrong-project", "wrong-agent", "archived", "excluded"];
+    for (const id of ids) {
+      await kv.set("mem:sessions", "session-" + id, {
+        id: "session-" + id, project: id === "wrong-project" ? "other" : "billing",
+        cwd: "/repo", startedAt: "2026-01-01T00:00:00Z", status: "active", observationCount: 1,
+        agentId: id === "wrong-agent" ? "agent-b" : "agent-a",
+        ...(id === "excluded" ? { captureExcluded: true } : {}),
+      });
+      await kv.set("mem:obs:session-" + id, id, {
+        id, sessionId: "session-" + id, timestamp: "2026-01-01T00:00:00Z",
+        type: "discovery", title: "ordinary observation", narrative: "normal content",
+        facts: [], concepts: [], files: [], importance: 3, agentId: "agent-a",
+      });
+    }
+    const target = { kind: "observation" as const, id: "archived", sessionId: "session-archived" };
+    const address = archiveTargetAddress(target);
+    await kv.set("mem:archive:states", address.key, {
+      version: 1, id: address.key, target, project: "billing", state: "archived", revision: 1,
+      changedAt: "2026-01-01T00:00:00Z", reason: "test archive", auditId: "audit-fixture",
+      targetDigest: "a".repeat(64),
+    });
+    const spy = vi.spyOn(getSearchIndex(), "sessionOf").mockImplementation(id => "session-" + id);
+    try {
+      expect(await sdk.trigger("api::observations-locate", { query_params: { ids: ids.join(","), project: "billing", agentId: "agent-a" } }))
+        .toEqual({ status_code: 200, body: { sessions: { visible: "session-visible" } } });
+      expect(await sdk.trigger("api::observations-locate", { query_params: { ids: "visible" } })).toMatchObject({ status_code: 400 });
+    } finally { spy.mockRestore(); }
+  });
+
 });

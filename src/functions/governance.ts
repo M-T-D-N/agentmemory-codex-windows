@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { Memory, GovernanceFilter, AuditEntry } from "../types.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
@@ -10,8 +10,9 @@ import { registerObservationWriter } from "../state/observation-write.js";
 import { prepareArchiveTargetForget } from "./archive-forget.js";
 
 const exactProject = (project: unknown) => typeof project === "string" && Boolean(project) && project === project.trim() && project !== "*" && project.length <= 512 && !project.includes("\0");
+const bulkKeys = new Set(["type", "dateFrom", "dateTo", "project", "qualityBelow", "dryRun", "reason"]);
 
-export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
+export function registerGovernanceFunction(sdk: IIIClient, kv: StateKV): void {
   registerObservationWriter(sdk, "mem::governance-delete",
     async (data: { memoryIds: string[]; reason?: string; project?: string }) => {
       if (
@@ -30,29 +31,45 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
       }
       const finishArchive = await prepareArchiveTargetForget(kv, data.memoryIds.map(id => ({ kind: "memory", id })), data.project, "mem::governance-delete");
 
-      let deleted = 0;
-      for (const id of data.memoryIds) {
-        const mem = await kv.get<Memory>(KV.memories, id);
-        if (mem) {
+      const deletedIds: string[] = [];
+      const failures: Array<{ id: string; error: string }> = [];
+      const notFound: string[] = [];
+      let archiveStatesRemoved = 0;
+      for (const id of new Set(data.memoryIds)) {
+        try {
+          const mem = await kv.get<Memory>(KV.memories, id);
+          if (!mem) {
+            notFound.push(id);
+            archiveStatesRemoved += await finishArchive({ kind: "memory", id });
+            continue;
+          }
           await kv.delete(KV.memories, id);
-          await deleteAccessLog(kv, id);
+          deletedIds.push(id);
           getSearchIndex().remove(id);
           vectorIndexRemove(id);
-          deleted++;
+          const cleanup = await Promise.allSettled([
+            deleteAccessLog(kv, id),
+            finishArchive({ kind: "memory", id }).then(count => { archiveStatesRemoved += count; }),
+          ]);
+          if (cleanup.some(result => result.status === "rejected")) failures.push({ id, error: "cleanup_failed" });
+        } catch {
+          failures.push({ id, error: deletedIds.includes(id) ? "cleanup_failed" : "delete_failed" });
         }
       }
-      const archiveStatesRemoved = await finishArchive();
+      const deleted = deletedIds.length;
 
       if (deleted > 0) await flushIndexSave();
 
-      await recordAudit(
+      if (deleted > 0) await recordAudit(
         kv,
         "delete",
         "mem::governance-delete",
-        data.memoryIds,
+        deletedIds,
         {
           reason: data.reason || "manual deletion",
           deleted,
+          notFound,
+          failures: failures.length ? failures : undefined,
         },
       );
 
@@ -60,20 +77,21 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
         requested: data.memoryIds.length,
         deleted,
       });
-      return { success: true, deleted, total: data.memoryIds.length, ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}) };
+      return { success: failures.length === 0, deleted, notFound, failed: failures.length, failures: failures.length ? failures : undefined, total: data.memoryIds.length, ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}) };
     },
   );
 
   registerObservationWriter(sdk, "mem::governance-bulk",
     async (data: GovernanceFilter & { dryRun?: boolean }) => {
-
+      const unknown = Object.keys(data).filter(key => !bulkKeys.has(key));
+      if (unknown.length) return { success: false, error: `Unsupported bulk delete filter: ${unknown.join(", ")}` };
       const hasFilter =
         (data.type && data.type.length > 0) ||
         data.dateFrom ||
         data.dateTo ||
         data.qualityBelow !== undefined || data.project !== undefined;
-      if (data.project !== undefined && !exactProject(data.project)) return { success: false, error: "exact project is required" };
-      if (!hasFilter && !data.dryRun) {
+      if (data.project !== undefined && !exactProject(data.project)) return { success: false, error: "project must be a non-empty string naming an exact project" };
+      if (!hasFilter) {
         return {
           success: false,
           error: "At least one filter is required for non-dryRun bulk delete",
@@ -122,23 +140,33 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
       const BATCH_SIZE = 50;
       let archiveStatesRemoved = 0;
       const successfulIds: string[] = [];
+      const notFound: string[] = [];
       const failures: Array<{ id: string; error: string }> = [];
       for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
         const batch = candidates.slice(i, i + BATCH_SIZE);
         const results = await Promise.allSettled(
           batch.map(async (mem) => {
+            const current = await kv.get<Memory>(KV.memories, mem.id);
+            if (!current) { notFound.push(mem.id); return; }
+            if ((data.project !== undefined && current.project !== data.project) ||
+                (data.type?.length && !data.type.includes(current.type)) ||
+                (data.dateFrom && Date.parse(current.createdAt) < Date.parse(data.dateFrom)) ||
+                (data.dateTo && Date.parse(current.createdAt) > Date.parse(data.dateTo)) ||
+                (data.qualityBelow !== undefined && !(current.strength < data.qualityBelow))) throw Error("candidate_changed");
             await kv.delete(KV.memories, mem.id);
-            await deleteAccessLog(kv, mem.id);
+            successfulIds.push(mem.id);
             getSearchIndex().remove(mem.id);
             vectorIndexRemove(mem.id);
-            archiveStatesRemoved += await finishArchive({ kind: "memory", id: mem.id });
+            const cleanup = await Promise.allSettled([
+              deleteAccessLog(kv, mem.id),
+              finishArchive({ kind: "memory", id: mem.id }).then(count => { archiveStatesRemoved += count; }),
+            ]);
+            if (cleanup.some(result => result.status === "rejected")) throw Error("cleanup_failed");
           }),
         );
         results.forEach((result, j) => {
           const mem = batch[j];
-          if (result.status === "fulfilled") {
-            successfulIds.push(mem.id);
-          } else {
+          if (result.status === "rejected") {
             logger.warn("Governance bulk delete failed", {
               memoryId: mem.id,
               error:
@@ -148,7 +176,7 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
             });
             failures.push({
               id: mem.id,
-              error: "delete_failed",
+              error: successfulIds.includes(mem.id) ? "cleanup_failed" : "delete_failed",
             });
           }
         });
@@ -156,7 +184,7 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
 
       if (successfulIds.length > 0) await flushIndexSave();
 
-      await safeAudit(
+      if (successfulIds.length > 0) await safeAudit(
         kv,
         "delete",
         "mem::governance-bulk",
@@ -171,11 +199,13 @@ export function registerGovernanceFunction(sdk: ISdk, kv: StateKV): void {
 
       logger.info("Governance bulk delete", {
         deleted: successfulIds.length,
+        notFound,
         failed: failures.length,
       });
       return {
         success: failures.length === 0,
         deleted: successfulIds.length,
+        notFound,
         failed: failures.length,
         failures: failures.length > 0 ? failures : undefined,
         ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}),

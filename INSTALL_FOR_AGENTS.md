@@ -1,7 +1,7 @@
 # Evaluate AgentMemory for Codex on Windows (agent runbook)
 
-This runbook is for coding agents evaluating the independent source-only
-Technical Preview `0.1.0-preview.3` on native Windows.
+This runbook is for coding agents evaluating the independent
+Technical Preview `0.1.0-preview.15` on native Windows.
 
 > [!IMPORTANT]
 > Do not install `@agentmemory/*` from npm, run an upstream `npx` command, use
@@ -24,16 +24,17 @@ Technical Preview `0.1.0-preview.3` on native Windows.
 
 ## 1. Confirm prerequisites
 
-Run on Windows with PowerShell 5.1 or newer, Node.js 20 or newer, and pnpm
+Run on Windows with PowerShell 5.1 or newer, Node.js 24 or newer, and pnpm
 `11.19.0`, plus Python 3 on PATH for the HTTP regression tests (CI uses 3.12).
-Obtain the official iii engine `0.11.2` Windows executable from its upstream release.
+For a prebuilt installation use the [pinned launcher guide](packaging/windows-codex/npm/README.md); upstream installation is not a prerequisite.
+Source builders must use the downstream-patched iii engine `0.22.1`, rebuilt with the pinned patch and toolchain described in the [operating guide](packaging/windows-codex/README.md#storage-acknowledgement-and-crash-qualification). The unmodified upstream binary does not match the required hash.
 
 Verify that its SHA-256 equals the value in
 `packaging/windows-codex/config/third-party-inputs.json`. Stop on any mismatch.
 
 ## 2. Verify the source checkout
 
-Use the `v0.1.0-preview.3` tag for this runbook and record `git rev-parse HEAD`.
+Use the `v0.1.0-preview.15` tag for this runbook and record `git rev-parse HEAD`.
 From the repository root:
 
 ```powershell
@@ -56,19 +57,20 @@ Choose a new staging path and the exact verified iii executable:
 ```powershell
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
-  -ReleaseRevision r83
+  -IiiEnginePath D:\inputs\iii-0.22.1.exe `
+  -ScratchDirectory D:\staging\agentmemory-build-temp `
+  -ReleaseRevision r189
 ```
 
 Expect a folder named
-`agentmemory-codex-windows-0.1.0-preview.3`. Its `release-manifest.json` must
+`agentmemory-codex-windows-0.1.0-preview.15`. Its `release-manifest.json` must
 identify:
 
 - product `AgentMemory for Codex on Windows`;
 - product ID `agentmemory-codex-windows`;
-- downstream version `0.1.0-preview.3`;
-- AgentMemory compatibility version `0.9.29`; and
-- qualification revision `r83` when using the example command.
+- downstream version `0.1.0-preview.15`;
+- AgentMemory compatibility version `0.9.30`; and
+- qualification revision `r189` when using the example command.
 
 The generated folder is a diagnostic candidate, not a signed public release.
 
@@ -78,8 +80,8 @@ Use an owned AgentMemoryCodex installation, workspace root, project registry,
 and Node executable. Omit `-Execute`:
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.3\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.3 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -97,7 +99,7 @@ actual cutover.
 ## 5. Update an owned installation
 
 Use a fresh staging directory and an unused runtime revision in the form
-`-ReleaseRevision rN`. The example r83 label must be changed if that revision
+`-ReleaseRevision rN`. The example r189 label must be changed if that revision
 already exists. A public preview version and an internal runtime revision are
 different identities; a new public version never permits same-revision replacement.
 
@@ -111,7 +113,7 @@ preview; updating does not perform a data migration.
 
 ## 6. Understand the tool surface
 
-The compatibility MCP server exposes 57 tools by default. The 8 core tools cover save, recall, consolidate, smart search, sessions, diagnose, lesson save, and reflect.
+The compatibility MCP server exposes 58 tools by default. The 8 core tools cover save, recall, consolidate, smart search, sessions, diagnose, lesson save, and reflect.
 
 The supported Windows profile uses authenticated loopback MCP and four managed
 Codex hooks. It preserves exact-project writes and provenance, while deliberate
@@ -121,13 +123,12 @@ loopback-only and graph-scoped; all other LLM functions use the noop provider.
 New committed observations wake the existing graph scheduler, but storing a
 response does not classify its content as verified. Codex selects durable
 decisions through official curation tools. Qwen, when configured and available,
-provides optional graph enrichment; AgentMemory does not start the model itself.
+provides optional graph enrichment. With an existing configured Windows LocalAI integration, the adapter may request conditional startup for eligible backlog and releases only a model instance it owns; hosts without that integration use an already running provider.
 See the README for timing and the operating guide for host readiness integration.
 
 ## Troubleshooting
 
-- Hash mismatch: discard the native input and obtain the pinned official
-  release again. Never change the expected hash to match an unknown binary.
+- Hash mismatch: retain the unexpected input for diagnosis and obtain or rebuild the exact pinned downstream-patched binary. Never change the expected hash to match an unknown binary.
 - Build failure: preserve the first relevant error and report the command,
   Node/pnpm versions, and affected file. Do not publish partial output.
 - Installer `ready: false` or an exception: do not add `-Execute`; resolve the

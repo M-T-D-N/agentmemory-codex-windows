@@ -259,6 +259,13 @@ test("normal user text is preserved without trimming or sensitivity-based reject
   assert.equal(promptText(text), text);
 });
 
+test("app-generated next-message requests are excluded while quoted examples remain user content", () => {
+  const text = "This is an app-generated request for a suggested next user message. The user did not write this message.\n\nYour suggestion will appear in the user's empty message composer.";
+  assert.equal(isInternalCodexAmbientPrompt(text), true);
+  assert.equal(isInternalCodexAmbientPrompt("이 문구를 설명해 줘: " + text), false);
+  assert.equal(isInternalCodexAmbientPrompt("```text\n" + text + "\n```"), false);
+});
+
 test("ambient UI state is removed without discarding the surrounding user message", () => {
   const prompt = "사용자 원문\n<ctx source=\"ambient-ui-state\">internal state</ctx>마지막 문장";
   assert.equal(promptText(prompt), "사용자 원문\n마지막 문장");
@@ -1006,7 +1013,11 @@ test("an incomplete graph snapshot cannot masquerade as current evidence or an e
 
 test("hook work deadlines leave room for host startup and preserve the expanded context limit", () => {
   const spec = JSON.parse(readFileSync(new URL("../config/hook-spec.json", import.meta.url), "utf8"));
-  for (const event of spec.events) assert.ok((event.work_budget_max_ms ?? event.work_budget_ms) + 2000 <= event.timeout_seconds * 1000);
+  for (const event of spec.events) {
+    const startupBudget = event.name === "SessionEnd" ? 1000 : 2000;
+    assert.ok((event.work_budget_max_ms ?? event.work_budget_ms) + startupBudget <= event.timeout_seconds * 1000);
+    if (event.name === "SessionEnd") assert.ok(event.timeout_seconds <= 3);
+  }
   assert.equal(spec.events.find(event => event.name === "UserPromptSubmit").additional_context_limit, 7600);
 });
 
@@ -2131,4 +2142,30 @@ test("managed capture and recall share native effort-request exclusion", () => {
   assert.equal(promptText(older),null);
   const quoted="이 JSON을 검토해줘\n"+older;
   assert.equal(promptText(quoted),quoted);
+});
+
+test("SessionEnd confirms a 1200ms service response within its host deadline", async () => {
+  const server = createServer((_req, res) => setTimeout(() => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ success: true }));
+  }, 1200));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const result = await new Promise((resolveResult, reject) => {
+      const child = spawn(process.execPath, [resolve(import.meta.dirname, "../hooks/codex-turn.mjs")], {
+        env: { ...process.env, AGENTMEMORY_URL: "http://127.0.0.1:" + server.address().port, AGENTMEMORY_SECRET: "" },
+        stdio: ["pipe", "ignore", "pipe"], windowsHide: true,
+      });
+      let stderr = "";
+      child.stderr.on("data", chunk => { stderr += chunk; });
+      child.on("error", reject);
+      child.on("close", code => resolveResult({ code, stderr }));
+      child.stdin.end(JSON.stringify({ hook_event_name: "SessionEnd", session_id: "synthetic-delayed-end" }));
+    });
+    assert.equal(result.code, 0, result.stderr);
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolveClose => server.close(resolveClose));
+  }
 });

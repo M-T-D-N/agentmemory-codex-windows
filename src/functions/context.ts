@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type {
   Session,
   CompressedObservation,
@@ -22,6 +22,7 @@ import { summarySourceDigest, SUMMARY_VISIBILITY_REVISION } from "./summary-visi
 import { isCodexInternalAmbientText, isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation } from "./observation-visibility.js";
 import { estimateTextTokens } from "../token-estimate.js";
 import { readArchiveVisibility } from "./archive.js";
+import { ensureProjectSessionIndex, getProjectSessionIndex } from "../state/session-index.js";
 
 function escapeXmlAttr(s: string): string {
   return s
@@ -47,7 +48,7 @@ export interface ContextResult {
 export type ContextReader = (data: ContextRequest) => Promise<ContextResult>;
 
 export function registerContextFunction(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   tokenBudget: number,
 ): ContextReader {
@@ -150,8 +151,18 @@ export function registerContextFunction(
         });
       }
 
-      const allSessions = await kv.list<Session>(KV.sessions);
-      const sessions = allSessions
+      let entries = await getProjectSessionIndex(kv, data.project);
+      let projectSessions: Session[];
+      if (entries === null) {
+        const scanned = (await kv.list<Session>(KV.sessions)).filter(s => s.project === data.project);
+        entries = await ensureProjectSessionIndex(kv, data.project, scanned.map(s => ({
+          id: s.id, startedAt: s.startedAt, ...(s.agentId ? { agentId: s.agentId } : {}),
+        }))).catch(() => null);
+        projectSessions = entries === null ? scanned : (await Promise.all(entries.map(e => kv.get<Session>(KV.sessions, e.id)))).filter((s): s is Session => s !== null);
+      } else {
+        projectSessions = (await Promise.all(entries.map(e => kv.get<Session>(KV.sessions, e.id)))).filter((s): s is Session => s !== null);
+      }
+      const sessions = projectSessions
         .filter(s => s && typeof s.id === "string" && !!s.id.trim()
           && typeof s.project === "string" && !!s.project.trim())
         .filter(s => !isExcludedCodexAmbientSession(s)
@@ -205,6 +216,10 @@ export function registerContextFunction(
         }
       }
 
+      for (const block of blocks) {
+        block.content = block.content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        block.tokens = estimateTextTokens(block.content);
+      }
       blocks.sort((a, b) => b.recency - a.recency);
 
       let usedTokens = 0;

@@ -4,11 +4,11 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { runtimeMetadataPath } from "./runtime-paths.js";
 
 export function workerPidfilePath(): string {
-  return join(homedir(), ".agentmemory", "worker.pid");
+  return runtimeMetadataPath("worker.pid");
 }
 
 export function readWorkerPidfile(): number | null {

@@ -14,10 +14,11 @@ const hookBudget = new AsyncLocalStorage();
 
 function withHookBudget(eventName, operation) {
   const event = HOOK_SPEC.events.find(event => event.name === eventName);
+  const startupBudget = eventName === "SessionEnd" ? 1000 : 2000;
   if (!Number.isSafeInteger(event?.work_budget_ms) || event.work_budget_ms <= 0 ||
       !Number.isSafeInteger(event.work_budget_max_ms ?? event.work_budget_ms) ||
       (event.work_budget_max_ms ?? event.work_budget_ms) < event.work_budget_ms ||
-      (event.work_budget_max_ms ?? event.work_budget_ms) + 2000 > event.timeout_seconds * 1000) throw Error("Invalid hook time budget");
+      (event.work_budget_max_ms ?? event.work_budget_ms) + startupBudget > event.timeout_seconds * 1000) throw Error("Invalid hook time budget");
   const startedAt = Date.now();
   return hookBudget.run({ startedAt, deadline: startedAt + event.work_budget_ms, base: event.work_budget_ms,
     maximum: event.work_budget_max_ms ?? event.work_budget_ms, scale: 1 }, operation);

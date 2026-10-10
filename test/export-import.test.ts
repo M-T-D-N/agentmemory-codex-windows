@@ -232,6 +232,64 @@ describe("Export/Import Functions", () => {
     expect(result.summaries.length).toBe(1);
   });
 
+  it.each(["merge", "replace", "skip"] as const)("imports and round-trips a standard upstream 0.9.30 export with %s", async strategy => {
+    const session = { ...testSession, updatedAt: "2026-02-01T11:00:00Z", model: "upstream-fixture", tags: ["auth"], commitShas: ["abc123"], agentId: "upstream-agent" };
+    const observation = { ...testObs, subtitle: "Token validation", confidence: 0.9, agentId: session.agentId,
+      captureKey: "upstream-capture-key", source: { hookType: "post_tool_use" as const, originalBytes: 256, truncated: false,
+        toolName: "Edit", toolInput: { file_path: "src/auth.ts" }, toolOutput: { success: true }, payload: { fixture: true } },
+      origin: { channel: "tool" as const, capturedAt: testObs.timestamp } };
+    const memory = { ...testMemory, project: session.project, agentId: session.agentId, sourceObservationIds: [observation.id],
+      origin: { channel: "agent" as const, capturedAt: testMemory.createdAt } };
+    const node: GraphNode = { id: "upstream-node", type: "file", name: "src/auth.ts", properties: { language: "typescript" },
+      sourceObservationIds: [observation.id], createdAt: testObs.timestamp, aliases: ["auth module"] };
+    const fixture = {
+      version: "0.9.30", exportedAt: "2026-02-02T00:00:00Z", sessions: [session], observations: { [session.id]: [observation] },
+      memories: [memory], summaries: [testSummary], graphNodes: [node],
+      graphEdges: [{ id: "upstream-edge", type: "modifies", sourceNodeId: node.id, targetNodeId: node.id, weight: 1,
+        sourceObservationIds: [observation.id], createdAt: testObs.timestamp, tvalid: testObs.timestamp, version: 1, isLatest: true,
+        context: { reasoning: "Edited token validation", confidence: 0.9 } }],
+      profiles: [{ project: session.project, generatedAt: "2026-02-02T00:00:00Z", topConcepts: [{ concept: "auth", frequency: 1 }],
+        topFiles: [{ file: "src/auth.ts", frequency: 1 }], conventions: [], commonErrors: [], recentActivity: ["Auth changes"], sessionCount: 1, totalObservations: 1 }],
+      accessLogs: [{ memoryId: memory.id, count: 1, lastAt: testObs.timestamp, recent: [Date.parse(testObs.timestamp)] }],
+      pagination: { offset: 0, limit: 1, total: 1, hasMore: false },
+    } satisfies ExportData;
+    const original = structuredClone(fixture);
+    const freshSdk = mockSdk(); const freshKv = mockKV(); registerExportImportFunction(freshSdk as never, freshKv as never);
+    expect(await freshSdk.trigger("mem::import", { exportData: fixture, strategy })).toMatchObject({ success: true, sessions: 1, observations: 1, memories: 1, summaries: 1 });
+    const exported = await freshSdk.trigger("mem::export", { maxSessions: 1 }) as ExportData;
+    for (const field of ["sessions", "observations", "memories", "summaries", "graphNodes", "graphEdges", "profiles", "accessLogs", "pagination"] as const) {
+      expect(exported[field]).toEqual(fixture[field]);
+    }
+    expect(exported.version).toBe(VERSION);
+    expect(fixture).toEqual(original);
+    expect(getSearchIndex().search("Auth changes")).toEqual(expect.arrayContaining([expect.objectContaining({ obsId: observation.id })]));
+  });
+
+  it.each(["native-session", "native-observation", "completion-session", "completion-results", "capture-exclusions", "archive-state"])("rejects downstream %s disguised as upstream 0.9.30 before mutations", async variant => {
+    const fixture = { version: "0.9.30", exportedAt: testObs.timestamp, sessions: [testSession],
+      observations: { [testSession.id]: [testObs] }, memories: [testMemory], summaries: [testSummary] } as ExportData;
+    if (variant === "native-session") fixture.sessions = [{ ...testSession, codexNativeCapture: {} } as Session];
+    if (variant === "native-observation") fixture.observations[testSession.id] = [{ ...testObs, codexSource: {} } as CompressedObservation];
+    if (variant === "completion-session") fixture.sessions = [{ ...testSession, semanticGraphCompletionVersion: 1 }];
+    if (variant === "completion-results") fixture.graphObservationResults = {};
+    if (variant === "capture-exclusions") fixture.codexCaptureExclusions = [{ version: 1, id: codexExclusionId("forgotten"),
+      sessionId: "forgotten", project: testSession.project, forgottenAt: testObs.timestamp, match: { kind: "session" } }];
+    if (variant === "archive-state") fixture.archiveStates = [];
+    const set = vi.spyOn(kv, "set"); const remove = vi.spyOn(kv, "delete");
+    expect(await sdk.trigger("mem::import", { exportData: fixture, strategy: "replace" })).toMatchObject({ success: false, error: expect.stringContaining("lifecycle export format") });
+    expect(set).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+    expect(await kv.get(KV.sessions, testSession.id)).toEqual(testSession);
+  });
+
+  it("does not downgrade an existing graph-tracked session using a standard upstream version", async () => {
+    await graphExport();
+    const set = vi.spyOn(kv, "set"); const remove = vi.spyOn(kv, "delete");
+    await expect(sdk.trigger("mem::import", { strategy: "replace", exportData: {
+      version: "0.9.30", exportedAt: testObs.timestamp, sessions: [testSession], observations: {}, memories: [], summaries: [],
+    } })).rejects.toThrow("cannot downgrade observation-specific graph completion");
+    expect(set).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+  });
+
   it("import with merge strategy adds data", async () => {
     const exportData: ExportData = {
       version: "0.3.0",
@@ -657,5 +715,64 @@ describe("Export/Import Functions", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("Unsupported export version");
+  });
+});
+
+const bloatedIds = (prefix: string, n: number) =>
+  Array.from({ length: n }, (_, i) => `${prefix}_${String(i).padStart(3, "0")}`);
+
+describe("import preserves complete graph provenance", () => {
+  it("keeps every sourceObservationId on imported graph nodes and edges", async () => {
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerExportImportFunction(sdk as never, kv as never);
+    const exportData = {
+      version: "0.9.28",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      graphNodes: [
+        {
+          id: "gn_bloat",
+          type: "file",
+          name: "src/hot.ts",
+          properties: {},
+          sourceObservationIds: bloatedIds("obs", 400),
+          createdAt: "2026-03-01T00:00:00Z",
+        },
+        {
+          id: "gn_small",
+          type: "file",
+          name: "src/cold.ts",
+          properties: {},
+          sourceObservationIds: ["obs_x"],
+          createdAt: "2026-03-01T00:00:00Z",
+        },
+      ],
+      graphEdges: [
+        {
+          id: "ge_bloat",
+          type: "related_to",
+          sourceNodeId: "gn_bloat",
+          targetNodeId: "gn_small",
+          weight: 0.5,
+          sourceObservationIds: bloatedIds("eobs", 100),
+          createdAt: "2026-03-01T00:00:00Z",
+        },
+      ],
+    } as unknown as ExportData;
+    const result = (await sdk.trigger("mem::import", {
+      exportData,
+      strategy: "merge",
+    })) as { success: boolean };
+    expect(result.success).toBe(true);
+    const n = await kv.get<{ sourceObservationIds: string[] }>("mem:graph:nodes", "gn_bloat");
+    const s = await kv.get<{ sourceObservationIds: string[] }>("mem:graph:nodes", "gn_small");
+    const e = await kv.get<{ sourceObservationIds: string[] }>("mem:graph:edges", "ge_bloat");
+    expect(n!.sourceObservationIds).toEqual(bloatedIds("obs", 400));
+    expect(s!.sourceObservationIds).toEqual(["obs_x"]);
+    expect(e!.sourceObservationIds).toEqual(bloatedIds("eobs", 100));
   });
 });

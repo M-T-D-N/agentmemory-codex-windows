@@ -23,9 +23,9 @@ describe("stop reaps the worker process (#640, #474)", () => {
     expect(source).toMatch(/Stopping agentmemory worker/);
   });
 
-  it("defines ~/.agentmemory/worker.pid exactly once", () => {
+  it("resolves the shared worker.pid through the instance metadata path", () => {
     const source = readFileSync("src/worker-pidfile.ts", "utf-8");
-    expect(source).toMatch(/join\(homedir\(\), "\.agentmemory", "worker\.pid"\)/);
+    expect(source).toContain('runtimeMetadataPath("worker.pid")');
     expect(source).toMatch(/export function readWorkerPidfile/);
     expect(source).toMatch(/export function writeWorkerPidfile/);
     expect(source).toMatch(/export function clearWorkerPidfile/);

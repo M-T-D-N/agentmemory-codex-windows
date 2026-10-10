@@ -15,11 +15,15 @@ Usage: agentmemory-codex-windows --install-root <absolute path>
   --workspace-root <absolute path> --project-registry <absolute file>
   [--fresh | --activate-prepared] [--execute] [--archive <local release ZIP>]
 
-Default: verify a proposed existing-install update, without installing it.
+Default: detect a new or managed installation and show its proposed operation.
 --fresh: prepare a new, empty installation. No task or Codex setting changes.
 --activate-prepared: register tasks and managed hooks for a prepared installation.
 --execute: explicitly perform the selected operation (otherwise dry-run).
 --archive: use an offline copy of this version's ZIP; the same SHA-256 is required.
+--upstream-package-root / --upstream-data-dir: adopt an existing upstream install.
+--upstream-runtime-dir / --upstream-home: its runtime and .agentmemory config directories.
+--port: REST port for a new install (defaults to 3111); adoption keeps source ports.
+--managed-requirements-path: exact managed Codex requirements destination.
 Windows x64, Node.js 24 or newer, and Windows PowerShell 5.1 are required.
 Activation needs permission to create managed Codex requirements; run as the
 same Windows user who will use Codex. No npm lifecycle scripts are run.
@@ -28,7 +32,7 @@ same Windows user who will use Codex. No npm lifecycle scripts are run.
 export function parseArgs(args) {
   const result = {};
   const flags = new Set(['fresh', 'activate-prepared', 'execute', 'help']);
-  const values = new Set(['install-root', 'workspace-root', 'project-registry', 'archive']);
+  const values = new Set(['install-root', 'workspace-root', 'project-registry', 'archive', 'managed-requirements-path', 'upstream-package-root', 'upstream-data-dir', 'upstream-runtime-dir', 'upstream-home', 'port']);
   for (let i = 0; i < args.length; i++) {
     const key = args[i].replace(/^--/, '');
     if (!args[i].startsWith('--') || (!flags.has(key) && !values.has(key))) throw Error(`Unknown option: ${args[i]}`);
@@ -36,6 +40,11 @@ export function parseArgs(args) {
     if (flags.has(key)) result[key] = true;
     else {
       const value = args[++i];
+      if (key === 'port') {
+        if (!/^\d+$/.test(value || '') || Number(value) < 1 || Number(value) > 19512) throw Error('--port must be an integer between 1 and 19512.');
+        result[key] = value;
+        continue;
+      }
       if (!value || value.startsWith('--') || /[\x00-\x1f"]/u.test(value) || !path.win32.isAbsolute(value) || value.startsWith('\\\\')) {
         throw Error(`--${key} requires an absolute local Windows path without control characters or quotes.`);
       }
@@ -132,6 +141,10 @@ export async function main(args = process.argv.slice(2)) {
     if (!installer || await sha256(path.join(release, installer.path)) !== installer.sha256.toLowerCase()) throw Error('Installer integrity mismatch.');
     const named = { ReleaseRoot: release, InstallRoot: options['install-root'], WorkspaceRoot: options['workspace-root'],
       ProjectRegistry: options['project-registry'], NodePath: process.execPath };
+    if (options['managed-requirements-path']) named.ManagedRequirementsPath = options['managed-requirements-path'];
+    for (const [option, parameter] of Object.entries({ 'upstream-package-root': 'UpstreamPackageRoot', 'upstream-data-dir': 'UpstreamDataDir', 'upstream-runtime-dir': 'UpstreamRuntimeDir', 'upstream-home': 'UpstreamHome', port: 'RestPort' })) {
+      if (options[option]) named[parameter] = options[option];
+    }
     if (options.fresh) named.Fresh = true;
     if (options['activate-prepared']) named.ActivatePrepared = true;
     if (options.execute) named.Execute = true;

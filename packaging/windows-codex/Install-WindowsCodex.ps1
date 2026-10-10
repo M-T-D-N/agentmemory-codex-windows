@@ -5,6 +5,11 @@ param(
     [Parameter(Mandatory = $true)][string]$ProjectRegistry,
     [Parameter(Mandatory = $true)][string]$NodePath,
     [string]$ManagedRequirementsPath = 'C:\ProgramData\OpenAI\Codex\requirements.toml',
+    [ValidateRange(1, 19512)][int]$RestPort = 3111,
+    [string]$UpstreamPackageRoot = '',
+    [string]$UpstreamDataDir = '',
+    [string]$UpstreamRuntimeDir = '',
+    [string]$UpstreamHome = '',
     [switch]$Execute,
     [switch]$Fresh,
     [switch]$ActivatePrepared
@@ -582,10 +587,18 @@ $releaseManifestPath = Join-Path $release 'release-manifest.json'
 $payload = Join-Path $release 'payload'
 $ownerPath = Join-Path $root '.agentmemory-install-owner.json'
 $installManifestPath = Join-Path $root 'config\install-manifest.json'
+$servicePorts = [pscustomobject]@{ rest = $RestPort; stream = $RestPort + 1; viewer = $RestPort + 2; mcp = $RestPort + 3; engine = $RestPort + 46023 }
 
 if ($Fresh -and $ActivatePrepared) { throw 'Choose Fresh or ActivatePrepared.' }
+if ($UpstreamPackageRoot -or $UpstreamDataDir -or $UpstreamRuntimeDir -or $UpstreamHome) {
+    if (-not $UpstreamPackageRoot -or -not $UpstreamDataDir -or $Fresh -or $ActivatePrepared) { throw 'Upstream adoption needs both package and data directories and cannot be combined with Fresh or ActivatePrepared.' }
+}
+$automaticFresh = -not $Fresh -and -not $ActivatePrepared -and
+    -not (Test-Path -LiteralPath $ownerPath) -and -not (Test-Path -LiteralPath $installManifestPath) -and
+    (-not (Test-Path -LiteralPath $root) -or
+        ((Test-Path -LiteralPath $root -PathType Container) -and @(Get-ChildItem -Force -LiteralPath $root).Count -eq 0))
 $requiredInputs = @($releaseManifestPath, $payload, $registry, $node)
-if (-not $Fresh) { $requiredInputs += @($ownerPath, $installManifestPath) }
+if (-not $Fresh -and -not $automaticFresh) { $requiredInputs += @($ownerPath, $installManifestPath) }
 foreach ($required in $requiredInputs) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required install input is missing: $required" }
 }
@@ -620,13 +633,24 @@ foreach ($file in $releaseManifest.immutable_files) {
     if ($actualHash -ne [string]$file.sha256) { throw "Release payload hash mismatch: $($file.path)" }
 }
 
-if ($Fresh -or $ActivatePrepared) {
+if ($Fresh -or $ActivatePrepared -or $automaticFresh) {
     . (Join-Path $release 'Initialize-WindowsCodex.ps1')
+    if ($UpstreamPackageRoot) {
+        . (Join-Path $release 'Adopt-WindowsCodex.ps1')
+        Invoke-UpstreamAdoption
+        return
+    }
     Invoke-FreshInstallation -Activate:$ActivatePrepared -Execute:$Execute
+    if ($automaticFresh -and $Execute) {
+        Invoke-FreshInstallation -Activate -Execute
+        & (Join-Path $root 'scripts\agentmemory-mcp.ps1') -Root $root -ValidateOnly
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh installation was activated but its service validation failed.' }
+    }
     return
 }
 
 . (Join-Path $payload 'scripts\agentmemory-lifecycle.ps1')
+if ($UpstreamPackageRoot) { throw 'The target is already managed; update it without upstream adoption arguments.' }
 
 $owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
 $installed = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
@@ -645,6 +669,7 @@ if ([System.IO.Path]::GetFullPath([string]$installed.install_root) -ne $root) {
 }
 
 $existingWorkspacePath = Join-Path $root 'config\codex-workspace.json'
+$existingWorkspace = $null
 $preservedCodexSourceRoot = $null
 if (Test-Path -LiteralPath $existingWorkspacePath -PathType Leaf) {
     $existingWorkspace = Get-Content -Raw -LiteralPath $existingWorkspacePath | ConvertFrom-Json
@@ -808,8 +833,13 @@ try {
     }
 
     $workspaceConfig = [ordered]@{ schema_version = 1; workspace_root = $workspace; project_registry = $registry }
+    if ($existingWorkspace) {
+        foreach ($property in $existingWorkspace.PSObject.Properties) {
+            if ($property.Name -notin @('schema_version', 'workspace_root', 'project_registry')) { $workspaceConfig[$property.Name] = $property.Value }
+        }
+    }
     if ($null -ne $preservedCodexSourceRoot) { $workspaceConfig.codex_source_root = $preservedCodexSourceRoot }
-    Write-Utf8NoBom -Path (Join-Path $root 'config\codex-workspace.json') -Content ($workspaceConfig | ConvertTo-Json)
+    Write-Utf8NoBom -Path (Join-Path $root 'config\codex-workspace.json') -Content ($workspaceConfig | ConvertTo-Json -Depth 6)
     $hookSpec = Get-Content -Raw -LiteralPath (Join-Path $root 'config\hook-spec.json') | ConvertFrom-Json
     $hookArtifacts = New-HookArtifacts -Root $root -Spec $hookSpec
     Write-Utf8NoBom -Path (Join-Path $root 'config\managed-requirements.toml') -Content $hookArtifacts.Toml
@@ -844,6 +874,8 @@ try {
     }
     Set-ObjectProperty -Object $installed -Name 'source_hashes' -Value $sourceHashes
     Set-ObjectProperty -Object $installed -Name 'installation_status' -Value 'activated'
+    Set-ObjectProperty -Object $installed -Name 'schema_version' -Value 3
+    Set-ObjectProperty -Object $installed -Name 'status' -Value 'active'
     Write-Utf8NoBom -Path $installManifestPath -Content ($installed | ConvertTo-Json -Depth 12)
     $legacyInstallStatePath = Join-Path $root 'config\install-state.json'
     if (Test-Path -LiteralPath $legacyInstallStatePath -PathType Leaf) {

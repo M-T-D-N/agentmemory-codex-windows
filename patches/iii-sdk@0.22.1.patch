@@ -1,0 +1,40 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 8aa9068126414915c29489a51d21a3b4fd1a7a1b..e7b40206eb1d7d770436c679eda678513e5bad26 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -381,7 +381,14 @@ var Sdk = class {
+ 	stopMetricsReporting() {
+ 		(0, _iii_dev_helpers_observability.stopWorkerGauges)();
+ 	}
+-	onSocketClose() {
++	onSocketClose(code) {
++		if (!this.isShuttingDown) console.warn("[iii] Worker connection closed", { code, pendingInvocations: this.invocations.size });
++		const interrupted = new Set(this.invocations.keys());
++		for (const invocation of this.invocations.values()) {
++			invocation.reject(new Error("iii connection closed; invocation outcome is unknown"));
++		}
++		this.invocations.clear();
++		this.messagesToSend = this.messagesToSend.filter(message => !interrupted.has(message.invocation_id));
+ 		this.stopHeartbeat();
+ 		this.ws?.removeAllListeners();
+ 		this.ws?.terminate();
+diff --git a/dist/index.mjs b/dist/index.mjs
+index a122034f56a09a389daa8172c9695c3a12cf57f8..cdda6d4416574f12138447f41fb7c7a2c1e88027 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -379,7 +379,14 @@ var Sdk = class {
+ 	stopMetricsReporting() {
+ 		stopWorkerGauges();
+ 	}
+-	onSocketClose() {
++	onSocketClose(code) {
++		if (!this.isShuttingDown) console.warn("[iii] Worker connection closed", { code, pendingInvocations: this.invocations.size });
++		const interrupted = new Set(this.invocations.keys());
++		for (const invocation of this.invocations.values()) {
++			invocation.reject(new Error("iii connection closed; invocation outcome is unknown"));
++		}
++		this.invocations.clear();
++		this.messagesToSend = this.messagesToSend.filter(message => !interrupted.has(message.invocation_id));
+ 		this.stopHeartbeat();
+ 		this.ws?.removeAllListeners();
+ 		this.ws?.terminate();

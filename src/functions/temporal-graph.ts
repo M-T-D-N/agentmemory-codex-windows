@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import { registerObservationWriter } from "../state/observation-write.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import type {
@@ -152,7 +152,7 @@ function parseTemporalGraphXml(
 }
 
 export function registerTemporalGraphFunctions(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   provider: MemoryProvider,
 ): void {

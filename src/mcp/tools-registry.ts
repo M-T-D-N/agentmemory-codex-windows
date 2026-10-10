@@ -167,6 +167,11 @@ export const CORE_TOOLS: McpToolDef[] = [
       properties: {
         agentId: { type: "string", minLength: 1, maxLength: 512, description: "Optional agent ID; omit for configured scope, or use '*' for a deliberate cross-agent read" },
         project: { type: "string", description: "Project path to analyze" },
+        limit: {
+          type: "integer",
+          description:
+            "Most recent sessions to scan (default 50, max 500)",
+        },
       },
     },
   },

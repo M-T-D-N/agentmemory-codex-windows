@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 
 const context = new AsyncLocalStorage<{ exclusive: boolean; active: boolean }>();
 let writers = 0;
@@ -31,7 +31,7 @@ export async function withObservationRecovery<T>(work: () => Promise<T>): Promis
 }
 
 export function registerObservationWriter<T, R>(
-  sdk: ISdk, id: string, handler: (data: T) => Promise<R>,
+  sdk: IIIClient, id: string, handler: (data: T) => Promise<R>,
 ): void {
   sdk.registerFunction(id, (data: T) => withObservationWrite(() => handler(data)));
 }

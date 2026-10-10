@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { readArchiveVisibility } from "./archive.js";
 import { resolveReadAgentId } from "./read-agent-scope.js";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type {
   CompressedObservation,
+  Memory,
   Session,
   ProjectProfile,
 } from "../types.js";
 import { KV } from "../state/schema.js";
+import { memoryToObservation } from "../state/memory-utils.js";
 import { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { logger } from "../logger.js";
@@ -17,10 +19,10 @@ import {
   sanitizeCodexAmbientObservation,
 } from "./observation-visibility.js";
 
-export const PROFILE_VISIBILITY_REVISION = 2;
+export const PROFILE_VISIBILITY_REVISION = 3;
 export function profileCacheKey(project: string, agentId?: string) { return agentId === undefined ? project : JSON.stringify([project, agentId]); }
 
-export function registerProfileFunction(sdk: ISdk, kv: StateKV): void {
+export function registerProfileFunction(sdk: IIIClient, kv: StateKV): void {
   sdk.registerFunction("mem::profile", 
     async (data: { project: string; refresh?: boolean; agentId?: string } | undefined) => {
       if (!data || typeof data.project !== "string" || !data.project.trim()) {
@@ -30,7 +32,7 @@ export function registerProfileFunction(sdk: ISdk, kv: StateKV): void {
 
       const agentId = resolveReadAgentId(data.agentId, "mem::profile");
       const cacheKey = profileCacheKey(project, agentId);
-      const { sessions: projectSessions, selectedSessions: top20Sessions, observations: visiblePerSession, sourceDigest } = await readProfileSources(kv, project, agentId);
+      const { sessions: projectSessions, selectedSessions: top20Sessions, observations: visiblePerSession, memories, sourceDigest } = await readProfileSources(kv, project, agentId);
       if (projectSessions.length === 0) return { profile: null, reason: "no_sessions" };
       const conceptFreq = new Map<string, number>();
       const fileFreq = new Map<string, number>();
@@ -40,7 +42,10 @@ export function registerProfileFunction(sdk: ISdk, kv: StateKV): void {
 
       if (!data.refresh) {
         const cached = await kv.get<ProjectProfile>(KV.profiles, cacheKey).catch(() => null);
-        if (cached && cached.project === project && cached.agentId === agentId && cached.visibilityRevision === PROFILE_VISIBILITY_REVISION && cached.sourceDigest === sourceDigest && profileContentIsVisible(cached) && Date.now() - new Date(cached.updatedAt).getTime() < 3600_000) return { profile: cached, cached: true };
+        if (cached && cached.project === project && cached.agentId === agentId && cached.visibilityRevision === PROFILE_VISIBILITY_REVISION && cached.sourceDigest === sourceDigest && profileContentIsVisible(cached) && Date.now() - new Date(cached.updatedAt).getTime() < 3600_000) {
+          const topFiles = cleanTopFiles(cached.topFiles, projectSessions.map(s => s.cwd));
+          return { profile: { ...cached, topFiles, conventions: extractConventions(cached.topConcepts, topFiles) }, cached: true };
+        }
       }
       for (let i = 0; i < top20Sessions.length; i++) {
         const session = top20Sessions[i];
@@ -69,15 +74,20 @@ export function registerProfileFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
+      for (const memory of memories) {
+        for (const concept of memory.concepts || []) {
+          if (!isCodexInternalAmbientText(concept)) conceptFreq.set(concept, (conceptFreq.get(concept) || 0) + 1);
+        }
+      }
+
       const topConcepts = Array.from(conceptFreq.entries())
         .sort((a, b) => b[1] - a[1])
         .slice(0, 15)
         .map(([concept, frequency]) => ({ concept, frequency }));
 
-      const topFiles = Array.from(fileFreq.entries())
+      const topFiles = cleanTopFiles(Array.from(fileFreq.entries())
         .sort((a, b) => b[1] - a[1])
-        .slice(0, 15)
-        .map(([file, frequency]) => ({ file, frequency }));
+        .map(([file, frequency]) => ({ file, frequency })), projectSessions.map(s => s.cwd)).slice(0, 15);
 
       const uniqueErrors = [...new Set(errors)].slice(0, 10);
 
@@ -110,6 +120,38 @@ export function registerProfileFunction(sdk: ISdk, kv: StateKV): void {
       return { profile, cached: false };
     },
   );
+}
+
+const EXTENSIONLESS_FILES = new Set([
+  "Makefile",
+  "Dockerfile",
+  "Containerfile",
+  "Procfile",
+  "Gemfile",
+  "Rakefile",
+  "Jenkinsfile",
+  "Vagrantfile",
+  "Justfile",
+  "LICENSE",
+  "README",
+]);
+
+export function isLikelyFilePath(value: string, cwds: Array<string | undefined>): boolean {
+  const file = String(value || "").trim();
+  if (!file || /[*?{}[\]]/.test(file) || /\s{2,}/.test(file)) return false;
+  const bare = file.replace(/[/\\]+$/, "");
+  if (cwds.some((cwd) => cwd && cwd.replace(/[/\\]+$/, "") === bare)) return false;
+  const base = bare.split(/[/\\]/).pop() || "";
+  if (!base || base === "." || base === "..") return false;
+  if (EXTENSIONLESS_FILES.has(base)) return true;
+  return /\.[A-Za-z0-9_-]{1,12}$/.test(base);
+}
+
+export function cleanTopFiles(
+  files: Array<{ file: string; frequency: number }>,
+  cwds: Array<string | undefined>,
+): Array<{ file: string; frequency: number }> {
+  return files.filter((f) => isLikelyFilePath(f.file, cwds));
 }
 
 function extractConventions(
@@ -154,7 +196,16 @@ export async function readProfileSources(kv: StateKV, project: string, agentId?:
   const sessions = (await kv.list<Session>(KV.sessions)).filter(s => s.project === project && !isExcludedCodexAmbientSession(s) && !archived({ kind: "session", id: s.id }) && (agentId === undefined || s.agentId === agentId));
   const selectedSessions = [...sessions].sort((a,b) => String(b.startedAt ?? "").localeCompare(String(a.startedAt ?? "")) || a.id.localeCompare(b.id)).slice(0,20);
   const observations = await Promise.all(selectedSessions.map(async session => (await kv.list<CompressedObservation>(KV.observations(session.id))).map(sanitizeCodexAmbientObservation).filter((o): o is CompressedObservation => o !== null && !archived({ kind: "observation", id: o.id, sessionId: session.id }) && (agentId === undefined || o.agentId === agentId))));
-  return { sessions, selectedSessions, observations, sourceDigest: profileSourceDigest(sessions, observations) };
+  const sessionMap = new Map(sessions.map(session => [session.id, session]));
+  const memories = (await kv.list<Memory>(KV.memories)).filter(memory => memory.isLatest !== false
+    && (memory.project ?? sessionMap.get(memory.sessionIds?.[0])?.project) === project
+    && (agentId === undefined || memory.agentId === agentId)
+    && !archived({ kind: "memory", id: memory.id })
+    && !isExcludedCodexAmbientSession(sessionMap.get(memory.sessionIds?.[0]))
+    && sanitizeCodexAmbientObservation(memoryToObservation(memory)) !== null);
+  const sourceDigest = createHash("sha256").update(JSON.stringify([profileSourceDigest(sessions, observations),
+    memories.map(memory => [memory.id, memory.updatedAt, memory.concepts]).sort((a,b) => String(a[0]).localeCompare(String(b[0])))])).digest("hex");
+  return { sessions, selectedSessions, observations, memories, sourceDigest };
 }
 
 export function profileContentIsVisible(profile: ProjectProfile): boolean {

@@ -1,17 +1,10 @@
-// Pass byteOffset + byteLength explicitly so the round-trip survives
-// Node's Buffer pool. Buffer.from(b64, "base64") returns a slice of a
-// shared 8KB pool (poolSize), and `new Float32Array(buf.buffer)` ignores
-// the slice metadata — it would mint a 2048-element view over the whole
-// pool. Same risk on the encode side if the input Float32Array is itself
-// a sliced view. Reported as a phantom "2048 dimensions on disk" crash
-// in #455 / #469 / #584 / #587.
-function float32ToBase64(arr: Float32Array): string {
+export function float32ToBase64(arr: Float32Array): string {
   return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString(
     "base64",
   );
 }
 
-function base64ToFloat32(b64: string): Float32Array {
+export function base64ToFloat32(b64: string): Float32Array {
   const buf = Buffer.from(b64, "base64");
   return new Float32Array(
     buf.buffer,
@@ -34,26 +27,89 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
+export type VectorEntry = { embedding: Float32Array; sessionId: string };
+
+export type VectorChangeListener = (obsId: string | null, entry: VectorEntry | null) => void;
+
 export class VectorIndex {
-  private vectors: Map<string, { embedding: Float32Array; sessionId: string }> =
-    new Map();
+  private vectors: Map<string, VectorEntry> = new Map();
+  private changes: Map<string, boolean> = new Map();
+  private listener: VectorChangeListener | null = null;
+
+  setChangeListener(listener: VectorChangeListener | null): void {
+    this.listener = listener;
+  }
 
   private changeCapture: Set<string> | null = null;
   private captureReset = false;
 
   add(obsId: string, sessionId: string, embedding: Float32Array): void {
     this.changeCapture?.add(obsId);
-    this.vectors.set(obsId, { embedding, sessionId });
+    const entry = { embedding, sessionId };
+    this.vectors.set(obsId, entry);
+    this.changes.set(obsId, true);
+    this.listener?.(obsId, entry);
   }
 
   remove(obsId: string): void {
     this.changeCapture?.add(obsId);
-    this.vectors.delete(obsId);
+    if (this.vectors.delete(obsId)) {
+      this.changes.set(obsId, false);
+      this.listener?.(obsId, null);
+    }
+  }
+
+  has(obsId: string): boolean {
+    return this.vectors.has(obsId);
+  }
+
+  get(obsId: string): VectorEntry | undefined {
+    return this.vectors.get(obsId);
+  }
+
+  entries(): IterableIterator<[string, VectorEntry]> {
+    return this.vectors.entries();
+  }
+
+  loadPersisted(obsId: string, sessionId: string, embedding: Float32Array): void {
+    this.vectors.set(obsId, { embedding, sessionId });
+  }
+
+  get pendingChanges(): number {
+    return this.changes.size;
+  }
+
+  hasPendingChange(obsId: string): boolean {
+    return this.changes.has(obsId);
+  }
+
+  takeChanges(): Map<string, boolean> {
+    const taken = this.changes;
+    this.changes = new Map();
+    return taken;
+  }
+
+  returnChanges(changes: Map<string, boolean>): void {
+    for (const [obsId, present] of changes) {
+      if (!this.changes.has(obsId)) this.changes.set(obsId, present);
+    }
+  }
+
+  markRemoved(obsId: string): void {
+    if (!this.vectors.has(obsId)) {
+      this.changes.set(obsId, false);
+      this.listener?.(obsId, null);
+    }
+  }
+
+  markAllChanged(): void {
+    for (const obsId of this.vectors.keys()) this.changes.set(obsId, true);
   }
 
   search(
     query: Float32Array,
     limit = 20,
+    eligible?: (obsId: string) => boolean,
   ): Array<{ obsId: string; sessionId: string; score: number }> {
     const results: Array<{
       obsId: string;
@@ -63,6 +119,7 @@ export class VectorIndex {
     let minScore = -Infinity;
 
     for (const [obsId, entry] of this.vectors) {
+      if (eligible && !eligible(obsId)) continue;
       const score = cosineSimilarity(query, entry.embedding);
       if (results.length < limit) {
         results.push({ obsId, sessionId: entry.sessionId, score });
@@ -110,15 +167,23 @@ export class VectorIndex {
 
   clear(): void {
     if (this.changeCapture) this.captureReset = true;
+    const hadVectors = this.vectors.size > 0;
+    for (const obsId of this.vectors.keys()) this.changes.set(obsId, false);
     this.vectors.clear();
+    if (hadVectors) this.listener?.(null, null);
   }
 
-  restoreFrom(other: VectorIndex): void {
+  markChanged(obsId: string): void {
+    const entry = this.vectors.get(obsId);
+    if (!entry) return;
+    this.changes.set(obsId, true);
+    this.listener?.(obsId, entry);
+  }
+
+  restoreFrom(other: VectorIndex, options: { persisted?: boolean } = {}): void {
     if (this.changeCapture) this.captureReset = true;
-    const src = (other as any).vectors as Map<
-      string,
-      { embedding: Float32Array; sessionId: string }
-    >;
+    const previous = this.vectors;
+    const src = other.vectors;
     this.vectors = new Map();
     for (const [obsId, entry] of src) {
       this.vectors.set(obsId, {
@@ -126,6 +191,17 @@ export class VectorIndex {
         sessionId: entry.sessionId,
       });
     }
+    if (options.persisted) {
+      this.changes = new Map(other.changes);
+      return;
+    }
+    for (const id of previous.keys()) {
+      if (!this.vectors.has(id)) {
+        this.changes.set(id, false);
+        this.listener?.(id, null);
+      }
+    }
+    for (const id of this.vectors.keys()) this.markChanged(id);
   }
 
   copyMatchingTo(target: VectorIndex, keep: (id: string) => boolean): void {

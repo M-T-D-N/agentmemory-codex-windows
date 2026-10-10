@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -103,7 +104,7 @@ describe("native source capture checkpoints", () => {
     expect(recovered).toMatchObject({ id: row.id, timestamp: row.timestamp, narrative: text, imageData: row.imageData,
       codexSource: { nativeMessageId: "trimmed" } });
     if (variant !== "raw") expect(recovered?.facts).toEqual(row.facts);
-    expect(JSON.stringify(await kv.list(KV.audit))).toContain('"restoreLegacyPromptWhitespaceObservationIds":["' + row.id + '"]');
+    expect(JSON.stringify((await queryAudit(kv as never)).entries)).toContain('"restoreLegacyPromptWhitespaceObservationIds":["' + row.id + '"]');
     expect(await capture(async () => { throw Error("index temporarily unavailable"); })).toMatchObject({ inserted: 0, indexPending: true });
     expect(await kv.get<Session>(KV.sessions, "s")).toMatchObject({ codexNativeCapture: { indexPending: true } });
     const published: CompressedObservation[] = [];
@@ -162,7 +163,7 @@ describe("native source capture checkpoints", () => {
     const saved = await kv.get<CompressedObservation>(KV.observations("s"), row.id);
     expect(saved).toEqual({ ...row, codexSource: expect.objectContaining({ nativeMessageId: "primary", timestamp: message("primary", 10).timestamp }) });
     expect(JSON.stringify(saved)).not.toContain("legacyUserItemId");
-    expect(JSON.stringify(await kv.list(KV.audit))).toContain('"adoptImportedUserItemObservationIds":["imported-user"]');
+    expect(JSON.stringify((await queryAudit(kv as never)).entries)).toContain('"adoptImportedUserItemObservationIds":["imported-user"]');
     expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
     expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
     expect(await preview()).toMatchObject({ adoptImportedUserItem: 0, missing: 0 });
@@ -298,7 +299,7 @@ describe("native source capture checkpoints", () => {
   const capture = (publish?: (rows: CompressedObservation[]) => Promise<void>) => captureCodexSourceWindow(kv as never, scope, managed(), { publish });
   const expectUninitialized = async () => {
     expect(await kv.get(KV.sessions, "s")).not.toHaveProperty("codexNativeCapture");
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
   };
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "agentmemory-native-capture-"));
@@ -316,7 +317,7 @@ describe("native source capture checkpoints", () => {
     expect(await preview()).toMatchObject({ adopt: 0, recoverRaw: 0, missing: 2 });
     await initialize();
     expect(await kv.get(KV.observations("s"), row.id, { includeDeleted: true })).toEqual(row);
-    expect(JSON.stringify(await kv.list(KV.audit))).not.toContain('"' + row.id + '"');
+    expect(JSON.stringify((await queryAudit(kv as never)).entries)).not.toContain('"' + row.id + '"');
     expect(await capture()).toMatchObject({ inserted: 2, status: "caught_up" });
     expect(await kv.get(KV.observations("s"), row.id, { includeDeleted: true })).toEqual(row);
   });
@@ -348,7 +349,7 @@ describe("native source capture checkpoints", () => {
     await initialize();
     expect(await kv.get(KV.observations("s"), row.id)).toEqual({ ...row,
       codexSource: expect.objectContaining({ timestamp: assistantMessage("final", 24).timestamp, nativeMessageId: "final" }) });
-    expect(JSON.stringify(await kv.list(KV.audit))).toContain('"adoptDelayedFinalObservationIds":["delayed-final"]');
+    expect(JSON.stringify((await queryAudit(kv as never)).entries)).toContain('"adoptDelayedFinalObservationIds":["delayed-final"]');
     const published: CompressedObservation[] = [];
     expect(await capture(async rows => { published.push(...rows); })).toMatchObject({ inserted: 2, indexPending: false });
     expect(published.find(item => item.id === row.id)?.timestamp).toBe(row.timestamp);
@@ -373,7 +374,7 @@ describe("native source capture checkpoints", () => {
     expect(await kv.get(KV.observations("s"), id)).toEqual({ ...row, narrative: "request\n",
       codexSource: expect.objectContaining({ nativeMessageId: "parts" }) });
     expect((await kv.get<CompressedObservation>(KV.observations("s"), id))!.codexSource).not.toHaveProperty("legacyRecovery");
-    expect(JSON.stringify(await kv.list(KV.audit))).toContain('"restoreLegacyRecoveryPartsObservationIds":["' + id + '"]');
+    expect(JSON.stringify((await queryAudit(kv as never)).entries)).toContain('"restoreLegacyRecoveryPartsObservationIds":["' + id + '"]');
     const published: CompressedObservation[] = [];
     expect(await capture(async rows => { published.push(...rows); })).toMatchObject({ inserted: 1, indexPending: false });
     expect(published.find(item => item.id === id)?.narrative).toBe("request\n");
@@ -394,7 +395,7 @@ describe("native source capture checkpoints", () => {
     expect(await kv.get(KV.observations("s"), row.id)).toEqual({ ...row, timestamp: native.timestamp,
       codexSource: expect.objectContaining({ timestamp: native.timestamp, nativeMessageId: "m1" }) });
     expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.indexPending).toBe(true);
-    expect(JSON.stringify(await kv.list(KV.audit))).toContain('"restoreLegacyTimestampObservationIds":["original-time"]');
+    expect(JSON.stringify((await queryAudit(kv as never)).entries)).toContain('"restoreLegacyTimestampObservationIds":["original-time"]');
     const published: CompressedObservation[] = [];
     expect(await capture(async rows => { published.push(...rows); })).toMatchObject({ status: "caught_up", inserted: 1, indexPending: false });
     expect(published.filter(item => item.id === row.id)).toMatchObject([{ timestamp: native.timestamp }]);
@@ -421,7 +422,7 @@ describe("native source capture checkpoints", () => {
     const row = legacy("old-id", 1); await kv.set(KV.observations("s"), row.id, row);
     const plan = await preview();
     expect(plan).toMatchObject({ dryRun: true, adopt: 1, missing: 1 });
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
     await initialize();
     expect(await kv.get(KV.observations("s"), row.id)).toMatchObject({ ...row, codexSource: { nativeMessageId: "m1" } });
     expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.cursor!.byteOffset).toBe(0);
@@ -443,7 +444,7 @@ describe("native source capture checkpoints", () => {
     await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
       expectedVersion: plan.expectedVersion, reason: "fixture" }, managed())).rejects.toThrow("stale");
     expect(await kv.get(KV.observations("s"), "old-id")).not.toHaveProperty("codexSource");
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
   });
   it("does not treat a bounded automatic inventory as complete when more original messages remain", async () => {
     let windows = 0;
@@ -553,7 +554,7 @@ describe("native source capture checkpoints", () => {
     expect(await preview()).toMatchObject({ dryRun: true, adopt: 2, missing: 0, recoverRaw: 2 });
     expect(await kv.get(KV.observations("s"), promptRow.id)).toEqual(promptRow);
     expect(await kv.get(KV.observations("s"), assistantRow.id)).toEqual(assistantRow);
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
 
     expect(await initialize()).toMatchObject({ initialized: true, recoverRaw: 2 });
     const recoveredPrompt = await kv.get<any>(KV.observations("s"), promptRow.id);
@@ -569,7 +570,7 @@ describe("native source capture checkpoints", () => {
     expect(recoveredAssistant).not.toHaveProperty("toolName");
     expect(recoveredAssistant).not.toHaveProperty("raw");
     expect(await kv.get<Session>(KV.sessions, "s")).toMatchObject({ codexNativeCapture: { indexPending: true } });
-    expect(await kv.list<any>(KV.audit)).toMatchObject([{ functionId: "mem::codex-source-initialize", targetIds: ["s"],
+    expect((await queryAudit(kv as never)).entries).toMatchObject([{ functionId: "mem::codex-source-initialize", targetIds: ["s"],
       details: { recoverRaw: 2, recoverRawObservationIds: [promptRow.id, assistantRow.id] } }]);
   });
   it("restores only the missing final LF proven by the full source, retaining the row metadata and retrying idempotently", async () => {
@@ -584,7 +585,7 @@ describe("native source capture checkpoints", () => {
     expect(await initialize()).toMatchObject({ initialized: true, restoreTerminalLf: 1 });
     const repaired = await kv.get<any>(KV.observations("s"), row.id);
     expect(repaired).toEqual({ ...row, narrative: "진행\n", codexSource: expect.objectContaining({ nativeMessageId: "m1" }) });
-    expect(await kv.list<any>(KV.audit)).toMatchObject([{ details: { restoreTerminalLfObservationIds: [row.id] } }]);
+    expect((await queryAudit(kv as never)).entries).toMatchObject([{ details: { restoreTerminalLfObservationIds: [row.id] } }]);
     expect(await preview()).toMatchObject({ adopt: 0, restoreTerminalLf: 0 });
     await initialize();
     const indexed: string[] = [];
@@ -608,7 +609,7 @@ describe("native source capture checkpoints", () => {
     await initialize();
     expect(await kv.get(KV.observations("s"), row.id)).toEqual({ ...row, narrative: text,
       codexSource: expect.objectContaining({ nativeMessageId: "answer" }) });
-    expect(await kv.list<any>(KV.audit)).toMatchObject([{ details: { restoreLegacySyntheticObservationIds: [row.id] } }]);
+    expect((await queryAudit(kv as never)).entries).toMatchObject([{ details: { restoreLegacySyntheticObservationIds: [row.id] } }]);
     expect(await preview()).toMatchObject({ adopt: 0, restoreLegacySynthetic: 0 });
   });
   it("repairs image wrapper serialization from real source without changing identity, metadata or image payloads", async () => {
@@ -630,7 +631,7 @@ describe("native source capture checkpoints", () => {
     const repaired = await kv.get<CompressedObservation>(KV.observations("s"), row.id);
     expect(repaired).toEqual({ ...row, narrative: "사진을 확인해줘", codexSource: expect.objectContaining({ nativeMessageId: "image-user" }) });
     expect(repaired!.codexSource).not.toHaveProperty("legacyImageWrappedDigest");
-    expect(await kv.list<any>(KV.audit)).toMatchObject([{ details: { restoreLegacyImageTextObservationIds: [row.id] } }]);
+    expect((await queryAudit(kv as never)).entries).toMatchObject([{ details: { restoreLegacyImageTextObservationIds: [row.id] } }]);
     const published: string[] = [];
     expect(await capture(async rows => { published.push(...rows.map(value => value.id)); })).toMatchObject({ inserted: 0, indexPending: false });
     expect(published).toEqual([row.id]);
@@ -658,7 +659,7 @@ describe("native source capture checkpoints", () => {
     const plan = await preview();
     expect(plan).toMatchObject({ dryRun: true, recoverRaw: 1 });
     expect(await kv.get(KV.observations("s"), row.id)).toEqual(row);
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
     await kv.set(KV.observations("s"), row.id, { ...row, origin: { ...row.origin, detail: "changed" } });
     await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
       expectedVersion: plan.expectedVersion, reason: "stale raw recovery" }, managed())).rejects.toThrow("stale");

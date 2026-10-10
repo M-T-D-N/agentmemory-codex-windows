@@ -66,11 +66,12 @@ function mockSdk(kv: ReturnType<typeof mockKV>) {
   } as any;
 }
 
-describe("import-jsonl re-key on parsed.sessionId (#775)", () => {
+describe("import-jsonl re-key on parsed.sessionId", () => {
   let tmpRoot: string;
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), "replay-import-key-"));
+    process.env.AGENTMEMORY_IMPORT_ROOT = tmpRoot;
   });
 
   afterEach(() => {
@@ -179,6 +180,7 @@ describe("import-jsonl indexes observations into BM25 AND vector", () => {
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), "replay-import-index-"));
+    process.env.AGENTMEMORY_IMPORT_ROOT = tmpRoot;
     getSearchIndex().clear();
     vectorIndex = new VectorIndex();
     setVectorIndex(vectorIndex);

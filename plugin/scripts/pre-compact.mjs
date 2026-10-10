@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { execSync } from "node:child_process";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 //#region src/hooks/_project.ts
 function resolveProject(cwd) {
 	const explicit = process.env["AGENTMEMORY_PROJECT_NAME"];
@@ -31,26 +33,74 @@ function hookCwd(data) {
 	if (projectDir && projectDir.trim()) return projectDir;
 }
 //#endregion
+//#region src/secret-store.ts
+const SECRET_KEY = "AGENTMEMORY_SECRET";
+function agentmemoryHomeDir() {
+	return join(homedir(), ".agentmemory");
+}
+function secretFilePath() {
+	return join(agentmemoryHomeDir(), "secret");
+}
+function usable(value) {
+	if (typeof value !== "string") return "";
+	const trimmed = value.trim();
+	if (!trimmed) return "";
+	if (trimmed.startsWith("${") && trimmed.endsWith("}")) return "";
+	return trimmed;
+}
+function unquote(value) {
+	const quote = value[0];
+	if ((quote === "\"" || quote === "'") && value.length > 1) {
+		const close = value.indexOf(quote, 1);
+		if (close !== -1) return value.slice(1, close);
+	}
+	const hash = value.indexOf(" #");
+	return hash === -1 ? value : value.slice(0, hash).trim();
+}
+function readEnvFileSecret() {
+	let content;
+	try {
+		content = readFileSync(join(agentmemoryHomeDir(), ".env"), "utf-8");
+	} catch {
+		return "";
+	}
+	if (typeof content !== "string") return "";
+	let found = "";
+	for (const line of content.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("#")) continue;
+		const eq = trimmed.indexOf("=");
+		if (eq === -1) continue;
+		if (trimmed.slice(0, eq).replace(/^export\s+/, "").trim() !== SECRET_KEY) continue;
+		found = usable(unquote(trimmed.slice(eq + 1).trim()));
+	}
+	return found;
+}
+function readStoredSecret() {
+	try {
+		return usable(readFileSync(secretFilePath(), "utf-8"));
+	} catch {
+		return "";
+	}
+}
+function isLoopbackUrl(url) {
+	let hostname;
+	try {
+		hostname = new URL(url).hostname.toLowerCase();
+	} catch {
+		return false;
+	}
+	const bare = hostname.replace(/^\[|\]$/g, "");
+	return bare === "localhost" || bare === "::1" || /^127(?:\.\d{1,3}){3}$/.test(bare);
+}
+function resolveClientSecret(baseUrl, env = process.env) {
+	const fromEnv = usable(env[SECRET_KEY]);
+	if (fromEnv) return fromEnv;
+	if (!isLoopbackUrl(baseUrl)) return "";
+	return readEnvFileSecret() || readStoredSecret();
+}
+//#endregion
 //#region src/hooks/sdk-guard.ts
-/**
-* Recursion guard shared by every hook script.
-*
-* A Claude Code session spawned via @anthropic-ai/claude-agent-sdk inherits
-* the same plugin hooks as the parent CC session. If any hook script in that
-* child session calls back into /agentmemory/* (e.g. Stop → /summarize →
-* provider.summarize() → another child session), we get unbounded recursion
-* that burns tokens and fills .claude/projects/ with ghost sessions
-* (#149 follow-up; see reported loop under v0.9.1).
-*
-* Two signals identify a SDK-child context:
-*   1. AGENTMEMORY_SDK_CHILD=1 env var — set by our agent-sdk provider
-*      before it spawns `query()`. Inherited by child processes.
-*   2. payload.entrypoint === "sdk-ts" — CC writes this into the hook
-*      stdin jsonl when the session was spawned by the Agent SDK.
-*
-* Hook scripts must call isSdkChildContext(payload) EARLY and return
-* silently when it is true.
-*/
 function isSdkChildContext(payload) {
 	if (process.env.AGENTMEMORY_SDK_CHILD === "1") return true;
 	if (!payload || typeof payload !== "object") return false;
@@ -60,10 +110,10 @@ function isSdkChildContext(payload) {
 //#endregion
 //#region src/hooks/_runtime.ts
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
 function authHeaders() {
 	const headers = { "Content-Type": "application/json" };
-	if (SECRET) headers["Authorization"] = `Bearer ${SECRET}`;
+	const secret = resolveClientSecret(REST_URL);
+	if (secret) headers["Authorization"] = `Bearer ${secret}`;
 	return headers;
 }
 //#endregion

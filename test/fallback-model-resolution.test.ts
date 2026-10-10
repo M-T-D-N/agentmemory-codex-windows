@@ -1,9 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-// #778: fallback providers used to inherit the primary provider's
-// model name and 404 on every call. Each fallback must resolve its
-// own env-driven default model.
-
 const captured: Array<{ provider: string; model: string }> = [];
 
 const anthropic = vi.hoisted(() => ({
@@ -76,7 +72,7 @@ import { createFallbackProvider, createProvider } from "../src/providers/index.j
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import type { ProviderConfig, FallbackConfig } from "../src/types.js";
 
-describe("Fallback provider model resolution (#778)", () => {
+describe("Fallback provider model resolution", () => {
   const savedEnv: Record<string, string | undefined> = {};
   const envKeys = [
     "OPENAI_API_KEY",

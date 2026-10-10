@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { describe, expect, it } from "vitest";
 import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
@@ -66,7 +67,7 @@ describe("canonical reversible archive lifecycle", () => {
     const f = await fixture();
     expect(await changeArchiveState(f.kv, request)).toMatchObject({ dryRun: true, changed: 1, state: "active", expectedRevision: 0 });
     expect(await f.kv.list(KV.archiveStates)).toEqual([]);
-    expect(await f.kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(f.kv as never)).entries).toEqual([]);
     const handlers = new Map<string, Function>();
     registerSmartSearchFunction({ registerFunction(id: string, fn: Function) { handlers.set(id, fn); } } as never, f.kv, async () => []);
     const expand = () => handlers.get("mem::smart-search")!({ expandIds: ["m"], project: "p", trackAccess: false });
@@ -84,7 +85,7 @@ describe("canonical reversible archive lifecycle", () => {
     expect(restored.result).toMatchObject({ changed: 1, archive: { state: "restored", revision: 2 } });
     expect((await expand()).results).toHaveLength(1);
     expect(await createSearchCandidateSelection(f.kv, { project: "p" }).select(candidates, 10)).toEqual(candidates);
-    expect((await f.kv.list(KV.audit)).length).toBe(2);
+    expect(((await queryAudit(f.kv as never)).entries).length).toBe(2);
   });
 
   it("keeps session observations hidden across another source write until explicit restoration", async () => {
@@ -129,7 +130,7 @@ describe("canonical reversible archive lifecycle", () => {
     await expect(changeArchiveState(f.kv, accepted)).rejects.toThrow("timeout after archive commit");
     const restarted = new StateKV(f.sdk as never);
     expect(await changeArchiveState(restarted, accepted)).toMatchObject({ changed: 0, archive: { state: "archived", revision: 1 } });
-    expect((await restarted.list(KV.audit)).length).toBe(1);
+    expect(((await queryAudit(restarted as never)).entries).length).toBe(1);
     const state = (await restarted.list(KV.archiveStates))[0];
     expect(() => validateArchiveState({ ...state as object, content: "unexpected copied payload" })).toThrow();
   });

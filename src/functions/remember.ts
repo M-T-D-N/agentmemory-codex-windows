@@ -1,5 +1,8 @@
+import { markCaptureEventDeleted } from "../capture/event-record.js";
+import { unindexObservationSession } from "../state/obs-index.js";
+import { removeSessionFromProjectIndex, addSessionToProjectIndex } from "../state/session-index.js";
 import { withObservationWrite, registerObservationWriter } from "../state/observation-write.js";
-import { TriggerAction, type ISdk } from "iii-sdk";
+import { TriggerAction, type IIIClient } from "iii-sdk";
 import type { Memory, RawObservation, Session } from "../types.js";
 import { KV, generateId, jaccardSimilarity } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -41,7 +44,9 @@ function safeSlice(text: string, length: number): string {
   return /[\uD800-\uDBFF]$/.test(sliced) ? sliced.slice(0, -1) : sliced;
 }
 
-export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
+export function memoryTitleFromContent(content: string): string { return safeSlice(content, 80); }
+
+export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
   registerObservationWriter(sdk, "mem::remember",
     async (data: {
       content: string;
@@ -100,7 +105,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         return { success: false, error: "project must be at most 512 characters" };
       }
 
-      return withKeyedLock("mem:remember", async () => {
+      const result = await withKeyedLock("mem:remember", async () => {
         let provenance = {
           sourceSessionIds: [] as string[],
           sourceObservationIds: [] as string[],
@@ -208,7 +213,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           createdAt: now,
           updatedAt: now,
           type: memType,
-          title: safeSlice(data.content, 80),
+          title: memoryTitleFromContent(data.content),
           content: data.content,
           concepts: data.concepts || [],
           files: data.files || [],
@@ -269,13 +274,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             error: err instanceof Error ? err.message : String(err),
           });
         }
-        await vectorIndexAddGuarded(
-          memory.id,
-          memory.sessionIds?.[0] ?? "memory",
-          memory.title + " " + memory.content,
-          { kind: "memory", logId: memory.id },
-        );
-        if (supersededMemory) await flushIndexSave();
+        if (supersededMemory) await flushIndexSave({ reportFailure: true });
         else scheduleIndexSave();
 
         if (supersededId) {
@@ -315,6 +314,19 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             : {}),
         };
       });
+      if (result.success && "memory" in result && result.memory) {
+        const memory = result.memory;
+        await vectorIndexAddGuarded(memory.id, memory.sessionIds?.[0] ?? "memory",
+          memory.title + " " + memory.content, { kind: "memory", logId: memory.id },
+          write => withKeyedLock("mem:remember", async () => {
+            const current = await kv.get<Memory>(KV.memories, memory.id);
+            if (!current || current.isLatest === false || current.content !== memory.content ||
+                current.title !== memory.title || current.project !== memory.project) return false;
+            write();
+            return true;
+          }));
+      }
+      return result;
     },
   );
 
@@ -430,7 +442,9 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
                   targetObservations.map((observation) => observation.id),
                 );
                 for (const obs of targetObservations) {
+                  await markCaptureEventDeleted(kv, obs);
                   await kv.delete(KV.observations(sessionId), obs.id);
+                  await unindexObservationSession(kv, obs.id);
                   deletedObservationIds.push(obs.id);
                   deleted++;
                   if (obs.imageData) await cleanup(obs.id, "image", () => decrementImageRef(kv, sdk, obs.imageData!));
@@ -443,6 +457,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
 
                 if (wholeSession) {
                   await kv.delete(KV.sessions, sessionId);
+                  await removeSessionFromProjectIndex(kv, session.project, sessionId);
                   deletedSession = true;
                   deleted++;
                   if (summary) {
@@ -476,6 +491,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
                     if (prior) nextSession[field] = prior.id;
                   }
                   await kv.set(KV.sessions, sessionId, nextSession);
+                  await addSessionToProjectIndex(kv, nextSession.project, nextSession);
                 } else {
                   alreadyAbsent = true;
                 }

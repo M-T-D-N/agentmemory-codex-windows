@@ -1,11 +1,18 @@
 import { vi } from "vitest";
+import { KV } from "../../src/state/schema.js";
 
 type Handler = (data: unknown) => Promise<unknown>;
+
+export function currentAuditScope(): string {
+  return KV.auditMonth(new Date().toISOString().slice(0, 7));
+}
 
 export function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
     store,
+    hasObservationRecovery: () => false,
+    assertRecoveryImportAllowed: () => {},
     get: async <T>(scope: string, key: string): Promise<T | null> => {
       return (store.get(scope)?.get(key) as T) ?? null;
     },

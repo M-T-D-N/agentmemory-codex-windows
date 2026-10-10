@@ -15,7 +15,7 @@ function runHook(payload: Record<string, unknown>, freezeDeadlineClock = false):
     const clockArgs = freezeDeadlineClock
       ? ["--import", "data:text/javascript," + encodeURIComponent("const now = Date.now(); Date.now = () => now;")]
       : [];
-    const child = spawn("node", [...clockArgs, "plugin/scripts/session-end.mjs"], {
+    const child = spawn("node", [...clockArgs, join(process.env.AGENTMEMORY_HOOK_TEST_DIR ?? "plugin/scripts", "session-end.mjs")], {
       env: { ...process.env, AGENTMEMORY_URL: `http://127.0.0.1:${port}` },
     });
     child.on("exit", (code) => resolve(code ?? 1));
@@ -99,6 +99,7 @@ describe("session-end transcript prompt backfill", () => {
     for (const p of observes) {
       expect(p.body.hookType).toBe("prompt_submit");
       expect(p.body.sessionId).toBe("ses_t1");
+      expect((p.body.data as { backfill?: unknown }).backfill).toBe(true);
     }
     const endIndex = posts.findIndex((p) => p.path.includes("/session/end"));
     expect(endIndex).toBeGreaterThanOrEqual(0);

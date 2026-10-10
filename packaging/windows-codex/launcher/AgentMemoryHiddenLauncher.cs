@@ -212,6 +212,8 @@ namespace AgentMemoryCodex
             [DataMember(Name = "schema_version", IsRequired = true)] public int SchemaVersion;
             [DataMember(Name = "workspace_root", IsRequired = true)] public string WorkspaceRoot;
             [DataMember(Name = "project_registry", IsRequired = true)] public string ProjectRegistry;
+            [DataMember(Name = "service_ports")] public Dictionary<string, int> ServicePorts;
+            [DataMember(Name = "upstream_settings")] public Dictionary<string, string> UpstreamSettings;
         }
 
         private sealed class DirectMcpEnvironment : IDisposable
@@ -649,6 +651,36 @@ namespace AgentMemoryCodex
             variables["POWERSHELL_TELEMETRY_OPTOUT"] = "1";
             foreach (KeyValuePair<string, string> entry in contract.FixedEnvironment)
                 variables[entry.Key] = entry.Value;
+            if (workspace.ServicePorts != null)
+            {
+                var distinctPorts = new HashSet<int>();
+                foreach (string name in new[] { "rest", "stream", "viewer", "mcp", "engine" })
+                {
+                    int port;
+                    if (!workspace.ServicePorts.TryGetValue(name, out port) || port < 1 || port > 65535 || !distinctPorts.Add(port))
+                        throw new InvalidOperationException("Invalid AgentMemory service ports.");
+                }
+                int rest = workspace.ServicePorts["rest"], viewer = workspace.ServicePorts["viewer"], mcp = workspace.ServicePorts["mcp"], engine = workspace.ServicePorts["engine"];
+                variables["III_REST_PORT"] = rest.ToString(CultureInfo.InvariantCulture);
+                variables["III_STREAM_PORT"] = workspace.ServicePorts["stream"].ToString(CultureInfo.InvariantCulture);
+                variables["III_VIEWER_PORT"] = viewer.ToString(CultureInfo.InvariantCulture);
+                variables["III_ENGINE_PORT"] = engine.ToString(CultureInfo.InvariantCulture);
+                variables["III_ENGINE_URL"] = "ws://127.0.0.1:" + engine;
+                variables["AGENTMEMORY_URL"] = "http://127.0.0.1:" + rest;
+                variables["AGENTMEMORY_MCP_HTTP_PORT"] = mcp.ToString(CultureInfo.InvariantCulture);
+                variables["AGENTMEMORY_MCP_HTTP_URL"] = "http://127.0.0.1:" + mcp + "/mcp";
+                variables["VIEWER_ALLOWED_HOSTS"] = "127.0.0.2:" + viewer;
+                variables["VIEWER_ALLOWED_ORIGINS"] = "http://localhost:" + rest + ",http://localhost:" + viewer + ",http://127.0.0.1:" + rest + ",http://127.0.0.1:" + viewer + ",http://127.0.0.2:" + viewer;
+            }
+            if (workspace.UpstreamSettings != null)
+            {
+                var allowedSettings = new HashSet<string>(new[] { "AGENTMEMORY_VECTOR_BUCKET_SIZE", "AGENTMEMORY_INDEX_SAVE_INTERVAL_MS", "AGENTMEMORY_VECTOR_BACKFILL_MAX", "AGENTMEMORY_VECTOR_BACKFILL", "SESSION_TIMEOUT_MS", "SESSION_TTL_DAYS", "OBSERVATION_TTL_DAYS", "AGENTMEMORY_AUDIT_RETENTION_DAYS", "AGENTMEMORY_BM25_LIMIT", "AGENTMEMORY_GRAPH_WEIGHT" }, StringComparer.Ordinal);
+                foreach (KeyValuePair<string, string> setting in workspace.UpstreamSettings)
+                {
+                    if (!allowedSettings.Contains(setting.Key) || setting.Value == null || Regex.IsMatch(setting.Value, "[\\x00-\\x1f]")) throw new InvalidOperationException("Invalid upstream operational setting.");
+                    variables[setting.Key] = setting.Value;
+                }
+            }
             variables["AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR"] = Path.Combine(root, "data", "qwen-coordination");
             variables["AGENTMEMORY_WORKSPACE_ROOT"] = workspaceRoot;
             variables["AGENTMEMORY_PROJECT_REGISTRY"] = projectRegistry;
@@ -777,31 +809,27 @@ namespace AgentMemoryCodex
             byte[] entropy = Encoding.UTF8.GetBytes(entropyText);
             byte[] protectedBytes = File.ReadAllBytes(path);
             byte[] plainBytes = null;
-            byte[] decodedBytes = null;
             char[] characters = null;
             bool success = false;
             try
             {
                 plainBytes = ProtectedData.Unprotect(protectedBytes, entropy, DataProtectionScope.CurrentUser);
                 characters = Encoding.UTF8.GetChars(plainBytes);
-                if (characters.Length != 44 || characters[43] != '=')
+                if (characters.Length == 0)
                     throw new InvalidOperationException("AgentMemory secret has an invalid format.");
-                for (int index = 0; index < 43; index++)
+                for (int index = 0; index < characters.Length; index++)
                 {
                     char value = characters[index];
-                    if (!((value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
-                          (value >= '0' && value <= '9') || value == '+' || value == '/'))
+                    bool valid = value >= 32 && value <= 126;
+                    if (!valid)
                         throw new InvalidOperationException("AgentMemory secret has an invalid format.");
                 }
-                decodedBytes = Convert.FromBase64CharArray(characters, 0, characters.Length);
-                if (decodedBytes.Length != 32) throw new InvalidOperationException("AgentMemory secret has an invalid length.");
                 success = true;
                 return characters;
             }
             finally
             {
                 if (!success) ClearChars(characters);
-                ClearBytes(decodedBytes);
                 ClearBytes(plainBytes);
                 ClearBytes(protectedBytes);
                 ClearBytes(entropy);

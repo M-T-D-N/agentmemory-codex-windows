@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
   "iii_engine": {
-    "version": "0.11.2",
-    "source": "https://github.com/iii-hq/iii/tree/2b445957701f94dc5f56f900af314e9d59f3b0f7",
-    "source_commit": "2b445957701f94dc5f56f900af314e9d59f3b0f7",
-    "sha256": "188C3995C61D2CED9451C5CD3FDD5DE281662191A8A779561BBD3EBFA249556D",
-    "upstream_binary_sha256": "2447BC21906A6B5BE270868DA7E74A1C744A4644CF3BD4B37A228BA4E55478CA",
+    "version": "0.22.1",
+    "source": "https://github.com/iii-hq/iii/tree/e7de3820d1e558f3762edf95e4440552444d48d3",
+    "source_commit": "e7de3820d1e558f3762edf95e4440552444d48d3",
+    "sha256": "CFE8569B35BFD4B04406FBC7E6C848A4BEF79579C70C07F3CD73D9BD422B367B",
+    "upstream_binary_sha256": "C7A1BE88F1BFCA9E92015C8742C4B2E9859F466DD1EFDAB838594C25FEB02722",
     "state_durability": "file-flush-v1",
-    "patch": "patches/iii-0.11.2-state-flush.patch",
-    "patch_sha256": "B9473B70DCF45B1FFE67850954A8B6F3C789EF0BCA91E17BE0AF3280B2161734",
-    "cargo_lock_sha256": "589BFD011785C010C62A7FAC94732435C368F7B338B64128CBB464FCC1EAF699",
+    "patch": "patches/iii-0.22.1-state-flush.patch",
+    "patch_sha256": "57761FBBBA9E964584B2B26B3A9875788F564AD07316A7BB8E86711C30CAE4A9",
+    "cargo_lock_sha256": "E0653533C4C4197EBB2956E394B1075168EBB972348C53BF2BD4221F2801EC0D",
     "build_profile": "release",
     "build_target": "x86_64-pc-windows-msvc",
     "rust_version": "1.98.0",
@@ -17,7 +17,7 @@
     "msvc_version": "14.51.36231",
     "windows_sdk_version": "10.0.26100.0",
     "license": "Elastic-2.0",
-    "license_source": "https://github.com/iii-hq/iii/blob/iii%2Fv0.11.2/LICENSE_ELv2",
-    "license_sha256": "93774B18D561E27FC44F34C767C62BD56549A6D99E3E05B9C33CD8A3B94134A8"
+    "license_source": "https://github.com/iii-hq/iii/blob/iii/v0.22.1/engine/LICENSE",
+    "license_sha256": "AA94DB7315D297192247F2254026CACBDB433A7742D841F27506A4D974C42C85"
   }
 }

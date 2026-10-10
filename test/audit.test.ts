@@ -60,7 +60,7 @@ describe("Audit Functions", () => {
     await new Promise((r) => setTimeout(r, 10));
     await recordAudit(kv as never, "delete", "fn2", ["b"], {});
 
-    const entries = await queryAudit(kv as never);
+    const { entries } = await queryAudit(kv as never);
     expect(entries.length).toBe(2);
     expect(
       new Date(entries[0].timestamp).getTime(),
@@ -72,7 +72,7 @@ describe("Audit Functions", () => {
     await recordAudit(kv as never, "delete", "fn2", [], {});
     await recordAudit(kv as never, "observe", "fn3", [], {});
 
-    const entries = await queryAudit(kv as never, { operation: "observe" });
+    const { entries } = await queryAudit(kv as never, { operation: "observe" });
     expect(entries.length).toBe(2);
     expect(entries.every((e) => e.operation === "observe")).toBe(true);
   });
@@ -82,17 +82,27 @@ describe("Audit Functions", () => {
     await new Promise((r) => setTimeout(r, 20));
     const late = await recordAudit(kv as never, "delete", "fn2", [], {});
 
-    const entries = await queryAudit(kv as never, {
+    const { entries } = await queryAudit(kv as never, {
       dateFrom: late.timestamp,
     });
     expect(entries.length).toBe(1);
     expect(entries[0].operation).toBe("delete");
 
-    const entriesBefore = await queryAudit(kv as never, {
+    const { entries: entriesBefore } = await queryAudit(kv as never, {
       dateTo: early.timestamp,
     });
     expect(entriesBefore.length).toBe(1);
     expect(entriesBefore[0].operation).toBe("observe");
+  });
+
+  it("queryAudit filters by target id or function text", async () => {
+    await recordAudit(kv as never, "forget", "mem::forget", ["mem_abc", "ses_1"]);
+    await recordAudit(kv as never, "observe", "mem::observe", ["obs_9"]);
+    await recordAudit(kv as never, "lesson_save", "mem::lesson-save", ["lsn_1"]);
+
+    expect((await queryAudit(kv as never, { query: "MEM_AB" })).entries.map((e) => e.targetIds[0])).toEqual(["mem_abc"]);
+    expect((await queryAudit(kv as never, { query: "lesson-save" })).entries.map((e) => e.targetIds[0])).toEqual(["lsn_1"]);
+    expect((await queryAudit(kv as never, { query: "nothing" })).entries).toEqual([]);
   });
 
   it("queryAudit respects limit", async () => {
@@ -100,7 +110,7 @@ describe("Audit Functions", () => {
       await recordAudit(kv as never, "observe", `fn${i}`, [], {});
     }
 
-    const entries = await queryAudit(kv as never, { limit: 3 });
+    const { entries } = await queryAudit(kv as never, { limit: 3 });
     expect(entries.length).toBe(3);
   });
 });
@@ -114,6 +124,7 @@ describe("managed audit paging", () => {
     }));
     const managed = {
       usesManagedState: true,
+      get: vi.fn(async () => null),
       list: vi.fn(() => { throw Error("Whole audit scope read is forbidden"); }),
       listPage: vi.fn(async (_scope: string, offset: number) => ({
         entries: rows.slice(offset, offset + 128).map(value => ({ key: value.id, value })),
@@ -124,7 +135,7 @@ describe("managed audit paging", () => {
       dateFrom: new Date(1700000030000).toISOString(), dateTo: new Date(1700000080000).toISOString() };
     const expected = rows.filter(row => row.operation === filter.operation && row.timestamp >= filter.dateFrom && row.timestamp <= filter.dateTo)
       .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, filter.limit);
-    expect(await queryAudit(managed as never, filter)).toEqual(expected);
+    expect((await queryAudit(managed as never, filter)).entries).toEqual(expected);
     expect(managed.list).not.toHaveBeenCalled();
     expect(managed.listPage.mock.calls.map(call => call[1])).toEqual([0, 128, 256]);
   });

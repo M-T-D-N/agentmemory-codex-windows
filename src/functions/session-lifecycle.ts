@@ -17,10 +17,10 @@ export type SessionStartResult =
 
 export type SessionEndResult =
   | { success: true; session: Session }
-  | { success: false; error: "session_not_found" | "session_invalid" };
+  | { success: false; error: "session_not_found" | "session_invalid" | "already_completed" };
 
 export function sessionLifecycleLockKey(sessionId: string): string {
-  return `mem:session-lifecycle:${sessionId}`;
+  return `obs:${sessionId}`;
 }
 
 function isCompleteSessionRecord(
@@ -52,12 +52,16 @@ export function completeExistingSession(
   sessionId: string,
   now = new Date().toISOString(),
 ): Promise<SessionEndResult> {
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    return Promise.resolve({ success: false, error: "session_not_found" });
+  }
   return withKeyedLock(sessionLifecycleLockKey(sessionId), async () => {
     const existing = await kv.get<Session>(KV.sessions, sessionId);
     if (!existing) return { success: false, error: "session_not_found" };
     if (!isCompleteSessionRecord(existing, sessionId)) {
       return { success: false, error: "session_invalid" };
     }
+    if (existing.status === "completed") return { success: false, error: "already_completed" };
     const session = await kv.update<Session>(KV.sessions, sessionId, [
       { type: "set", path: "endedAt", value: now },
       { type: "set", path: "updatedAt", value: now },

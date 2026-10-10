@@ -1,8 +1,16 @@
 #!/usr/bin/env node
+import { isSdkChildContext } from "./_runtime.js";
 import { resolveProject, hookCwd } from "./_project.js";
-import { REST_URL, authHeaders, isSdkChildContext } from "./_runtime.js";
+import { captureObservation, isDrainChild, runDrainChild, withEventId } from "./_capture.js";
+
+
+
+const OBSERVE_TIMEOUT_MS = 2000;
+const EXIT_CAP_MS = 2500;
 
 async function main() {
+  if (isSdkChildContext(undefined)) return;
+  if (isDrainChild()) return runDrainChild();
   let input = "";
   for await (const chunk of process.stdin) {
     input += chunk;
@@ -22,28 +30,29 @@ async function main() {
 
   const cwd = hookCwd(data) || process.cwd();
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      hookType: "task_completed",
-      sessionId,
-      project: resolveProject(cwd),
-      cwd,
-      timestamp: new Date().toISOString(),
-      data: {
-        task_id: data.task_id,
-        task_subject: data.task_subject,
-        task_description: typeof data.task_description === "string"
-          ? data.task_description.slice(0, 2000)
-          : "",
-        teammate_name: data.teammate_name,
-        team_name: data.team_name,
+  void captureObservation(
+    withEventId(
+      {
+        hookType: "task_completed",
+        sessionId,
+        project: resolveProject(cwd),
+        cwd,
+        timestamp: new Date().toISOString(),
+        data: {
+          task_id: data.task_id,
+          task_subject: data.task_subject,
+          task_description: typeof data.task_description === "string"
+            ? data.task_description.slice(0, 2000)
+            : "",
+          teammate_name: data.teammate_name,
+          team_name: data.team_name,
+        },
       },
-    }),
-    signal: AbortSignal.timeout(2000),
-  }).catch(() => {});
-  setTimeout(() => process.exit(0), 500).unref();
+      data,
+    ),
+    OBSERVE_TIMEOUT_MS,
+  );
+  setTimeout(() => process.exit(0), EXIT_CAP_MS).unref();
 }
 
 main().catch(() => process.exit(0));

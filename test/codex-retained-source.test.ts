@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -62,7 +63,7 @@ describe("retained observations from a prior native source generation", () => {
     expect(await sample.kv.list(KV.observations("s"))).toHaveLength(paginated ? 3 : 2);
     expect(await sample.preview()).toMatchObject({ adoptRetainedSource: 0, missing: 0, retainedSourceMessageCount: 1 });
     expect(await inspectCodexSource(sample.kv, sample.input, sample.managed)).toMatchObject({ status: "ready", retainedSourceMessageCount: 1, unmatchedCaptureCount: 0 });
-    expect(JSON.stringify(await sample.kv.list(KV.audit))).toContain('"retainedSourceObservations":[{"observationId":"existing"');
+    expect(JSON.stringify((await queryAudit(sample.kv as never)).entries)).toContain('"retainedSourceObservations":[{"observationId":"existing"');
     expect(await readFile(join(sample.root, sample.previousPath), "utf8")).toBe(sample.previous);
   });
   it.each(["different-owner", "different-cwd", "different-body", "late-time", "protected", "duplicate-row", "duplicate-source", "incomplete-source"])("keeps %s evidence unresolved without changing data", async kind => {
@@ -79,7 +80,7 @@ describe("retained observations from a prior native source generation", () => {
     await expect(sample.preview()).rejects.toThrow();
     expect(await sample.kv.list(KV.observations("s"))).toEqual(before);
     expect((await sample.kv.get<Session>(KV.sessions, "s"))?.codexNativeCapture).toBeUndefined();
-    expect(await sample.kv.list(KV.audit)).toHaveLength(0);
+    expect((await queryAudit(sample.kv as never)).entries).toHaveLength(0);
   });
   it("invalidates a preview when the prior source changes and preserves same-ID provenance on export-shaped rows", async () => {
     const sample = await fixture(false);

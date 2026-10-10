@@ -6,6 +6,7 @@ vi.mock("../src/logger.js", () => ({
 
 import { registerLessonsFunctions } from "../src/functions/lessons.js";
 import type { Lesson } from "../src/types.js";
+import { currentAuditScope } from "./helpers/mocks.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -231,7 +232,7 @@ describe("Lessons", () => {
     });
 
     it("keeps repeated recall read-only while preserving existing mutation audits", async () => {
-      const audits = await kv.list("mem:audit");
+      const audits = await kv.list(currentAuditScope());
       const lessons = await kv.list("mem:lessons");
       for (let repeat = 0; repeat < 2; repeat++) {
         const result = await sdk.trigger("mem::lesson-recall", {
@@ -241,7 +242,7 @@ describe("Lessons", () => {
         expect(result.success).toBe(true);
         expect(result.lessons[0]?.content).toContain("Database indexing");
       }
-      expect(await kv.list("mem:audit")).toEqual(audits);
+      expect(await kv.list(currentAuditScope())).toEqual(audits);
       expect(await kv.list("mem:lessons")).toEqual(lessons);
       expect(audits).toHaveLength(3);
     });
@@ -403,7 +404,7 @@ describe("Lessons", () => {
       };
 
       expect(result.decayed).toBe(0);
-      const audits = await kv.list<Record<string, unknown>>("mem:audit");
+      const audits = await kv.list<Record<string, unknown>>(currentAuditScope());
       expect(audits).toEqual(expect.arrayContaining([
         expect.objectContaining({
           functionId: "mem::lesson-decay-sweep",
@@ -549,7 +550,7 @@ describe("Lessons", () => {
 
       await sdk.trigger("mem::lesson-delete", { lessonId: saved.lesson.id });
 
-      const auditRows = (await kv.list("mem:audit")) as Array<{
+      const auditRows = (await kv.list(currentAuditScope())) as Array<{
         operation: string;
         targetIds: string[];
       }>;

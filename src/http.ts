@@ -1,5 +1,11 @@
-import type { ApiRequest } from "iii-sdk";
-import { timingSafeCompare } from "./auth.js";
+import type { HttpRequest as ApiRequest } from "@iii-dev/helpers/http";
+import { checkRequestGuard, configuredAllowedOrigins, timingSafeCompare } from "./auth.js";
+
+let resolveHttpOriginPorts: () => Array<number | null | undefined> = () => [3111, 3113];
+
+export function setHttpOriginPorts(resolve: () => Array<number | null | undefined>): void {
+  resolveHttpOriginPorts = resolve;
+}
 
 export interface HttpResponse {
   status_code: number;
@@ -15,6 +21,12 @@ export function checkBearerAuth(
   request: ApiRequest,
   secret: string | undefined,
 ): HttpResponse | null {
+  const rejected = checkRequestGuard({
+    method: request.method,
+    headers: request.headers,
+    allowedOrigins: configuredAllowedOrigins(resolveHttpOriginPorts()),
+  });
+  if (rejected) return rejected;
   if (!secret) return null;
   const authorization =
     request.headers?.["authorization"] || request.headers?.["Authorization"];

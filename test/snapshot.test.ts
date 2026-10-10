@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mockKV as createMockKV } from "./helpers/mocks.js";
+import { queryAudit } from "../src/functions/audit.js";
 
 const gitOutput = vi.hoisted(() => ({ state: "" }));
 
@@ -167,7 +168,7 @@ describe("Snapshot Functions", () => {
   it("snapshot-create records an audit entry", async () => {
     await sdk.trigger("mem::snapshot-create", { message: "Audit test" });
 
-    const audits = await kv.list("mem:audit");
+    const audits = (await queryAudit(kv as never)).entries;
     expect(audits.length).toBe(1);
   });
 

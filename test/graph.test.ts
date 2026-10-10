@@ -1228,7 +1228,7 @@ describe("Graph Functions", () => {
     expect(await localKv.get("mem:sessions", "ses_1")).toMatchObject({ semanticGraphStatus: "complete", semanticGraphThroughObservationId: observation.id, semanticGraphLastError: "", observationCount: 1 });
     expect(await localKv.list("mem:graph:nodes")).toEqual([]);
     expect(await localKv.list("mem:graph:edges")).toEqual([]);
-    const audit = (await localKv.list<Record<string, any>>("mem:audit")).find(a => a.functionId === "mem::graph-extract");
+    const audit = (await localKv.list<Record<string, any>>(`mem:audit:${new Date().toISOString().slice(0, 7)}`)).find(a => a.functionId === "mem::graph-extract");
     expect(audit).toMatchObject({ targetIds: [observation.id], details: { processingCompleted: true, semanticCompleted: false, excludedObservationIds: [observation.id], exclusionReason: ["page_event", "ui_only"].includes(mode) ? "codex_internal_host_event" : "codex_approval_review" } });
   });
 

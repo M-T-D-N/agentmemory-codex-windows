@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { describe, expect, it, vi } from 'vitest';
 import { StateKV } from '../src/state/kv.js';
 import { KV } from '../src/state/schema.js';
@@ -191,7 +192,7 @@ describe('recoverable empty observations through canonical state', () => {
     expect(await changeEmptyObservation(f.kv, request)).toMatchObject({ success: false, committed: true });
     const restarted = new StateKV(f.sdk); await restarted.initializeObservationRecovery();
     expect(await changeEmptyObservation(restarted, request)).toMatchObject({ success: true, changed: 0, version: 1, actualObservationCount: 1 });
-    expect(f.store.get(KV.audit)!.size).toBe(1);
+    expect((await queryAudit(restarted)).entries.length).toBe(1);
   });
 
   it('fails closed on ambiguous canonical write and reloads canonical state after worker restart', async () => {

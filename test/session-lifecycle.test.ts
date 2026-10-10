@@ -107,6 +107,13 @@ describe("prepareSessionStart", () => {
 });
 
 describe("completeExistingSession", () => {
+  it("leaves a completed session unchanged on repeated end", async () => {
+    const kv = mockKV();
+    await kv.set("mem:sessions", existing.id, existing);
+    await expect(completeExistingSession(kv as never, existing.id, "2026-01-02T00:00:00.000Z"))
+      .resolves.toEqual({ success: false, error: "already_completed" });
+    await expect(kv.get("mem:sessions", existing.id)).resolves.toEqual(existing);
+  });
   it("does not materialize a row for an unknown session", async () => {
     const kv = mockKV();
 
@@ -132,7 +139,7 @@ describe("completeExistingSession", () => {
 
   it("completes an existing session while preserving accumulated fields", async () => {
     const kv = mockKV();
-    await kv.set("mem:sessions", existing.id, existing);
+    await kv.set("mem:sessions", existing.id, { ...existing, status: "active" });
 
     const result = await completeExistingSession(
       kv as never,

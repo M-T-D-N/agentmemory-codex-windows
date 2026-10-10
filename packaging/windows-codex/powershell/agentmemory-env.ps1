@@ -36,6 +36,8 @@ function Get-RequiredFixedValue {
 }
 
 $resolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+. (Join-Path $PSScriptRoot 'agentmemory-layout.ps1')
+$servicePorts = Get-AgentMemoryServicePorts -Root $resolvedRoot
 $contractPath = Join-Path $resolvedRoot 'config\mcp-launcher-environment.json'
 if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) {
     throw "AgentMemory environment contract is missing: $contractPath"
@@ -96,17 +98,8 @@ $plainSecret = [System.Security.Cryptography.ProtectedData]::Unprotect(
 )
 try {
     $decodedSecret = [System.Text.Encoding]::UTF8.GetString($plainSecret)
-    if ($decodedSecret -notmatch '^[A-Za-z0-9+/]{43}=$') {
+    if ($decodedSecret -notmatch '^[\x20-\x7e]+$') {
         throw 'AgentMemory secret has an invalid format.'
-    }
-    $decodedBytes = [Convert]::FromBase64String($decodedSecret)
-    try {
-        if ($decodedBytes.Length -ne 32) {
-            throw 'AgentMemory secret has an invalid length.'
-        }
-    }
-    finally {
-        [System.Array]::Clear($decodedBytes, 0, $decodedBytes.Length)
     }
 }
 finally {
@@ -208,6 +201,24 @@ foreach ($property in @($contract.fixed_environment.PSObject.Properties)) {
     }
     [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
 }
+$portEnvironment = @{
+    III_REST_PORT = [string]$servicePorts.rest; III_STREAM_PORT = [string]$servicePorts.stream
+    III_VIEWER_PORT = [string]$servicePorts.viewer; III_ENGINE_PORT = [string]$servicePorts.engine
+    III_ENGINE_URL = "ws://127.0.0.1:$($servicePorts.engine)"
+    AGENTMEMORY_URL = "http://127.0.0.1:$($servicePorts.rest)"
+    AGENTMEMORY_MCP_HTTP_PORT = [string]$servicePorts.mcp
+    AGENTMEMORY_MCP_HTTP_URL = "http://127.0.0.1:$($servicePorts.mcp)/mcp"
+    VIEWER_ALLOWED_HOSTS = "127.0.0.2:$($servicePorts.viewer)"
+    VIEWER_ALLOWED_ORIGINS = "http://localhost:$($servicePorts.rest),http://localhost:$($servicePorts.viewer),http://127.0.0.1:$($servicePorts.rest),http://127.0.0.1:$($servicePorts.viewer),http://127.0.0.2:$($servicePorts.viewer)"
+}
+foreach ($key in $portEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $portEnvironment[$key], 'Process') }
+if ($workspaceConfig.PSObject.Properties['upstream_settings']) {
+    $allowedSettings = @('AGENTMEMORY_VECTOR_BUCKET_SIZE', 'AGENTMEMORY_INDEX_SAVE_INTERVAL_MS', 'AGENTMEMORY_VECTOR_BACKFILL_MAX', 'AGENTMEMORY_VECTOR_BACKFILL', 'SESSION_TIMEOUT_MS', 'SESSION_TTL_DAYS', 'OBSERVATION_TTL_DAYS', 'AGENTMEMORY_AUDIT_RETENTION_DAYS', 'AGENTMEMORY_BM25_LIMIT', 'AGENTMEMORY_GRAPH_WEIGHT')
+    foreach ($setting in $workspaceConfig.upstream_settings.PSObject.Properties) {
+        if ($setting.Name -notin $allowedSettings -or $setting.Value -isnot [string] -or $setting.Value -match '[\x00-\x1f]') { throw 'Invalid upstream operational setting.' }
+        [Environment]::SetEnvironmentVariable($setting.Name, $setting.Value, 'Process')
+    }
+}
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR', (Join-Path $resolvedRoot 'data\qwen-coordination'), 'Process')
 $localAILauncher = Join-Path $workspaceRoot 'projects\local-ai\scripts\Invoke-LocalAI.ps1'
 if (-not (Test-Path -LiteralPath $localAILauncher -PathType Leaf)) { $localAILauncher = $null }
@@ -243,7 +254,7 @@ function Get-AgentMemoryMcpHttpAccessToken {
 function Test-AgentMemoryMcpHttp {
     param([switch]$VerifyFailClosed)
     try {
-        if ($env:AGENTMEMORY_MCP_HTTP_URL -cne 'http://127.0.0.1:3114/mcp') { return $false }
+        if ($env:AGENTMEMORY_MCP_HTTP_URL -cne "http://127.0.0.1:$($servicePorts.mcp)/mcp") { return $false }
         $requestBody = [ordered]@{
             jsonrpc = '2.0'
             id = 'agentmemory-readiness'
@@ -285,7 +296,8 @@ function Test-AgentMemoryMcpHttp {
                 $challenge = [string](@($errorResponse.Headers.GetValues('WWW-Authenticate')) -join ', ')
             }
             if ($unauthorizedStatus -ne 401) { return $false }
-            if ($challenge -notmatch '^Bearer\s+resource_metadata="http://127\.0\.0\.1:3114/\.well-known/oauth-protected-resource"$') {
+            $expectedMetadata = [regex]::Escape("http://127.0.0.1:$($servicePorts.mcp)/.well-known/oauth-protected-resource")
+            if ($challenge -notmatch ('^Bearer\s+resource_metadata="' + $expectedMetadata + '"$')) {
                 return $false
             }
         }

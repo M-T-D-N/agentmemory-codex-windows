@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
 import { Worker } from "node:worker_threads";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 
 const collectorSource = String.raw`
 const { parentPort, workerData } = require('node:worker_threads');
@@ -42,7 +42,7 @@ flush();
 `;
 
 export function attachRuntimeDiagnostics(
-  sdk: ISdk,
+  sdk: IIIClient,
   options: { file?: string; runId?: string },
 ): { stop: () => Promise<void> } | undefined {
   const { file, runId } = options;
@@ -119,14 +119,14 @@ export function attachRuntimeDiagnostics(
       args[1] = (...values: unknown[]) => track("function", name, () => handler(...values));
     }
     return Reflect.apply(register, sdk, args);
-  } as ISdk["registerFunction"];
+  } as IIIClient["registerFunction"];
   const instrumentedTrigger = function (...args: unknown[]): unknown {
     const name = (args[0] as { function_id?: unknown })?.function_id;
     if (typeof name === "string" && /^state::(get|set|update|delete|list|list_groups)$/.test(name)) {
       return track("state", name, () => Reflect.apply(trigger, sdk, args));
     }
     return Reflect.apply(trigger, sdk, args);
-  } as ISdk["trigger"];
+  } as IIIClient["trigger"];
   sdk.registerFunction = instrumentedRegister;
   sdk.trigger = instrumentedTrigger;
   return { stop: async () => {

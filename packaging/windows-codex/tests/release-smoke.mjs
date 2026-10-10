@@ -40,24 +40,31 @@ const version = spawnSync(process.execPath, [cli, "--version"], {
   timeout: 10_000,
 });
 assert.equal(version.status, 0, version.stderr);
-assert.equal(version.stdout.trim(), "0.9.29");
+assert.equal(version.stdout.trim(), sourcePackage.version);
 
 const generatedModules = readdirSync(dist).filter((name) => name.endsWith(".mjs"));
 const coreChunk = generatedModules.find((name) => /^src-.*\.mjs$/.test(name));
-const registryChunk = generatedModules.find((name) => /^tools-registry-.*\.mjs$/.test(name));
+const registryChunk = generatedModules.find((name) => /export\s*\{[^}]*\bgetAllTools\b/.test(readFileSync(join(dist, name), "utf8")));
 assert.ok(coreChunk && registryChunk, "generated CLI chunks are missing");
-for (const file of [join(dist, "index.mjs"), join(dist, coreChunk), join(dist, registryChunk), standalone]) {
+function bundledContent(file, seen = new Set()) {
+  if (seen.has(file)) return "";
+  seen.add(file);
   const content = readFileSync(file, "utf8");
+  const imports = [...content.matchAll(/(?:from\s*|import\s*\(\s*|import\s*)["'](\.\/[^"']+\.mjs)["']/g)];
+  return content + imports.map((match) => bundledContent(join(dist, match[1]), seen)).join("\n");
+}
+for (const file of [join(dist, "index.mjs"), cli, join(dist, registryChunk), standalone]) {
+  const content = bundledContent(file);
   assert.match(content, /memory_graph_upsert/);
   assert.match(content, /memory_graph_provenance_reconcile/);
   assert.match(content, /memory_graph_purge/);
 }
 for (const file of [join(dist, "index.mjs"), join(dist, coreChunk)]) {
-  assert.match(readFileSync(file, "utf8"), /captureExcluded/);
+  assert.match(bundledContent(file), /captureExcluded/);
 }
 const registry = await import(pathToFileURL(join(dist, registryChunk)).href);
 const fullTools = Object.values(registry)
-  .filter((value) => typeof value === "function")
+  .filter((value) => typeof value === "function" && value.name === "getAllTools")
   .map((value) => value())
   .find((value) => Array.isArray(value)
     && value.some((tool) => tool?.name === "memory_recall")
@@ -81,11 +88,10 @@ assertMappedSource(
   "/src/functions/observation-visibility.ts",
   join(sourceRoot, "src", "functions", "observation-visibility.ts"),
 );
-assertMappedSource(
-  join(dist, `${coreChunk}.map`),
-  "/src/functions/graph.ts",
-  join(sourceRoot, "src", "functions", "graph.ts"),
-);
+const graphMap = readdirSync(dist).filter((name) => name.endsWith(".mjs.map"))
+  .find((name) => JSON.parse(readFileSync(join(dist, name), "utf8")).sources.some((source) => source.replaceAll("\\", "/").endsWith("/src/functions/graph.ts")));
+assert.ok(graphMap, "generated package lacks the graph source map");
+assertMappedSource(join(dist, graphMap), "/src/functions/graph.ts", join(sourceRoot, "src", "functions", "graph.ts"));
 
 const smokeHome = mkdtempSync(join(tmpdir(), "agentmemory-release-smoke-"));
 try {
@@ -184,4 +190,4 @@ try {
   delete process.env.AGENTMEMORY_MCP_EMBEDDED;
 }
 
-console.log(JSON.stringify({ success: true, version: "0.9.29", tools: fullTools.length, localFallbackTools: 7, streamableHttp: true }));
+console.log(JSON.stringify({ success: true, version: sourcePackage.version, tools: fullTools.length, localFallbackTools: 7, streamableHttp: true }));

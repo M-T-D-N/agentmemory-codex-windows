@@ -1,16 +1,16 @@
 {
   "name": "@agentmemory/agentmemory",
-  "version": "0.9.29",
+  "version": "0.9.30",
   "private": true,
   "packageManager": "pnpm@11.19.0",
   "description": "Independent Windows-native AgentMemory downstream for OpenAI Codex Desktop and CLI",
   "agentmemoryDownstream": {
     "displayName": "AgentMemory for Codex on Windows",
-    "version": "0.1.0-preview.14",
+    "version": "0.1.0-preview.15",
     "repositoryName": "agentmemory-codex-windows",
     "supportedHostProfile": "windows-codex",
-    "agentmemoryCompatibilityVersion": "0.9.29",
-    "dataContractVersion": 4
+    "agentmemoryCompatibilityVersion": "0.9.30",
+    "dataContractVersion": 5
   },
   "type": "module",
   "main": "dist/index.mjs",
@@ -83,7 +83,8 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.142",
     "@anthropic-ai/sdk": "^0.100.1",
     "@clack/prompts": "^1.2.0",
-    "iii-sdk": "0.11.2",
+    "@iii-dev/helpers": "0.22.1",
+    "iii-sdk": "0.22.1",
     "picocolors": "^1.1.1",
     "zod": "^4.0.0"
   },

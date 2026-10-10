@@ -15,6 +15,7 @@ export function isCodexInternalAmbientText(value) {
   const structuredHostContext = isCompleteCodexHostEnvelope(text);
   return (
     isCodexEffortEvaluatorText(original) || isCodexApprovalReviewText(text) || isIncidentalCodexHostEvent(text) || structuredHostContext ||
+    text.startsWith("this is an app-generated request for a suggested next user message. the user did not write this message.") ||
     (text.startsWith("# overview") &&
       text.includes("hyperpersonalized suggestion")) ||
     text.startsWith(

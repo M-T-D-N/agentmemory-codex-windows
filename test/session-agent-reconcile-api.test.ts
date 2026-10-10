@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile, appendFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -5,7 +6,7 @@ import { tmpdir } from "node:os";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
 import { registerMcpEndpoints } from "../src/mcp/server.js";
-import { KV } from "../src/state/schema.js";
+import { KV, STREAM } from "../src/state/schema.js";
 import { registerObserveFunction } from "../src/functions/observe.js";
 import { getSearchIndex, setIndexPersistence } from "../src/functions/search.js";
 import { IndexPersistence } from "../src/state/index-persistence.js";
@@ -92,14 +93,14 @@ describe("official Codex owner reconciliation entry point", () => {
     expect(await call({ sourceRoot: root })).toMatchObject({ status_code: 503 });
     register("");
     expect(await call()).toMatchObject({ status_code: 503 });
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
   });
   it("reports invalid or ambiguous evidence without modifying canonical data", async () => {
     for (const body of [{ project: "b" }, { dryRun: undefined }, { sourcePath: "../rollout-a.jsonl" },
       { dryRun: false }, { expectedVersion: "bad", dryRun: false, reason: "repair" }]) {
       expect(await call(body)).toMatchObject({ status_code: 409, body: { success: false } });
     }
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
     expect(await sessions()).toEqual([]);
   });
   it("compares source to canonical history through an authenticated read-only action", async () => {
@@ -116,7 +117,7 @@ describe("official Codex owner reconciliation entry point", () => {
       status: "ready", nativeMessageCount: 1, counts: { adopt: 1 } } });
     expect(JSON.stringify(inspected.body)).not.toContain("preserved");
     expect(await kv.get(KV.observations("native-a"), "obs-a")).toEqual(before);
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
     await appendFile(join(root, sourcePath), '{"unfinished":');
     expect(await call({ action: "inspect-source" })).toMatchObject({ status_code: 200, body: {
       readOnly: true, completeNativeInventory: false, incompleteTail: true,
@@ -134,7 +135,7 @@ describe("official Codex owner reconciliation entry point", () => {
       completeNativeInventory: true, unmatchedCaptureCount: 1,
       unmatchedCaptures: [{ observationId: "obs-a", reason: "unresolved_native_correspondence" }] } });
     expect(JSON.stringify(inspected.body)).not.toContain("private unmatched text");
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
     expect(await kv.get(KV.observations("native-a"), "obs-a")).toHaveProperty("narrative", "private unmatched text");
     await appendFile(join(root, sourcePath), '{"unfinished":');
     expect(await call({ action: "inspect-source" })).toMatchObject({ status_code: 200, body: {
@@ -235,7 +236,8 @@ describe("official Codex owner reconciliation entry point", () => {
       kv.set = originalSet;
       expect(await call({ action: "capture-source" })).toMatchObject({ status_code: 200, body: { inserted: 0, indexPending: false } });
     }
-    expect(events).toHaveLength(4);
+    expect(events).toHaveLength(2);
+      expect(events.every(event => event.group_id === STREAM.viewerGroup)).toBe(true);
     expect(new Set(events.map(event => event.item_id)).size).toBe(2);
     expect(await kv.get(KV.sessions, "native-a")).toMatchObject({ observationCount: 2, codexNativeCapture: { status: "caught_up", indexPending: false } });
     expect(await call({ action: "capture-source", project: "other" })).toMatchObject({ status_code: 409 });

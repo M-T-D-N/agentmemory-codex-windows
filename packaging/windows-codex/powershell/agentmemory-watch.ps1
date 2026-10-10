@@ -21,7 +21,9 @@ $stopPath = Join-Path $resolvedRoot 'data\stop-request.json'
 $watchStopPath = Join-Path $resolvedRoot 'data\watchdog-stop-request.json'
 $lockPath = Join-Path $resolvedRoot 'data\watchdog.lock'
 $startupLockPath = Join-Path $resolvedRoot 'data\startup.lock'
-$reservedPorts = @(3111, 3112, 3113, 3114, 49134)
+. (Join-Path $PSScriptRoot 'agentmemory-layout.ps1')
+$servicePorts = Get-AgentMemoryServicePorts -Root $resolvedRoot
+$reservedPorts = @($servicePorts.rest, $servicePorts.stream, $servicePorts.viewer, $servicePorts.mcp, $servicePorts.engine)
 
 foreach ($requiredFile in @($envScript, $lifecycleScript, $taskRegistrationPath, $ownerMarkerPath, $hiddenLauncherPath)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
@@ -66,15 +68,15 @@ function Test-IPv4LoopbackAddress {
 function Test-ServiceReady {
     try {
         $headers = @{ Authorization = "Bearer $($env:AGENTMEMORY_SECRET)" }
-        $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:3111/agentmemory/health' -Headers $headers -TimeoutSec 2
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($servicePorts.rest)/agentmemory/health" -Headers $headers -TimeoutSec 2
         if ($response.StatusCode -ne 200) { return $false }
         if (-not (Test-AgentMemoryMcpHttp)) { return $false }
         $connections = @(Get-ReservedConnections)
         if (@($connections | Where-Object { -not (Test-IPv4LoopbackAddress -Address $_.LocalAddress) }).Count -gt 0) { return $false }
-        foreach ($port in @(3111, 3112, 49134)) {
+        foreach ($port in @($servicePorts.rest, $servicePorts.stream, $servicePorts.engine)) {
             if (-not @($connections | Where-Object { $_.LocalPort -eq $port })) { return $false }
         }
-        if (-not @($connections | Where-Object { $_.LocalPort -eq 3114 })) { return $false }
+        if (-not @($connections | Where-Object { $_.LocalPort -eq $servicePorts.mcp })) { return $false }
         return $true
     }
     catch {

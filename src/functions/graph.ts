@@ -1,5 +1,5 @@
-import { inObservationRecovery, registerObservationWriter } from "../state/observation-write.js";
-import type { ISdk } from "iii-sdk";
+import { inObservationRecovery, registerObservationWriter, withObservationWrite } from "../state/observation-write.js";
+import type { IIIClient } from "iii-sdk";
 import { readArchiveVisibility, archiveTargetAddress } from "./archive.js";
 import { prepareArchiveTargetForget } from "./archive-forget.js";
 import type {
@@ -25,6 +25,7 @@ import { isGraphExtractionEnabled } from "../config.js";
 import { recordAudit, safeAudit } from "./audit.js";
 import { withKeyedLock, tryWithKeyedLock } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
+import { scrubRecord } from "./privacy.js";
 import { isCodexInternalAmbientText, isCodexApprovalReviewText } from "./observation-visibility.js";
 import { semanticGraphCursorsAtEnd } from "./semantic-graph-backlog.js";
 import { graphObservationComplete, graphObservationDigest, readGraphCompletionContext, type GraphCompletionContext } from "./graph-observation-result.js";
@@ -2908,6 +2909,16 @@ export async function persistGraphDelta(
   kv: StateKV,
   nodes: GraphNode[],
   edges: GraphEdge[],
+  obsIds: string[],
+  context: GraphPersistenceContext = {},
+): Promise<{ newNodeCount: number; newEdgeCount: number }> {
+  return withObservationWrite(() => withKeyedLock(GRAPH_WRITE_LOCK, () => persistGraphDeltaUnlocked(kv, nodes, edges, obsIds, context)));
+}
+
+async function persistGraphDeltaUnlocked(
+  kv: StateKV,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
   _obsIds: string[],
   context: GraphPersistenceContext = {},
 ): Promise<{ newNodeCount: number; newEdgeCount: number }> {
@@ -2932,6 +2943,8 @@ export async function persistGraphDelta(
     const project = context.project ?? graphNodeProject(rawNode);
     const node: GraphNode = {
       ...rawNode,
+      name: scrubRecord(rawNode.name),
+      properties: scrubRecord(rawNode.properties ?? {}),
       ...(project ? { project } : {}),
       sourceSessionIds: [
         ...new Set([
@@ -2998,6 +3011,7 @@ export async function persistGraphDelta(
   for (const rawEdge of edges) {
     const edge: GraphEdge = {
       ...rawEdge,
+      properties: scrubRecord(rawEdge.properties ?? {}),
       sourceNodeId: idRemap.get(rawEdge.sourceNodeId) ?? rawEdge.sourceNodeId,
       targetNodeId: idRemap.get(rawEdge.targetNodeId) ?? rawEdge.targetNodeId,
       ...(context.project ? { project: context.project } : {}),
@@ -3067,11 +3081,178 @@ export async function persistGraphDelta(
   return { newNodeCount, newEdgeCount };
 }
 
+export const MAX_GRAPH_SOURCE_OBSERVATIONS = 32;
+
+function boundSources(previous: string[], incoming: string[]): string[] {
+  return [...new Set([...previous, ...incoming])];
+}
+
+export interface GraphCompactResult {
+  nodesScanned: number;
+  nodesTrimmed: number;
+  edgesScanned: number;
+  edgesTrimmed: number;
+  historyScanned: number;
+  historyTrimmed: number;
+  idsRemoved: number;
+  snapshotTrimmed: boolean;
+  total?: number;
+  nextOffset: number | null;
+  provenancePolicy?: "full" | "bounded";
+  skipped?: string;
+}
+
+export type GraphCompactScope = "nodes" | "edges" | "history" | "snapshot";
+
+export interface GraphCompactOptions {
+  scope?: GraphCompactScope;
+  offset?: number;
+  limit?: number;
+  dryRun?: boolean;
+}
+
+export const COMPACT_SCOPES: readonly GraphCompactScope[] = ["nodes", "edges", "history", "snapshot"];
+
+export async function compactGraphProvenance(
+  kv: StateKV,
+  opts: GraphCompactOptions = {},
+): Promise<GraphCompactResult> {
+  const { scope } = opts;
+  if (scope !== undefined && !COMPACT_SCOPES.includes(scope)) {
+    throw new Error(`unknown compact scope: ${String(scope)}`);
+  }
+  const offset = opts.offset ?? 0;
+  const dryRun = opts.dryRun === true;
+  const limit = opts.limit ?? Number.POSITIVE_INFINITY;
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new Error(`compact offset must be a non-negative integer: ${String(opts.offset)}`);
+  }
+  if (!(limit === Number.POSITIVE_INFINITY || (Number.isInteger(limit) && limit > 0))) {
+    throw new Error(`compact limit must be a positive integer: ${String(opts.limit)}`);
+  }
+
+  const result: GraphCompactResult = {
+    nodesScanned: 0,
+    nodesTrimmed: 0,
+    edgesScanned: 0,
+    edgesTrimmed: 0,
+    historyScanned: 0,
+    historyTrimmed: 0,
+    idsRemoved: 0,
+    snapshotTrimmed: false,
+    nextOffset: null,
+  };
+
+  if (kv.usesManagedState) {
+    return { ...result, provenancePolicy: "full", skipped: "canonical_provenance_preserved" };
+  }
+  result.provenancePolicy = "full";
+
+  const trimScope = async <R extends { sourceObservationIds: string[] }>(
+    listIds: () => Promise<unknown[]>,
+    recordScope: string,
+  ): Promise<{ scanned: number; trimmed: number }> => {
+    const allIds = [...new Set(await listIds())]
+      .filter((id): id is string => typeof id === "string")
+      .sort();
+    const end = Math.min(allIds.length, offset + limit);
+    result.total = allIds.length;
+    result.nextOffset = end < allIds.length ? end : null;
+    let scanned = 0;
+    let trimmed = 0;
+    for (const id of allIds.slice(offset, end)) {
+      await withKeyedLock(GRAPH_WRITE_LOCK, async () => {
+        const record = await kv.get<R>(recordScope, id);
+        if (!record) return;
+        scanned += 1;
+        const sources = record.sourceObservationIds ?? [];
+        const bounded = boundSources([], sources);
+        if (bounded.length === sources.length) return;
+        result.idsRemoved += sources.length - bounded.length;
+        if (!dryRun) await kv.set(recordScope, id, { ...record, sourceObservationIds: bounded });
+        trimmed += 1;
+      });
+    }
+    return { scanned, trimmed };
+  };
+
+  const trimSnapshot = () =>
+    withKeyedLock(GRAPH_WRITE_LOCK, async () => {
+      const snap = await readSnapshot(kv);
+      if (!snap) return;
+      const trimList = <R extends { sourceObservationIds: string[] }>(list: R[]) =>
+        list.map((r) => {
+          const sources = r.sourceObservationIds ?? [];
+          if (boundSources([], sources).length === sources.length) return r;
+          result.snapshotTrimmed = true;
+          return { ...r, sourceObservationIds: boundSources([], sources) };
+        });
+      const topNodes = trimList(snap.topNodes);
+      const topEdges = trimList(snap.topEdges);
+      if (result.snapshotTrimmed && !dryRun) {
+        await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, { ...snap, topNodes, topEdges });
+      }
+    });
+
+  if (scope === undefined || scope === "nodes") {
+    const n = await trimScope<GraphNode>(() => kv.list<string>(KV.graphNameIndex), KV.graphNodes);
+    result.nodesScanned = n.scanned;
+    result.nodesTrimmed = n.trimmed;
+  }
+  if (scope === undefined || scope === "edges") {
+    const e = await trimScope<GraphEdge>(() => kv.list<string>(KV.graphEdgeKey), KV.graphEdges);
+    result.edgesScanned = e.scanned;
+    result.edgesTrimmed = e.trimmed;
+  }
+  if (scope === undefined || scope === "history") {
+    const h = await trimScope<GraphEdge>(
+      async () => (await kv.list<GraphEdge>(KV.graphEdgeHistory)).map((r) => r?.id),
+      KV.graphEdgeHistory,
+    );
+    result.historyScanned = h.scanned;
+    result.historyTrimmed = h.trimmed;
+  }
+  if (scope === undefined || scope === "snapshot") {
+    await trimSnapshot();
+  }
+  if (scope === undefined) {
+    delete result.total;
+    result.nextOffset = null;
+  }
+  return result;
+}
+
 export function registerGraphFunction(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
+  sdk.registerFunction("mem::graph-compact", async (data?: GraphCompactOptions) => {
+    const started = Date.now();
+    try {
+      const result = await compactGraphProvenance(kv, data ?? {});
+      const tookMs = Date.now() - started;
+      logger.info("Graph provenance compacted", { ...result, tookMs });
+      if (result.idsRemoved > 0) {
+        await safeAudit(kv, "graph_compact", "mem::graph-compact", [], {
+          scope: data?.scope ?? "all",
+          offset: data?.offset,
+          limit: data?.limit,
+          nodesTrimmed: result.nodesTrimmed,
+          edgesTrimmed: result.edgesTrimmed,
+          historyTrimmed: result.historyTrimmed,
+          idsRemoved: result.idsRemoved,
+          snapshotTrimmed: result.snapshotTrimmed,
+        });
+      }
+      return { success: true, ...result, tookMs };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error("Graph provenance compaction failed", { error: msg });
+      return { success: false, error: msg };
+    }
+  });
+
   registerObservationWriter(sdk, "mem::graph-upsert",
     async (data: ManualGraphUpsertInput) =>
       withKeyedLock(GRAPH_WRITE_LOCK, () => upsertManualGraph(kv, data)),
@@ -3254,8 +3435,9 @@ export function registerGraphFunction(
           }
           nodes = nodes.concat(parsed.nodes.map((node) => ({
             ...node,
+            name: scrubRecord(node.name),
             properties: {
-              ...(node.properties ?? {}),
+              ...scrubRecord(node.properties ?? {}),
               curation_lane: "provider_graph",
               curation_claim: false,
             },
@@ -3263,7 +3445,7 @@ export function registerGraphFunction(
           edges = edges.concat(parsed.edges.map((edge) => ({
             ...edge,
             properties: {
-              ...(edge.properties ?? {}),
+              ...scrubRecord(edge.properties ?? {}),
               curation_lane: "provider_graph",
               curation_claim: false,
             },
@@ -3280,7 +3462,7 @@ export function registerGraphFunction(
       try {
         const processingCompleted = semanticCompleted || onlyExcludedObservations;
         const persist = (writer: StateKV) => nodes.length > 0 || edges.length > 0
-          ? persistGraphDelta(writer, nodes, edges, obsIds, {
+          ? persistGraphDeltaUnlocked(writer, nodes, edges, obsIds, {
               ...(project ? { project } : {}),
               ...(sessionId ? { sourceSessionIds: [sessionId] } : {}),
             })

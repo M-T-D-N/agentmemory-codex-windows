@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Release')][string]$OutputDirectory,
     [Parameter(Mandatory = $true, ParameterSetName = 'Release')][string]$IiiEnginePath,
     [string]$NodePath = '',
+    [string]$ScratchDirectory = '',
     [string]$ReleaseRevision = 'r32',
     [switch]$SkipTests,
     [Parameter(Mandatory = $true, ParameterSetName = 'Validation')][switch]$ValidationOnly
@@ -11,6 +12,41 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+function Assert-PhysicalDirectoryPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $cursor = [System.IO.Path]::GetFullPath($Path)
+    while ($cursor) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -Force -LiteralPath $cursor
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Build scratch path is not a physical directory: $cursor"
+            }
+        }
+        $cursor = [System.IO.Path]::GetDirectoryName($cursor)
+    }
+}
+
+function Remove-BuildScratch {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Parent)
+    if ([IO.Path]::GetDirectoryName($Path) -ne $Parent) { throw 'Build scratch parent changed.' }
+    Assert-PhysicalDirectoryPath -Path $Path
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "Build scratch directory disappeared: $Path" }
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($Path)
+    while ($pending.Count -gt 0) {
+        foreach ($item in Get-ChildItem -Force -LiteralPath $pending.Pop()) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Build scratch contains a reparse point: $($item.FullName)"
+            }
+            if ($item.PSIsContainer) { $pending.Push($item.FullName) }
+        }
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force
+    if ((Test-Path -LiteralPath $Path) -or -not (Test-Path -LiteralPath $Parent -PathType Container)) {
+        throw "Build scratch cleanup verification failed: $Path"
+    }
+}
 
 function Get-NormalizedTextSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -56,7 +92,7 @@ $stateDurability = $thirdParty.iii_engine.PSObject.Properties['state_durability'
 if ($null -eq $stateDurability -or [string]$stateDurability.Value -ne 'file-flush-v1') {
     throw 'The pinned engine has not been qualified for the required StateModule durability barrier.'
 }
-$enginePatch = Join-Path $PSScriptRoot 'patches\iii-0.11.2-state-flush.patch'
+$enginePatch = Join-Path $PSScriptRoot ([string]$thirdParty.iii_engine.patch)
 if ([string]$thirdParty.iii_engine.source_commit -notmatch '^[a-f0-9]{40}$' -or
     [string]$thirdParty.iii_engine.patch_sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
     (Get-NormalizedTextSha256 -Path $enginePatch) -ne [string]$thirdParty.iii_engine.patch_sha256 -or
@@ -77,8 +113,8 @@ if ($iiiHash -ne [string]$thirdParty.iii_engine.sha256) {
 $packageJson = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
 $version = [string]$packageJson.version
 $downstreamVersion = [string]$packageJson.agentmemoryDownstream.version
-if ($packageJson.agentmemoryDownstream.dataContractVersion -ne 4) {
-    throw 'This managed runtime requires data contract version 4.'
+if ($packageJson.agentmemoryDownstream.dataContractVersion -ne 5) {
+    throw 'This managed runtime requires data contract version 5.'
 }
 if ($downstreamVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
     throw 'package.json agentmemoryDownstream.version must be a semantic version.'
@@ -95,8 +131,24 @@ if (-not $ValidationOnly) {
 
 }
 
-$priorNodeOptions = [System.Environment]::GetEnvironmentVariable('NODE_OPTIONS', 'Process')
-$priorCi = [System.Environment]::GetEnvironmentVariable('CI', 'Process')
+$scratchParent = $ScratchDirectory
+if ([string]::IsNullOrWhiteSpace($scratchParent)) { $scratchParent = $env:WORKSPACE_TASK_ROOT }
+if ([string]::IsNullOrWhiteSpace($scratchParent)) { $scratchParent = [IO.Path]::GetTempPath() }
+$scratchParent = [IO.Path]::GetFullPath($scratchParent).TrimEnd([IO.Path]::DirectorySeparatorChar)
+if ($scratchParent -match '^[A-Za-z]:$') { $scratchParent += [IO.Path]::DirectorySeparatorChar }
+Assert-PhysicalDirectoryPath -Path $scratchParent
+[void][IO.Directory]::CreateDirectory($scratchParent)
+$scratchRoot = Join-Path $scratchParent ("agentmemory-build-" + [Guid]::NewGuid().ToString('N'))
+[void](New-Item -ItemType Directory -Path $scratchRoot -ErrorAction Stop)
+$buildSucceeded = $false
+$priorEnvironment = @{}
+foreach ($name in @('NODE_OPTIONS', 'CI', 'TEMP', 'TMP', 'TMPDIR', 'NODE_COMPILE_CACHE')) {
+    $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+try {
+$priorNodeOptions = $priorEnvironment['NODE_OPTIONS']
+foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) { [Environment]::SetEnvironmentVariable($name, $scratchRoot, 'Process') }
+$env:NODE_COMPILE_CACHE = Join-Path $scratchRoot 'node-compile-cache'
 $env:CI = 'true'
 $nodeHeapOption = '--max-old-space-size=12288'
 if ([string]::IsNullOrWhiteSpace($priorNodeOptions)) {
@@ -129,11 +181,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "npm distribution tests failed with exit code $LASTEXITCODE" }
     }
 
-    if ($ValidationOnly) {
-        [ordered]@{ success = $true; validation_only = $true; source_commit = $sourceCommit; source_dirty = ($sourceDirty.Count -gt 0); tests_skipped = [bool]$SkipTests; release_created = $false } | ConvertTo-Json
-        return
-    }
-
+    if (-not $ValidationOnly) {
     & $pnpm --config.inject-workspace-packages=true --config.node-linker=hoisted --filter '@agentmemory/agentmemory' deploy --prod $runtimePackageRoot
     if ($LASTEXITCODE -ne 0) { throw "pnpm deploy failed with exit code $LASTEXITCODE" }
     Get-ChildItem -Recurse -Directory -Filter '.bin' -LiteralPath (Join-Path $runtimePackageRoot 'node_modules') |
@@ -145,23 +193,16 @@ try {
     }
     & $node (Join-Path $PSScriptRoot 'tests\release-smoke.mjs') $runtimePackageRoot $sourceRoot
     if ($LASTEXITCODE -ne 0) { throw "release smoke failed with exit code $LASTEXITCODE" }
+    }
 }
 finally {
     Pop-Location
-    if ($null -eq $priorNodeOptions) {
-        Remove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue
-    }
-    else {
-        $env:NODE_OPTIONS = $priorNodeOptions
-    }
-    if ($null -eq $priorCi) {
-        Remove-Item Env:CI -ErrorAction SilentlyContinue
-    }
-    else {
-        $env:CI = $priorCi
-    }
 }
 
+if ($ValidationOnly) {
+    $result = [ordered]@{ success = $true; validation_only = $true; source_commit = $sourceCommit; source_dirty = ($sourceDirty.Count -gt 0); tests_skipped = [bool]$SkipTests; release_created = $false }
+}
+else {
 $scriptsOut = Join-Path $payloadRoot 'scripts'
 $binOut = Join-Path $payloadRoot 'bin'
 $configOut = Join-Path $payloadRoot 'config'
@@ -186,12 +227,16 @@ Copy-Item -LiteralPath $enginePatch -Destination $srcOut
 Copy-Item -LiteralPath $iii -Destination (Join-Path $binOut 'iii.exe')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-WindowsCodex.ps1') -Destination $releaseRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Initialize-WindowsCodex.ps1') -Destination $releaseRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Adopt-WindowsCodex.ps1') -Destination $releaseRoot
 foreach ($name in @('LICENSE', 'NOTICE')) { Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $releaseRoot }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses\iii-LICENSE_ELv2') -Destination (Join-Path $releaseRoot 'iii-LICENSE_ELv2')
+foreach ($name in @('iii-NOTICE', 'iii-PATENTS')) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "licenses\$name") -Destination (Join-Path $releaseRoot $name)
+}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses\THIRD-PARTY-NOTICES.md') -Destination $releaseRoot
 $licensesOut = Join-Path $payloadRoot 'licenses'
 [void][IO.Directory]::CreateDirectory($licensesOut)
-foreach ($name in @('LICENSE', 'NOTICE', 'iii-LICENSE_ELv2', 'THIRD-PARTY-NOTICES.md')) {
+foreach ($name in @('LICENSE', 'NOTICE', 'iii-LICENSE_ELv2', 'iii-NOTICE', 'iii-PATENTS', 'THIRD-PARTY-NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $releaseRoot $name) -Destination $licensesOut
 }
 
@@ -274,10 +319,30 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     $utf8NoBom
 )
 
-[ordered]@{
+$result = [ordered]@{
     success = $true
     release_root = $releaseRoot
     payload_files = $files.Count
     version = $downstreamVersion
     agentmemory_version = $version
-} | ConvertTo-Json
+}
+}
+$buildSucceeded = $true
+}
+finally {
+    foreach ($name in $priorEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $priorEnvironment[$name], 'Process')
+    }
+    if ($buildSucceeded) {
+        try { Remove-BuildScratch -Path $scratchRoot -Parent $scratchParent }
+        catch {
+            [Console]::Error.WriteLine("Build scratch cleanup failed; retained for inspection: $scratchRoot")
+            throw
+        }
+        [Console]::Error.WriteLine("Build scratch removed: $scratchRoot")
+    }
+    else {
+        [Console]::Error.WriteLine("Build scratch retained after failure or interruption: $scratchRoot")
+    }
+}
+$result | ConvertTo-Json

@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.14`, based on upstream AgentMemory `v0.9.29`. It is not the
+> Preview `0.1.0-preview.15`, based on upstream AgentMemory `v0.9.30`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -102,10 +102,10 @@ from installed qualification and preserves the current engine/data contracts.
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.14`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.15`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
-  AgentMemory `0.9.29` and the `agentmemory` identifier. These are not the
+  AgentMemory `0.9.30` and the `agentmemory` identifier. These are not the
   downstream release version.
 - `r62` identifies the historical public qualification, not a public version
   line or the qualification of this checkout. Each new build uses a fresh numeric
@@ -113,7 +113,7 @@ The preview is intentionally narrow:
 - Public source snapshots and generated release-folder names use the downstream
   version.
   The installed runtime directory and CLI still use AgentMemory compatibility
-  version `0.9.29` so existing data and integrations are not relabelled.
+  version `0.9.30` so existing data and integrations are not relabelled.
 - Native Windows and Codex are the supported downstream host profile.
 - Existing versioned runtime directories are preserved. Build changed contents
   with a fresh internal revision before cutover; the installer refuses a
@@ -156,7 +156,8 @@ Run from Windows PowerShell 5.1 or newer. The output directory must not exist.
 ```powershell
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
+  -IiiEnginePath D:\inputs\iii-0.22.1.exe `
+  -ScratchDirectory D:\staging\agentmemory-build-temp `
   -ReleaseRevision r83
 ```
 
@@ -193,7 +194,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.14 -OutputDirectory D:\staging\npm-preview11
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.15 -OutputDirectory D:\staging\npm-preview15
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -208,6 +209,40 @@ iii-engine Elastic License 2.0 text, and shipped dependency licenses. See
 [third-party notices](licenses/THIRD-PARTY-NOTICES.md); Apache licensing of this
 adapter does not relicense the engine or other dependencies.
 
+## One installation entry point
+
+The same `Install-WindowsCodex.ps1` accepts a fresh target, a managed existing
+installation, or an explicitly identified original upstream installation.
+The npm launcher forwards the same options. Without `-Execute`, the entry point
+inspects the selected inputs without changing the installation.
+
+| Existing state | Operation |
+|---|---|
+| Empty installation root | Prepare, activate and start the supported runtime; `-Fresh` alone remains preparation-only |
+| Older owned managed installation | Preserve canonical data, authentication, connections and task identity while replacing immutable runtime files |
+| Qualified original upstream 0.9.29 or 0.9.30, file-backed native engine | Stop the verified source, retain its original files and a data copy, then install the supported runtime with the same authentication and listener ports |
+| A newer upstream release | Refuse a silent downgrade and retain the source |
+| Older unqualified state, Redis or Docker data | Retain the source; direct file adoption is not qualified for this storage layout |
+
+For original upstream adoption, provide `-UpstreamPackageRoot`,
+`-UpstreamDataDir`, and the original `.agentmemory` configuration directory as
+`-UpstreamHome`. `-UpstreamRuntimeDir` identifies instance-specific lifecycle
+metadata when it differs from that directory. These paths identify the actual
+installation; a globally installed package alone does not identify its data.
+The target `-InstallRoot` must be separate from all source paths. The npm names
+are `--upstream-package-root`, `--upstream-data-dir`, `--upstream-home`, and
+`--upstream-runtime-dir`.
+
+Managed upgrades retain existing operational settings. Original adoption carries
+the documented storage/retention/search settings into `upstream_settings`;
+provider settings use the managed graph-only local Qwen profile. Original
+configuration files remain available in the source directory. Qualification of
+these actual installation paths is separate from engine snapshot compatibility
+tests. Preview.15 qualification includes actual Windows fresh installation,
+managed upgrade, original 0.9.29/0.9.30 adoption, restart and planned adoption
+failure recovery. These were performed on the owner's Windows host, not a
+broad host matrix; see the public changelog for the boundary.
+
 ## Existing-install cutover
 
 The installer supports an owned existing installation. Without `-Execute` it
@@ -219,8 +254,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.14\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.14 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -237,8 +272,9 @@ identity and working directory, restarts the owned tasks, and requires the
 normal status path to become healthy. It never runs a standard reinstall inside
 the live runtime and never migrates or deletes canonical data.
 
-The managed package now declares data contract version 4 for paged graph write
-intents. It retains version 3 source-linked duplicate captures and partial-forget
+The managed package declares data contract version 5 for the qualified engine
+0.22.1 and SDK 0.22.1 runtime. It retains version 4 paged graph write intents,
+version 3 source-linked duplicate captures and partial-forget
 protection, and version 2 native capture, recoverable graph writes and archive lifecycle state. The release and installed
 manifests retain that contract independently of the upstream compatibility version.
 An absent declaration means legacy contract 1. The current installer rejects a
@@ -735,7 +771,7 @@ before import changes. Explicit forget remains deletion, not recoverable archive
 Exports containing exclusions or native capture provenance use
 `0.9.29-codex-lifecycle-1`; older readers
 must reject that unsupported version rather than silently omit the exclusions.
-The portable package compatibility version remains `0.9.29`.
+The portable package compatibility version is `0.9.30`.
 Exports containing reversible archive lifecycle metadata use
 `0.9.29-codex-lifecycle-2` and include the original targets with their archive
 states. Explicit archive inspection and mutation use `memory_archive` or
@@ -873,7 +909,7 @@ Pass `dryRun: true`, an exact `project` and `sessionId`, and optionally a non-em
 `observationIds` array for a read-only content and reference inventory. Empty ID
 arrays are rejected rather than expanding to a whole-session deletion. This
 preview neither authorizes deletion nor provides a transaction against concurrent
-writers. The pinned iii-engine 0.11.2 `state::list_groups` API enumerates every
+writers. The pinned iii-engine 0.22.1 `state::list_groups` API enumerates every
 observation and enriched-chunk bucket, including legacy sessions without IDs and
 orphan buckets. A failed scope/read operation fails the preview; it never silently
 claims complete coverage. The ID-less session count remains diagnostic metadata.
@@ -1276,9 +1312,66 @@ create an output/release directory. It accepts a dirty source checkout and repor
 `source_dirty`; it is validation evidence, not a release source identity.
 `-SkipTests` keeps its existing explicit meaning for a focused subsequent run.
 
+Both modes create a fresh `agentmemory-build-<unique-id>` directory under
+`-ScratchDirectory`, otherwise `WORKSPACE_TASK_ROOT`, otherwise the portable
+host's temporary directory. Workspace runs must provide the D-owned task parent
+or use the registered task environment. The builder redirects `TEMP`, `TMP`,
+`TMPDIR` and `NODE_COMPILE_CACHE` into that unit and restores the caller's process
+environment. After validation succeeds, or the complete release manifest is
+written, it removes only that disposable unit. Failures/interruption retain the
+unit and report its exact path; a cleanup error fails the invocation before any
+success result is emitted. Physical directory checks reject reparse traversal.
+The caller's parent/files, dependency store, source `node_modules`/`dist`/plugin
+outputs, release payload and arbitrary Cargo targets are outside this cleanup.
+
 Use the normal `-OutputDirectory` and `-IiiEnginePath` invocation once the source is
 ready for final packaging. That mode still requires a clean Git checkout and
 creates the same self-contained release. Validation does not activate a runtime.
+
+## Build artifact closeout
+
+After build and related validation/qualification, the main agent must perform this
+closeout before reporting the work complete. This applies to validation-only runs,
+engine builds, package builds and installation/compatibility tests as well as
+release work. A successful build alone does not complete closeout.
+
+1. Identify the exact task-owned intermediate directories and their consumers
+   from the actual build/test commands. Include engine target/temp outputs,
+   synthetic test data, disposable test installations, diagnostic copies and
+   superseded staging/package copies. Distinguish synthetic test data from
+   canonical or recovery data before any deletion.
+2. After successful validation and consumption, remove only confirmed unused,
+   task-owned nonpersistent units using the workspace exact-path, reparse and
+   process/approval rules. Reuse needed caches; do not copy entire targets,
+   dependency stores or runtimes into another recovery folder. Finish each
+   completed unit in the same task instead of waiting for chat/project closure.
+3. Retain the accepted package and explicitly required rollback/recovery sets,
+   source identity, manifests and the minimum qualification inputs/results/logs.
+   Published artifacts and unique audit evidence follow their existing retention
+   rules. Keep canonical data, secrets, installation state and shared runtime/
+   caches protected. A synthetic install directory is not an approved copy of
+   live data merely because its name contains "test".
+4. If a build/check fails or is interrupted, or ownership, active use or recovery
+   need is unclear, preserve the affected unit and record its exact path, reason
+   and condition for review. Do not hide a cleanup failure behind build success,
+   treat unknowns as unused, or apply an automatic age/size expiry.
+5. Record actual removed paths and logical bytes, retained paths and their uses,
+   and failed/deferred units in the existing build/qualification record. Verify
+   removed targets are absent and direct parents/protected targets survive.
+   Report build/qualification status and cleanup status separately. Do not create
+   a new runner, runtime gate, standalone cleanup report or backup ZIP for this.
+
+The builder closes its own synchronous disposable unit. It does not know when
+downstream checks or consumers of other outputs have finished, so the remaining
+task closeout is still mandatory. For repeated development, retain an explicitly
+owned dependency/Cargo cache when its current consumer and reuse need are known;
+for one-shot qualification, use a fresh success-cleaned unit and export the
+accepted output and minimum evidence before success. Review failed diagnostics
+before disposing of them. Do not apply an unmeasured size budget or remove active
+or shared caches.
+Release/backups still follow the separate rules below; failed staging is retained
+until its diagnosis/resume owner has finished and the workspace policy permits
+its disposition.
 
 ## Release retention and cleanup
 
@@ -1332,14 +1425,23 @@ canonical data.
 
 ### Runtime responsiveness recovery
 
+Managed viewer stream recovery uses `stream::list_keys_page` on the pinned
+file-backed engine. Pages contain at most 128 actual item keys and no item
+payloads, avoiding a whole-stream WebSocket frame at startup. The helper shares
+the engine's existing bounded page validation and rejects unsupported adapters.
+The tracker waits for complete pagination before pruning, uses actual stored
+keys, and keeps the configured latest-item limit. This affects viewer events,
+not canonical observations, memories or graph provenance. Portable hosts keep
+their existing stream listing behavior.
+
 Managed audit queries use the existing bounded `state::list_page` route and
 retain only the requested newest matching records. A read captures its initial
 row count rather than chasing subsequent ledger appends. This avoids transferring
 the whole audit scope in a single SDK frame without deleting audit history or
 raising the WebSocket payload limit. Portable hosts retain their existing read.
 
-The Windows/Codex dependency lock applies `patches/iii-sdk@0.11.2.patch` to
-both SDK entry points. Upstream 0.11.2 reconnects its socket without settling
+The Windows/Codex dependency lock applies `patches/iii-sdk@0.22.1.patch` to
+both SDK entry points. Upstream 0.22.1 reconnects its socket without settling
 requests sent on the closed connection. The downstream patch rejects those
 requests immediately and drops only queued requests with rejected invocation IDs.
 It does not retry an interrupted write or reduce the existing long invocation
@@ -1352,14 +1454,14 @@ patch; production code/config backups remain separate from canonical data.
 
 #### Storage acknowledgement and crash qualification
 
-Unmodified iii-engine 0.11.2's file-backed KV acknowledges an in-memory mutation and
+Unmodified iii-engine 0.22.1's file-backed KV acknowledges an in-memory mutation and
 persists dirty scopes on a default five-second timer. The state path is a directory
 of per-scope binary snapshots, not a SQLite database. A successful StateModule RPC
 therefore does not prove that its value or a graph recovery plan has reached disk.
-See the [pinned KV implementation](https://github.com/iii-hq/iii/blob/iii/v0.11.2/engine/src/builtins/kv.rs).
+See the [pinned engine implementation](https://github.com/iii-hq/iii/tree/e7de3820d1e558f3762edf95e4440552444d48d3/engine/src/workers/state).
 
 The opt-in `test/engine-write-recovery.test.ts` launches an explicitly supplied,
-hash-verified 0.11.2 engine on an isolated loopback port and temporary data directory.
+hash-verified 0.22.1 engine on an isolated loopback port and temporary data directory.
 It checks owned process identity before forced exit and checks recovery through
 the real StateModule. Enable with `AGENTMEMORY_TEST_ENGINE` and
 `AGENTMEMORY_TEST_ENGINE_SHA256`, and set `AGENTMEMORY_TEST_ENGINE_DURABILITY=required`
@@ -1402,9 +1504,50 @@ database and does not change the stored snapshot format. The qualified release
 binary passed all eight synthetic process-crash boundaries; this does not certify
 Windows power-loss recovery, disk failure recovery or full production acceptance.
 
-To rebuild the engine, check out `iii/v0.11.2` at the exact `source_commit` in
-`config/third-party-inputs.json`, apply `patches/iii-0.11.2-state-flush.patch`, then
+To rebuild the engine, check out `iii/v0.22.1` at the exact `source_commit` in
+`config/third-party-inputs.json`, apply `patches/iii-0.22.1-state-flush.patch`, then
 run `cargo build --release --locked -p iii --bin iii` in an x64 MSVC build environment.
+For a one-shot workspace rebuild, use the existing registered launcher and keep
+the Cargo target in its fresh temporary unit. From the AgentMemory package root,
+set `$engineSource` to the prepared, patched engine checkout, then run the example
+below with the actual Codex task ID. The child environment must have the x64 MSVC
+toolchain available. `CARGO_INCREMENTAL=0` applies only to that child. The existing
+engine recovery suite qualifies the binary before it is exported outside the
+unit; its report is also outside the unit. Both outputs use no-replace paths.
+
+```powershell
+$taskId = $env:CODEX_THREAD_ID
+if ([string]::IsNullOrWhiteSpace($taskId)) { throw 'Supply the actual task ID.' }
+$engineBuild = @'
+$ErrorActionPreference = 'Stop'
+$env:CARGO_INCREMENTAL = '0'
+$env:CARGO_TARGET_DIR = '{ephemeral}/cargo-target'
+& cargo build --release --locked -p iii --bin iii
+if ($LASTEXITCODE -ne 0) { throw "Cargo build failed: $LASTEXITCODE" }
+$binary = Join-Path $env:CARGO_TARGET_DIR 'release/iii.exe'
+$env:AGENTMEMORY_TEST_ENGINE = $binary
+$env:AGENTMEMORY_TEST_ENGINE_SHA256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
+$env:AGENTMEMORY_TEST_ENGINE_DURABILITY = 'required'
+$env:AGENTMEMORY_ENGINE_TEST_REPORT = '{task}/engine-write-recovery.json'
+$export = '{task}/iii-qualified.exe'
+if ((Test-Path -LiteralPath $export) -or (Test-Path -LiteralPath $env:AGENTMEMORY_ENGINE_TEST_REPORT)) { throw 'Choose unused qualification output paths.' }
+& pnpm --dir 'D:/Workspace/control/.workspace/packages/agentmemory_codex' exec vitest run test/engine-write-recovery.test.ts
+if ($LASTEXITCODE -ne 0) { throw "Engine recovery qualification failed: $LASTEXITCODE" }
+[IO.File]::Copy($binary, $export, $false)
+'@
+python D:/Workspace/control/.workspace/tools/run-with-registered-environment.py `
+  --project workspace --task-id $taskId --ephemeral-unit iii-engine-rebuild `
+  --cwd $engineSource -- powershell.exe -NoProfile -NonInteractive `
+  -ExecutionPolicy Bypass -Command $engineBuild
+```
+
+`{ephemeral}` and `{task}` are expanded in command arguments by the launcher;
+`--cwd` is the actual engine checkout and is not expanded. The launcher removes
+only its fresh unit after exit 0 and preserves failures or cleanup errors with
+the exact path. For stable repeated engine development, retain a known owned
+target instead and close it after its consumers finish; do not place a required
+cache or accepted binary in a success-cleaned unit.
+
 The manifest records the Rust/Cargo, MSVC and Windows SDK versions and Cargo.lock
 hash used for the pinned binary. The package builder verifies the binary hash and
 normalized-LF patch hash and includes the patch and license in the payload. Source

@@ -13,11 +13,12 @@ $installManifestPath = Join-Path $resolvedRoot 'config\install-manifest.json'
 $legacyInstallStatePath = Join-Path $resolvedRoot 'config\install-state.json'
 $taskRegistrationPath = Join-Path $resolvedRoot 'config\task-registration.json'
 . $envScript -Root $resolvedRoot
+$servicePorts = Get-AgentMemoryServicePorts -Root $resolvedRoot
 
 $health = $false
 try {
     $headers = @{ Authorization = "Bearer $($env:AGENTMEMORY_SECRET)" }
-    $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:3111/agentmemory/health' -Headers $headers -TimeoutSec 2
+    $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($servicePorts.rest)/agentmemory/health" -Headers $headers -TimeoutSec 2
     $health = $response.StatusCode -eq 200
 }
 catch {
@@ -26,7 +27,7 @@ catch {
 $mcpHealth = Test-AgentMemoryMcpHttp -VerifyFailClosed
 
 $listeners = foreach ($line in @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p TCP)) {
-    if ($line -match '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$' -and [int]$Matches[2] -in @(3111, 3112, 3113, 3114, 49134)) {
+    if ($line -match '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$' -and [int]$Matches[2] -in @($servicePorts.rest, $servicePorts.stream, $servicePorts.viewer, $servicePorts.mcp, $servicePorts.engine)) {
         [pscustomobject]@{
             LocalAddress = [string]$Matches[1]
             LocalPort = [int]$Matches[2]

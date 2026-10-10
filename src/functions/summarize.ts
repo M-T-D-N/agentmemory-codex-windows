@@ -1,5 +1,5 @@
 import { summarySourceDigest, SUMMARY_VISIBILITY_REVISION } from "./summary-visibility.js";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type {
   CompressedObservation,
   SessionSummary,
@@ -233,7 +233,7 @@ function parseSummaryXml(
 }
 
 export function registerSummarizeFunction(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   provider: MemoryProvider,
   metricsStore?: MetricsStore,

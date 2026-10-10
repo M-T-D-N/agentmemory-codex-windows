@@ -1,6 +1,6 @@
 {
   "name": "agentmemory",
-  "version": "0.9.29",
+  "version": "0.9.30",
   "description": "AgentMemory compatibility plugin bundled with the independent Windows/Codex downstream. Technical Preview; see the repository support boundary before installing.",
   "author": {
     "name": "M-T-D-N",
@@ -10,6 +10,22 @@
   "homepage": "https://github.com/M-T-D-N/agentmemory-codex-windows",
   "repository": "https://github.com/M-T-D-N/agentmemory-codex-windows",
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.codex.json"
+  "mcpServers": "./.mcp.codex.json",
+  "hooks": "./hooks/hooks.codex.json",
+  "interface": {
+    "displayName": "AgentMemory for Windows",
+    "shortDescription": "Local memory for coding",
+    "longDescription": "Recall decisions and original conversations through a local AgentMemory daemon. Includes search, exact project filters, session history, lessons, graph provenance, export and memory maintenance. Requires Node.js 24+ and the supported Windows/Codex installation. Basic keyword recall needs no model key. Local Qwen is limited to graph extraction in the managed profile. Automatic capture requires trusted, supported hooks.",
+    "developerName": "M-T-D-N",
+    "websiteURL": "https://github.com/M-T-D-N/agentmemory-codex-windows",
+    "supportURL": "https://github.com/M-T-D-N/agentmemory-codex-windows/issues",
+    "category": "Developer Tools",
+    "logo": "./assets/icon.svg",
+    "composerIcon": "./assets/icon.svg"
+  },
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/agentmemory-config/SKILL.md"
+    }
+  }
 }

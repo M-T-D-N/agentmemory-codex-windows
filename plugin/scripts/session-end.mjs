@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { basename } from "node:path";
+import { REST_URL, authHeaders, captureObservation, isDrainChild, runDrainChild, withEventId } from "./_capture.mjs";
 //#region src/hooks/_project.ts
 function resolveProject(cwd) {
 	const explicit = process.env["AGENTMEMORY_PROJECT_NAME"];
@@ -33,40 +34,13 @@ function hookCwd(data) {
 }
 //#endregion
 //#region src/hooks/sdk-guard.ts
-/**
-* Recursion guard shared by every hook script.
-*
-* A Claude Code session spawned via @anthropic-ai/claude-agent-sdk inherits
-* the same plugin hooks as the parent CC session. If any hook script in that
-* child session calls back into /agentmemory/* (e.g. Stop → /summarize →
-* provider.summarize() → another child session), we get unbounded recursion
-* that burns tokens and fills .claude/projects/ with ghost sessions
-* (#149 follow-up; see reported loop under v0.9.1).
-*
-* Two signals identify a SDK-child context:
-*   1. AGENTMEMORY_SDK_CHILD=1 env var — set by our agent-sdk provider
-*      before it spawns `query()`. Inherited by child processes.
-*   2. payload.entrypoint === "sdk-ts" — CC writes this into the hook
-*      stdin jsonl when the session was spawned by the Agent SDK.
-*
-* Hook scripts must call isSdkChildContext(payload) EARLY and return
-* silently when it is true.
-*/
 function isSdkChildContext(payload) {
 	if (process.env.AGENTMEMORY_SDK_CHILD === "1") return true;
 	if (!payload || typeof payload !== "object") return false;
 	if (payload["entrypoint"] === "sdk-ts") return true;
 	return false;
 }
-//#endregion
-//#region src/hooks/_runtime.ts
-const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-function authHeaders() {
-	const headers = { "Content-Type": "application/json" };
-	if (SECRET) headers["Authorization"] = `Bearer ${SECRET}`;
-	return headers;
-}
+process.env["AGENTMEMORY_URL"];
 //#endregion
 //#region src/hooks/session-end.ts
 function extractTranscriptPrompts(data) {
@@ -87,6 +61,13 @@ function extractTranscriptPrompts(data) {
 		} catch {
 			continue;
 		}
+		if (msg.type === "USER_INPUT" && msg.source === "USER_EXPLICIT" && typeof msg.content === "string") {
+			if (prompts.length >= 50) return prompts;
+			const match = msg.content.match(/<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/);
+			const text = (match ? match[1] : msg.content).trim();
+			if (text) prompts.push(text.slice(0, 8e3));
+			continue;
+		}
 		if (msg.role !== "user") continue;
 		for (const block of msg.message?.content ?? []) {
 			if (prompts.length >= 50) return prompts;
@@ -99,6 +80,8 @@ function extractTranscriptPrompts(data) {
 	return prompts;
 }
 async function main() {
+	if (isSdkChildContext(void 0)) return;
+	if (isDrainChild()) return runDrainChild();
 	let input = "";
 	for await (const chunk of process.stdin) input += chunk;
 	let data;
@@ -116,26 +99,25 @@ async function main() {
 		const project = resolveProject(cwd);
 		const timestamp = (/* @__PURE__ */ new Date()).toISOString();
 		const deadline = Date.now() + 3e3;
-		for (const prompt of transcriptPrompts) {
+		for (const [index, prompt] of transcriptPrompts.entries()) {
 			const remainingMs = deadline - Date.now();
 			if (remainingMs <= 0) break;
-			try {
-				await fetch(`${REST_URL}/agentmemory/observe`, {
-					method: "POST",
-					headers: authHeaders(),
-					body: JSON.stringify({
-						hookType: "prompt_submit",
-						sessionId,
-						project,
-						cwd,
-						timestamp,
-						data: { prompt }
-					}),
-					signal: AbortSignal.timeout(remainingMs)
-				});
-			} catch {
-				break;
-			}
+			await captureObservation(withEventId({
+				hookType: "prompt_submit",
+				sessionId,
+				project,
+				cwd,
+				timestamp,
+				data: {
+					prompt,
+					backfill: true
+				}
+			}, {}, {
+				source: "transcript",
+				transcript: data.transcript_path,
+				index,
+				prompt
+			}, { stable: true }), remainingMs);
 		}
 	}
 	fetch(`${REST_URL}/agentmemory/session/end`, {

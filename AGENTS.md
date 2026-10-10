@@ -12,7 +12,7 @@ package from this repository.
 agentmemory is a persistent memory system for AI coding agents, built on iii-engine's three primitives (Worker/Function/Trigger). Everything goes through `registerFunction`/`registerTrigger`/`sdk.trigger()` — never bypass iii-engine with standalone SQLite or in-process alternatives.
 
 - **Engine**: iii-sdk (WebSocket to iii-engine on port 49134)
-- **State**: iii-engine StateModule file-backed KV (`./data/state_store.db` is a directory of per-scope `.bin` snapshots, not a SQLite database). Unmodified engine 0.11.2 acknowledges memory before disk persistence. The managed downstream pins the documented `state::flush` engine patch and requires `AGENTMEMORY_STATE_DURABILITY=file-flush-v1`; see the packaging contract for process-crash qualification and its limits.
+- **State**: iii-engine StateModule file-backed KV (`./data/state_store.db` is a directory of per-scope `.bin` snapshots, not a SQLite database). The managed downstream pins engine 0.22.1 with the documented `state::flush` patch and requires `AGENTMEMORY_STATE_DURABILITY=file-flush-v1`; see the packaging contract for process-crash qualification and its limits.
 - **Build**: TypeScript → ESM via tsdown, output to `dist/`
 - **Test**: vitest (`npm test` excludes integration tests)
 
@@ -45,6 +45,9 @@ other hosts. The supported Windows/Codex build in
   Qwen readiness events, optionally requests conditional startup through the managed Windows LocalAI adapter, and retains a 15-minute recovery probe, and deterministic structural extraction stays available; and
 - canonical data is installation state, not a generated build artifact. See
   `packaging/windows-codex/README.md` for build, cutover, and retention rules.
+
+- Before reporting build, package or qualification work complete, perform the mandatory build-artifact closeout in `packaging/windows-codex/README.md` (Build artifact closeout).
+  Review task-owned intermediates as well as caches; record actual cleanup or exact retained/unresolved paths and reasons in the existing build/qualification record. Canonical installation data and required recovery/evidence remain protected. Missing cleanup review means the work is not closed.
 
 - Before reporting a successful cutover complete, apply that retention review to existing backups against the current release, actual immediate predecessor, matching code/data snapshot pairs and current consumers.
   Preserve compatible code/data recovery sets and required archive/audit evidence; report protected unknowns and explicit maintenance candidates. ZIP compaction alone does not complete this review. Use the existing workspace storage/approval policy for maintenance; do not automatically delete older archives.
@@ -167,10 +170,10 @@ uses its own four-hook adapter and fail-closed local capture path documented in
 - Test files go in `test/` with `.test.ts` extension
 - Follow existing patterns in `test/crystallize.test.ts` for function tests
 
-## Current Stats (v0.9.29)
+## Current Stats (v0.9.30)
 
 - 58 MCP tools in this downstream source (upstream 54 plus provenance-preserving `memory_graph_upsert`, target-scoped `memory_graph_provenance_reconcile`, audited `memory_graph_purge`, and reversible `memory_archive`); all visible by default, with 8 in `AGENTMEMORY_TOOLS=core`
-- 135 REST endpoints
+- 143 REST endpoints
 - 6 MCP resources, 3 MCP prompts
 - 12 hooks, 17 skills
 - 260+ iii functions

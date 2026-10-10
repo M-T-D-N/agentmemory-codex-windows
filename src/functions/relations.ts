@@ -1,6 +1,8 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { Memory, MemoryRelation } from "../types.js";
 import { KV, generateId } from "../state/schema.js";
+import { memoryTitleFromContent } from "./remember.js";
+import { registerObservationWriter } from "../state/observation-write.js";
 import { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { safeAudit } from "./audit.js";
@@ -44,7 +46,7 @@ function computeConfidence(
   return Math.max(0, Math.min(1, score));
 }
 
-export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
+export function registerRelationsFunction(sdk: IIIClient, kv: StateKV): void {
   sdk.registerFunction("mem::relate", 
     async (data: {
       sourceId: string;
@@ -134,25 +136,33 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction("mem::evolve", 
+  registerObservationWriter(sdk, "mem::evolve",
     async (data: {
       memoryId: string;
       newContent: string;
       newTitle?: string;
+      newType?: string;
     }) => {
 
+      if (!data?.memoryId || typeof data.newContent !== "string" || !data.newContent.trim()) return { success: false, error: "memoryId and newContent are required" };
+      if (data.newType !== undefined && !["pattern", "preference", "architecture", "bug", "workflow", "fact"].includes(data.newType)) return { success: false, error: `invalid type: ${data.newType}` };
+      const result = await withKeyedLock("mem:remember", async () => {
       const existing = await kv.get<Memory>(KV.memories, data.memoryId);
       if (!existing) {
-        return { success: false, error: "memory not found" };
+        return { success: false, error: "memory not found", code: "not_found" };
       }
 
+      if (existing.isLatest === false) return { success: false, error: "memory is not the latest version; edit the latest version instead", code: "not_latest" };
+      const newType = (data.newType ?? existing.type) as Memory["type"];
+      if (data.newContent === existing.content && newType === existing.type && (!data.newTitle || data.newTitle === existing.title)) return { success: false, error: "nothing changed", code: "unchanged" };
       const now = new Date().toISOString();
       const evolved: Memory = {
         ...existing,
         id: generateId("mem"),
         createdAt: now,
         updatedAt: now,
-        title: data.newTitle || existing.title,
+        type: newType,
+        title: data.newTitle || (existing.title === memoryTitleFromContent(existing.content) ? memoryTitleFromContent(data.newContent) : existing.title),
         content: data.newContent,
         version: (existing.version || 1) + 1,
         parentId: existing.id,
@@ -172,13 +182,6 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
       getSearchIndex().remove(existing.id);
       vectorIndexRemove(existing.id);
       getSearchIndex().add(memoryToObservation(evolved));
-      await vectorIndexAddGuarded(
-        evolved.id,
-        evolved.sessionIds?.[0] ?? "memory",
-        `${evolved.title} ${evolved.content}`,
-        { kind: "memory", logId: evolved.id },
-      );
-      await flushIndexSave();
       await safeAudit(kv, "evolve", "mem::evolve", [evolved.id], {
         operation: "evolve",
         oldId: existing.id,
@@ -207,6 +210,18 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
         version: evolved.version,
       });
       return { success: true, memory: evolved, previousId: existing.id };
+      });
+      if (!result.memory) return result;
+      const memory = result.memory;
+      await vectorIndexAddGuarded(memory.id, memory.sessionIds?.[0] ?? "memory", `${memory.title} ${memory.content}`,
+        { kind: "memory", logId: memory.id }, write => withKeyedLock("mem:remember", async () => {
+          const current = await kv.get<Memory>(KV.memories, memory.id);
+          if (!current || current.isLatest === false || current.content !== memory.content || current.title !== memory.title || current.project !== memory.project) return false;
+          write();
+          return true;
+        }));
+      await flushIndexSave();
+      return result;
     },
   );
 

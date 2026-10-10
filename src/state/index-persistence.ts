@@ -1,3 +1,5 @@
+import { VectorPersistence, type IndexPersistenceStatus } from "./vector-persistence.js";
+export type { IndexLegStatus, IndexPersistenceStatus, VectorLoadState, VectorLoadResult, PendingReplayResult } from "./vector-persistence.js";
 import { createHash } from "node:crypto";
 import { SearchIndex } from "./search-index.js";
 import { VectorIndex } from "./vector-index.js";
@@ -12,9 +14,6 @@ const INDEX_PERSISTENCE_FUNCTION_ID = "mem::index-persistence";
 const BM25_KEY = "data";
 const BM25_MANIFEST_KEY = "data:manifest";
 const BM25_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:bm25:`;
-const VECTOR_KEY = "vectors";
-const VECTOR_MANIFEST_KEY = "vectors:manifest";
-const VECTOR_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:vectors:`;
 const INDEX_SHARD_KEY = "data";
 const DEFAULT_INDEX_SHARD_CHARS = 2_000_000;
 const INDEX_READ_BATCH = 4;
@@ -70,6 +69,7 @@ function isValidShardDescriptor(
 }
 
 export class IndexPersistence {
+  private readonly vectorPersistence: VectorPersistence;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private lastFailureLogAt = 0;
   private saving = false;
@@ -82,12 +82,20 @@ export class IndexPersistence {
   constructor(
     private kv: StateKV,
     private bm25: SearchIndex,
-    private vector: VectorIndex | null,
+    vector: VectorIndex | null,
     private options: IndexPersistenceOptions = {},
-  ) {}
+  ) { this.vectorPersistence = new VectorPersistence(kv, vector); }
+
+  status(): IndexPersistenceStatus { return this.vectorPersistence.status(); }
+  replayPendingLog(expectedDimensions = 0) { return this.vectorPersistence.replayPendingLog(expectedDimensions); }
+  readBackfillMarker() { return this.vectorPersistence.readBackfillMarker(); }
+  markBackfillSince(since: string) { return this.vectorPersistence.markBackfillSince(since); }
+  clearBackfillMarker() { return this.vectorPersistence.clearBackfillMarker(); }
+  flushPendingLog() { return this.vectorPersistence.flushPendingLog(); }
 
   scheduleSave(): void {
     if (this.stopped) return;
+    this.vectorPersistence.scheduleSave();
     this.retryAttempts = 0;
     this.reserveSave(DEBOUNCE_MS);
   }
@@ -104,7 +112,14 @@ export class IndexPersistence {
   async save(options: { requireSuccess?: boolean } = {}): Promise<void> {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     this.retryAttempts = 0;
-    try { await this.enqueueSave(); }
+    const outcomes = await Promise.allSettled([
+      this.enqueueSave(),
+      this.vectorPersistence.save({ requireSuccess: true }),
+    ]);
+    try {
+      const failed = outcomes.find(result => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+    }
     catch (error) { if (options.requireSuccess) throw error; }
   }
 
@@ -151,12 +166,14 @@ export class IndexPersistence {
       await this.saveBm25Index(this.bm25.serialize());
       this.persistedBm25Revision = snapshotRevision;
     }
-    if (this.vector) await this.saveVectorIndex(this.vector.serialize());
   }
 
   async load(): Promise<{
     bm25: SearchIndex | null;
     vector: VectorIndex | null;
+    state: import("./vector-persistence.js").VectorLoadState;
+    savedAt: string | null;
+    expectedCount?: number;
   }> {
     this.persistedBm25Revision = undefined;
     try {
@@ -168,12 +185,10 @@ export class IndexPersistence {
         bm25 = SearchIndex.deserialize(bm25Data);
       }
 
-      const vecData = await this.loadVectorData();
-      if (vecData && typeof vecData === "string") {
-        vector = VectorIndex.deserialize(vecData);
-      }
+      const loaded = await this.vectorPersistence.load();
+      vector = loaded.vector;
 
-      return { bm25, vector };
+      return { ...loaded, bm25, vector };
     } finally {
       this.persistedBm25Revision = undefined;
     }
@@ -181,6 +196,7 @@ export class IndexPersistence {
 
   stop(): void {
     this.stopped = true;
+    this.vectorPersistence.stop();
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -215,14 +231,6 @@ export class IndexPersistence {
     );
   }
 
-  private async saveVectorIndex(serialized: string): Promise<void> {
-    await this.saveShardedIndex(
-      serialized,
-      VECTOR_MANIFEST_KEY,
-      VECTOR_KEY,
-      VECTOR_SHARD_SCOPE_PREFIX,
-    );
-  }
 
   private async saveShardedIndex(
     serialized: string,
@@ -416,9 +424,9 @@ export class IndexPersistence {
     return failed;
   }
 
-  private validateObsoleteShards(manifestKey: string, manifest: IndexShardManifest): void {
+  private validateObsoleteShards(_manifestKey: string, manifest: IndexShardManifest): void {
     if (manifest.obsoleteShards === undefined) return;
-    const prefix = manifestKey === BM25_MANIFEST_KEY ? BM25_SHARD_SCOPE_PREFIX : VECTOR_SHARD_SCOPE_PREFIX;
+    const prefix = BM25_SHARD_SCOPE_PREFIX;
     const active = new Set(manifest.shards.map(shard => shard.scope + "\0" + shard.key));
     if (!Array.isArray(manifest.obsoleteShards) || manifest.obsoleteShards.some(shard =>
       !isValidShardDescriptor(shard) || !shard.scope.startsWith(prefix) || shard.key !== INDEX_SHARD_KEY || active.has(shard.scope + "\0" + shard.key))) {
@@ -467,9 +475,6 @@ export class IndexPersistence {
     return this.loadShardedData(BM25_KEY, BM25_MANIFEST_KEY, "BM25");
   }
 
-  private async loadVectorData(): Promise<string | null> {
-    return this.loadShardedData(VECTOR_KEY, VECTOR_MANIFEST_KEY, "vector");
-  }
 
   private async loadShardedData(
     legacyKey: string,
@@ -589,7 +594,7 @@ export class IndexPersistence {
       return null;
     }
     const serialized = chunks.join("");
-    const key = label === "BM25" ? BM25_MANIFEST_KEY : VECTOR_MANIFEST_KEY;
+    const key = BM25_MANIFEST_KEY;
     this.persistedContent.set(key, { fingerprint: createHash("sha256").update(serialized).digest("hex"), manifest: structuredClone(manifest) });
     return serialized;
   }

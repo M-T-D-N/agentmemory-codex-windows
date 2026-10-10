@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  iii-sdk@0.11.2: c1e67000c5c611a751c72398d122be01a6949b5985a7357b84c2ac1b86481962
+  iii-sdk@0.22.1: 9d3577474d77265534a413fada744858dd1aef19879181df82b7c7faead2c428
 
 importers:
 
@@ -20,9 +20,12 @@ importers:
       '@clack/prompts':
         specifier: ^1.2.0
         version: 1.7.0
+      '@iii-dev/helpers':
+        specifier: 0.22.1
+        version: 0.22.1
       iii-sdk:
-        specifier: 0.11.2
-        version: 0.11.2(patch_hash=c1e67000c5c611a751c72398d122be01a6949b5985a7357b84c2ac1b86481962)
+        specifier: 0.22.1
+        version: 0.22.1(patch_hash=9d3577474d77265534a413fada744858dd1aef19879181df82b7c7faead2c428)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -357,6 +360,9 @@ packages:
 
   '@huggingface/transformers@4.2.0':
     resolution: {integrity: sha512-8BRCoBMH0XsWaEIamuR0LrJGAfftgHAfb2Vrffy0VKlSAE/MnUJ5/h/zTfEP3fDIft+nk7TqB8xXEyABGitBjQ==}
+
+  '@iii-dev/helpers@0.22.1':
+    resolution: {integrity: sha512-/lI2hOr7Y1mHll3e2bu3hrekgA1S0VRRSD/gk61kvEZGGFfNIbbpO8rhog1bnSzEqfiPGV5XQUT8ZI4Ie+BEDg==}
 
   '@img/colour@1.1.0':
     resolution: {integrity: sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==}
@@ -1322,8 +1328,8 @@ packages:
     resolution: {integrity: sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==}
     engines: {node: '>=0.10.0'}
 
-  iii-sdk@0.11.2:
-    resolution: {integrity: sha512-S8/o53j1z+IOU6Mp1f3GbivJ59hEgWhtT6hNutVpfwhJK5Q9zS2rV2LUX1Ko6+xF/Zr3Y6xodNRmBRng0qiZZA==}
+  iii-sdk@0.22.1:
+    resolution: {integrity: sha512-xgOtrmoTEBCBY7KFRfQse6EHlyK+qCVBA3QG+WiG0cHxpBamrqpkY3L+l14SbdLZR5ZoTtyrwiAUVZNHPNaY3w==}
 
   import-in-the-middle@1.15.0:
     resolution: {integrity: sha512-bpQy+CrsRmYmoPMAE/0G33iwRqwW4ouqdRg8jgbH3aKuCtOc8lxgmYXg2dMM92CRiGP660EtBcymH/eVUpCSaA==}
@@ -2170,6 +2176,25 @@ snapshots:
       sharp: 0.34.5
     optional: true
 
+  '@iii-dev/helpers@0.22.1':
+    dependencies:
+      '@opentelemetry/api': 1.9.1
+      '@opentelemetry/api-logs': 0.57.2
+      '@opentelemetry/core': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/instrumentation': 0.57.2(@opentelemetry/api@1.9.1)
+      '@opentelemetry/otlp-transformer': 0.57.2(@opentelemetry/api@1.9.1)
+      '@opentelemetry/resources': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-logs': 0.57.2(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-metrics': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-trace-base': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-trace-node': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/semantic-conventions': 1.43.0
+      ws: 8.21.3
+    transitivePeerDependencies:
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+
   '@img/colour@1.1.0':
     optional: true
 
@@ -3008,19 +3033,10 @@ snapshots:
     dependencies:
       safer-buffer: 2.1.2
 
-  iii-sdk@0.11.2(patch_hash=c1e67000c5c611a751c72398d122be01a6949b5985a7357b84c2ac1b86481962):
+  iii-sdk@0.22.1(patch_hash=9d3577474d77265534a413fada744858dd1aef19879181df82b7c7faead2c428):
     dependencies:
+      '@iii-dev/helpers': 0.22.1
       '@opentelemetry/api': 1.9.1
-      '@opentelemetry/api-logs': 0.57.2
-      '@opentelemetry/core': 1.30.1(@opentelemetry/api@1.9.1)
-      '@opentelemetry/instrumentation': 0.57.2(@opentelemetry/api@1.9.1)
-      '@opentelemetry/otlp-transformer': 0.57.2(@opentelemetry/api@1.9.1)
-      '@opentelemetry/resources': 1.30.1(@opentelemetry/api@1.9.1)
-      '@opentelemetry/sdk-logs': 0.57.2(@opentelemetry/api@1.9.1)
-      '@opentelemetry/sdk-metrics': 1.30.1(@opentelemetry/api@1.9.1)
-      '@opentelemetry/sdk-trace-base': 1.30.1(@opentelemetry/api@1.9.1)
-      '@opentelemetry/sdk-trace-node': 1.30.1(@opentelemetry/api@1.9.1)
-      '@opentelemetry/semantic-conventions': 1.43.0
       ws: 8.21.3
     transitivePeerDependencies:
       - bufferutil

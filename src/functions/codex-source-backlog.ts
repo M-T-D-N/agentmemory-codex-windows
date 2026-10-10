@@ -1,4 +1,4 @@
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type { Session } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
@@ -14,7 +14,7 @@ import { readArchiveVisibility } from "./archive.js";
 const sourceUnavailable = (session: Session) => session.codexNativeCapture?.status === "unknown" &&
   session.codexNativeCapture.issue === "native_source_missing";
 
-export function registerCodexSourceBacklog(sdk: ISdk, kv: StateKV, agentId: () => string) {
+export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId: () => string) {
   let discoveryAfterId: string | undefined;
   let discoveryConfiguration = "";
   let captureAfterId: string | undefined;
@@ -171,7 +171,7 @@ export function registerCodexSourceBacklog(sdk: ISdk, kv: StateKV, agentId: () =
   }));
 }
 
-export function startCodexSourceScheduler(sdk: ISdk) {
+export function startCodexSourceScheduler(sdk: IIIClient) {
   let stopped = false;
   let running: Promise<void> | undefined;
   let continuation: ReturnType<typeof setTimeout> | undefined;

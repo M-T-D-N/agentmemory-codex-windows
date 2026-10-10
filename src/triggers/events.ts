@@ -1,16 +1,20 @@
-import { TriggerAction, type ISdk } from "iii-sdk";
+import { noteSessionChange, noteMemoryChange } from "../state/viewer-counts.js";
+import { addSessionToProjectIndex } from "../state/session-index.js";
+import { TriggerAction, type IIIClient } from "iii-sdk";
 import { readGraphCompletionContext } from "../functions/graph-observation-result.js";
-import type { CompressedObservation, HookPayload, Session } from "../types.js";
-import { KV } from "../state/schema.js";
+import type { CompressedObservation, HookPayload, Memory, Session } from "../types.js";
+import { KV, STREAM } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { isReflectEnabled } from "../functions/slots.js";
 import {
   getAgentId,
+  isAgentScopeIsolated,
   getConsolidationCooldownMs,
   getGraphBatchSize,
   isConsolidationEnabled,
   isGraphExtractionEnabled,
   isSummaryEnabled,
+  hasLLMProviderConfigured,
 } from "../config.js";
 import { logger } from "../logger.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
@@ -21,6 +25,27 @@ import {
 } from "../functions/session-lifecycle.js";
 import type { ContextReader } from "../functions/context.js";
 import { orderedSessionObservations, selectSemanticGraphBatch } from "../functions/semantic-graph-backlog.js";
+
+export function isOutOfAgentScope(record: { agentId?: string } | undefined): boolean {
+  return isAgentScopeIsolated() && record?.agentId !== getAgentId();
+}
+
+export function isStateDelete(payload: { event_type: string; new_value?: unknown }): boolean {
+  return payload.event_type === "state:deleted" || !payload.new_value;
+}
+
+export async function sendViewerEvent(
+  sdk: IIIClient,
+  id: string,
+  type: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await sdk.trigger({
+    function_id: "stream::send",
+    payload: { stream_name: STREAM.name, group_id: STREAM.viewerGroup, id, type, data },
+    action: TriggerAction.Void(),
+  });
+}
 
 // Global marker recording when corpus consolidation last ran, used to debounce
 // the per-turn session-stop fan-out.
@@ -53,7 +78,7 @@ function consolidationDue(kv: StateKV): Promise<boolean> {
 }
 
 export function registerEventTriggers(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   readContext: ContextReader,
 ): void {
@@ -82,6 +107,10 @@ export function registerEventTriggers(
           });
           if (!prepared.success) return prepared;
           await kv.set(KV.sessions, data.sessionId, prepared.session);
+          await addSessionToProjectIndex(kv, prepared.session.project, {
+            id: prepared.session.id, startedAt: prepared.session.startedAt,
+            ...(prepared.session.agentId ? { agentId: prepared.session.agentId } : {}),
+          }).catch(error => logger.warn("session project index update failed", { error: String(error) }));
           return prepared;
         },
       );
@@ -198,6 +227,9 @@ export function registerEventTriggers(
       if (await consolidationDue(kv)) {
         fireVoid("mem::consolidate-pipeline", { tier: "all", force: true });
         fireVoid("mem::auto-crystallize", { olderThanDays: 0 });
+        if (hasLLMProviderConfigured()) {
+          fireVoid("mem::skill-extract", { sessionId: data.sessionId });
+        }
       }
     }
     return summary;
@@ -211,7 +243,11 @@ export function registerEventTriggers(
   sdk.registerFunction(
     "event::session::ended",
     async (data: { sessionId: string }) => {
-      return completeExistingSession(kv, data.sessionId);
+      const result = await completeExistingSession(kv, data?.sessionId);
+      return result.success
+        ? { success: true, ended: true }
+        : { success: true, ended: false,
+            reason: result.error === "already_completed" ? "already_completed" : "not_found" };
     },
   );
   sdk.registerTrigger({
@@ -220,9 +256,89 @@ export function registerEventTriggers(
     config: { topic: "agentmemory.session.ended" },
   });
 
-  // Do not register an iii state trigger for session activity. The observation
-  // function writes the session row and waits for that state transaction; iii
-  // 0.11.2 dispatches a matching state callback to this same single worker,
-  // so even a side-effect-free callback cannot run until the waiting write
-  // returns. Raw and compressed observation streams already update the viewer.
+  // React to observation count changes and emit a lightweight live event for dashboards/viewer.
+  sdk.registerFunction(
+    "event::session::observation-count-changed",
+    async (payload: {
+      key: string;
+      event_type: string;
+      old_value?: Session;
+      new_value?: Session;
+    }) => {
+      noteSessionChange(payload.old_value, isStateDelete(payload) ? null : payload.new_value);
+      if (isOutOfAgentScope(payload.new_value ?? payload.old_value)) {
+        return { emitted: false };
+      }
+      if (isStateDelete(payload)) {
+        await sendViewerEvent(sdk, `session-deleted-${payload.key}-${Date.now()}`, "session.deleted", {
+          sessionId: payload.key,
+        });
+        return { emitted: true };
+      }
+      if (payload.new_value) {
+        await sendViewerEvent(sdk, `session-updated-${payload.key}-${Date.now()}`, "session.updated", {
+          session: payload.new_value,
+        });
+      }
+      const oldCount = payload.old_value?.observationCount ?? 0;
+      const newCount = payload.new_value?.observationCount ?? 0;
+      if (newCount <= oldCount) return { emitted: Boolean(payload.new_value) };
+
+      await sendViewerEvent(sdk, `session-activity-${payload.key}-${Date.now()}`, "session.activity", {
+        sessionId: payload.key,
+        observationCount: newCount,
+        delta: newCount - oldCount,
+        updatedAt: payload.new_value?.updatedAt ?? new Date().toISOString(),
+      });
+
+      return { emitted: true };
+    },
+  );
+  sdk.registerTrigger({
+    type: "state",
+    function_id: "event::session::observation-count-changed",
+    config: { scope: KV.sessions },
+  });
+
+  sdk.registerFunction(
+    "event::memory::changed",
+    async (payload: {
+      key: string;
+      event_type: string;
+      old_value?: Memory;
+      new_value?: Memory;
+    }) => {
+      const deleted = isStateDelete(payload);
+      noteMemoryChange(payload.old_value, deleted ? null : payload.new_value);
+      if (isOutOfAgentScope(payload.new_value ?? payload.old_value)) {
+        return { emitted: false };
+      }
+      const memory = payload.new_value;
+      const created = !deleted && !payload.old_value;
+      let type = "memory.updated";
+      if (deleted) type = "memory.deleted";
+      else if (created) type = "memory.created";
+      await sendViewerEvent(
+        sdk,
+        `${type.replace(".", "-")}-${payload.key}-${Date.now()}`,
+        type,
+        deleted
+          ? { memoryId: payload.key, isLatest: payload.old_value?.isLatest }
+          : {
+              memoryId: payload.key,
+              type: memory?.type,
+              title: memory?.title,
+              isLatest: memory?.isLatest,
+              updatedAt: memory?.updatedAt,
+              memory,
+            },
+      );
+      return { emitted: true };
+    },
+  );
+  sdk.registerTrigger({
+    type: "state",
+    function_id: "event::memory::changed",
+    config: { scope: KV.memories },
+  });
 }

@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { listenForFetch } from "./helpers/http-port.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
@@ -60,7 +61,7 @@ describe("Codex capture recovery and response attribution", () => {
       { type: "set", path: "codexCaptureTurnId", value: absent },
     ]);
     const original = await session();
-    const audits = await kv.list("mem:audit");
+    const audits = (await queryAudit(kv as never)).entries;
     const updates = vi.spyOn(kv, "update");
     for (let repeat = 0; repeat < 2; repeat++) {
       expect(await sdk.trigger("api::session::exclude", { body: { ...identity, reason: "codex_internal_prompt" } }))
@@ -68,7 +69,7 @@ describe("Codex capture recovery and response attribution", () => {
     }
     expect(updates).not.toHaveBeenCalled();
     expect(await session()).toEqual(original);
-    expect(await kv.list("mem:audit")).toEqual(audits);
+    expect((await queryAudit(kv as never)).entries).toEqual(audits);
     expect(await stop("normal-1")).toMatchObject({ skipped: true });
     expect((await prompt("normal-2", "Next normal request")).observationId).toBeTruthy();
     expect((await stop("normal-2")).observationId).toBeTruthy();
@@ -78,19 +79,19 @@ describe("Codex capture recovery and response attribution", () => {
     await prompt();
     const body = { ...identity, reason: "codex_internal_prompt", ...(turnId ? { turnId } : {}) };
     const updates = vi.spyOn(kv, "update");
-    const auditsBefore = (await kv.list("mem:audit")).length;
+    const auditsBefore = ((await queryAudit(kv as never)).entries).length;
     expect(await sdk.trigger("api::session::exclude", { body }))
       .toMatchObject({ status_code: 200, body: { preservedActiveSession: true } });
     expect((await session()).codexCaptureTurnId).toBeNull();
     expect(updates).toHaveBeenCalledTimes(1);
     const cleared = await session();
-    const audited = await kv.list<any>("mem:audit");
+    const audited = (await queryAudit(kv as never)).entries;
     expect(audited).toHaveLength(auditsBefore + 1);
     expect(audited.at(-1)).toMatchObject({ operation: "session_exclude", details: { preservedActiveSession: true } });
     await sdk.trigger("api::session::exclude", { body });
     expect(updates).toHaveBeenCalledTimes(1);
     expect(await session()).toEqual(cleared);
-    expect(await kv.list("mem:audit")).toEqual(audited);
+    expect((await queryAudit(kv as never)).entries).toEqual(audited);
     expect(await stop()).toMatchObject({ skipped: true });
   });
   it("recovers only automatic exclusion on an exact normal Codex request", async () => {
@@ -102,7 +103,7 @@ describe("Codex capture recovery and response attribution", () => {
       captureExcluded: false, captureExclusionReason: null, codexCaptureTurnId: "normal-1",
     });
     expect((await stop()).observationId).toBeTruthy();
-    expect(await kv.list("mem:audit")).toContainEqual(expect.objectContaining({
+    expect((await queryAudit(kv as never)).entries).toContainEqual(expect.objectContaining({
       operation: "session_capture_reactivated",
     }));
   });

@@ -12,8 +12,8 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [빌드 없이 설치](#빌드-없이-설치하기) · [운영 가이드](../packaging/windows-codex/README.md) · [검증 범위](#검색필터인덱스의-동작과-검증-범위) · [릴리스 변경](../CHANGELOG.md)
 
 > [!IMPORTANT]
-> 이 저장소는 독립 Technical Preview `0.1.0-preview.14`입니다.
-> [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.29`를 기반으로
+> 이 저장소는 독립 Technical Preview `0.1.0-preview.15`입니다.
+> [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
 > 플러그인 manifest를 아래 Windows 빌드·설치 절차 대신 사용하지 마세요.
@@ -24,7 +24,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 ## 처음 시작하기
 
 1. Windows x64, Node.js 24+, Windows PowerShell 5.1과 Codex desktop을 확인하고 [고정 버전 설치 가이드](../packaging/windows-codex/npm/README.md)를 따르세요. 빌드된 실행본이 제공되므로 소스 빌드는 선택 사항입니다.
-2. 준비 → 활성화 → 서비스 확인 → Codex MCP 연결 순서로 진행하세요.
+2. 설치 경로를 dry-run으로 확인한 뒤 `--execute`를 사용하세요. 빈 대상은 기본 경로에서 준비·활성화·서비스 확인을 진행합니다. `--fresh`와 `--activate-prepared`로 단계를 나눌 수도 있습니다. 서비스 확인 뒤 Codex MCP를 연결하세요.
 3. 실패하면 [지원 안내](../SUPPORT.md)에 따라 버전과 실패 단계, 민감정보를 지운 짧은 오류를 알려주세요. 기억 데이터베이스나 인증정보는 첨부하지 마세요.
 
 ## 이 공개판이 제공하는 것
@@ -48,7 +48,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
   호환성 경로로만 패키징합니다.
 
 upstream 호환 소스 surface에는 58 MCP tools, 6 resources, 3 prompts,
-port 3111의 135 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
+port 3111의 143 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 지원 Windows 프로필은 위 네 개의 관리형 훅만 의도적으로 활성화합니다.
 
 감사 목적의 MCP `memory_recall`, `memory_smart_search`, `memory_timeline`에는
@@ -59,6 +59,16 @@ port 3111의 135 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 
 공개판 변경은 [변경 기록](../CHANGELOG.md)에 정리합니다. 소스 tag는 공개판을,
 각 빌드 manifest는 해당 산출물의 검증 개정을 식별합니다.
+
+## preview.15의 변경점
+
+AgentMemory 0.9.30과 iii engine/SDK 0.22.1을 반영했습니다. 신규 설치·관리형 갱신·
+지원 원본 인계를 하나의 설치기로 처리하며 정본 데이터와 인증·출처를 보존합니다.
+패치된 engine은 관리형 쓰기의 파일 flush를 기다리고, viewer 복구는 제한된 key page로
+읽습니다. 의도적으로 제외한 수집을 오류로 쌓지 않고 일반 LLM과 graph provider 상태를
+구분합니다. 성공한 빌드의 호출 전용 임시 자료는 정리하며 실패 자료는 보존합니다.
+실제 Windows 설치·재시작·원본 인계·실패 복구 시험을 수행했으며, 검증 범위와
+정전 복구·서명·다른 PC의 미검증 한계는 [변경 기록](../CHANGELOG.md)에 남깁니다.
 
 ## 검색·필터·인덱스의 동작과 검증 범위
 
@@ -110,20 +120,22 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.14` | 저장소 공개판과 소스 tag |
-| AgentMemory 호환 버전 | `0.9.29` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
+| 공개 다운스트림 버전 | `0.1.0-preview.15` | 저장소 공개판과 소스 tag |
+| AgentMemory 호환 버전 | `0.9.30` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
-| iii engine | `0.11.2` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
+| iii engine | `0.22.1` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
 
 정확한 upstream tag, commit, tree, 원본 package hash는
 [`upstream-source.json`](../upstream-source.json)에 기록되어 있습니다.
 
 ## 빌드 없이 설치하기
 
-preview.14 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
+preview.15 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
 [npm/npx 설치 안내](../packaging/windows-codex/npm/README.md)를 사용합니다.
-Windows x64, Node.js 24 이상, Codex가 필요합니다. 빈 설치 폴더의 준비와
-예약 작업·훅 활성화를 별도로 확인하며, 기본 명령은 설치하지 않고 검증만 합니다.
+Windows x64, Node.js 24 이상, Codex가 필요합니다. 업스트림을 먼저 설치할 필요는 없습니다.
+기본 명령은 dry-run이며 `--execute`로 빈 대상의 설치·활성화·서비스 확인을 진행합니다.
+기존 관리형 설치는 같은 루트에서 갱신하고, 원본 0.9.29/0.9.30 파일 저장소는
+원본 package·data·설정 경로를 지정해 인계할 수 있습니다. 더 최신인 미지원 원본을 자동으로 내리지 않습니다.
 기존 설치의 업데이트는 같은 설치 루트를 사용합니다. GitHub TGZ는 별도의
 npm 레지스트리 게시 없이 npm으로 실행할 수 있습니다.
 
@@ -134,7 +146,7 @@ npm 레지스트리 게시 없이 npm으로 실행할 수 있습니다.
 - HTTP 회귀 테스트용 PATH의 Python 3 (CI는 Python 3.12 사용)
 - 저장소가 고정한 pnpm `11.19.0`
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)의
-  SHA-256과 일치하는 다운스트림 패치 적용 iii engine `0.11.2` Windows 실행 파일
+  SHA-256과 일치하는 다운스트림 패치 적용 iii engine `0.22.1` Windows 실행 파일
 
 npm 실행기는 미리 빌드한 ZIP을 받습니다. 실행 파일에 Authenticode 서명은 없으며,
 고정된 ZIP SHA-256과 파일별 manifest로 무결성을 확인합니다.
@@ -145,13 +157,14 @@ Windows PowerShell에서 다음과 같이 실행합니다. 출력 폴더는 미�
 됩니다.
 
 ```powershell
-git clone --branch v0.1.0-preview.14 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.15 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
-  -IiiEnginePath D:\inputs\iii-0.11.2.exe `
-  -ReleaseRevision r83
+  -IiiEnginePath D:\inputs\iii-0.22.1.exe `
+  -ScratchDirectory D:\staging\agentmemory-build-temp `
+  -ReleaseRevision r189
 ```
 
 정상 빌드는 native 입력 hash, 고정 lockfile, skill 일관성, typecheck, build,

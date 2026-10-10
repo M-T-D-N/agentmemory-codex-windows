@@ -1,5 +1,6 @@
 import { registerObservationWriter } from "../state/observation-write.js";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
+import { markCaptureEventDeleted } from "../capture/event-record.js";
 import type {
   Session,
   CompressedObservation,
@@ -9,6 +10,8 @@ import type {
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
+import { removeSessionFromProjectIndex } from "../state/session-index.js";
+import { unindexObservationSession } from "../state/obs-index.js";
 import { isConsolidationEnabled } from "../config.js";
 import { recordAudit } from "./audit.js";
 import { deleteAccessLog } from "./access-tracker.js";
@@ -60,7 +63,7 @@ function isCompressedObservation(
 }
 
 async function recoverStaleSession(
-  sdk: ISdk,
+  sdk: IIIClient,
   sessionId: string,
 ): Promise<boolean> {
   try {
@@ -87,7 +90,7 @@ async function recoverStaleSession(
   }
 }
 
-async function runRecoveredSessionConsolidation(sdk: ISdk): Promise<void> {
+async function runRecoveredSessionConsolidation(sdk: IIIClient): Promise<void> {
   // Same gate as the session-stop path: keyless installs must not fire
   // no-op LLM consolidation from an eviction sweep either.
   if (!isConsolidationEnabled()) return;
@@ -110,7 +113,7 @@ async function runRecoveredSessionConsolidation(sdk: ISdk): Promise<void> {
   }
 }
 
-export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
+export function registerEvictFunction(sdk: IIIClient, kv: StateKV): void {
   registerObservationWriter(sdk, "mem::evict",
     async (data: { dryRun?: boolean }): Promise<EvictionStats> => {
       const dryRun = data?.dryRun ?? false;
@@ -191,6 +194,14 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               });
               continue;
             }
+            for (const o of observations) {
+              await unindexObservationSession(kv, o.id).catch(() => {});
+            }
+            await removeSessionFromProjectIndex(
+              kv,
+              session.project,
+              session.id,
+            ).catch(() => {});
             await recordAudit(kv, "delete", "mem::evict", [session.id], {
               resource: "session",
               reason: recovered
@@ -225,6 +236,7 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               stats.lowImportanceObs++;
             } else {
               try {
+                await markCaptureEventDeleted(kv, o);
                 await kv.delete(KV.observations(session.id), o.id);
                 stats.lowImportanceObs++;
               } catch (err) {
@@ -236,6 +248,7 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
                 });
                 continue;
               }
+              await unindexObservationSession(kv, o.id).catch(() => {});
               if (o.imageData) await decrementImageRef(kv, sdk, o.imageData);
               if (o.imageRef && o.imageRef !== o.imageData) await decrementImageRef(kv, sdk, o.imageRef);
               await recordAudit(kv, "delete", "mem::evict", [o.id], {
@@ -268,6 +281,7 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
           } else {
             for (const o of toEvict) {
               try {
+                await markCaptureEventDeleted(kv, o);
                 await kv.delete(KV.observations(o.sessionId), o.id);
                 stats.capEvictions++;
               } catch (err) {
@@ -279,6 +293,7 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
                 });
                 continue;
               }
+              await unindexObservationSession(kv, o.id).catch(() => {});
               if (o.imageData) await decrementImageRef(kv, sdk, o.imageData);
               if (o.imageRef && o.imageRef !== o.imageData) await decrementImageRef(kv, sdk, o.imageRef);
               await recordAudit(kv, "delete", "mem::evict", [o.id], {

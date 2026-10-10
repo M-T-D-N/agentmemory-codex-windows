@@ -1,8 +1,16 @@
 #!/usr/bin/env node
+import { isSdkChildContext } from "./_runtime.js";
 import { resolveProject, hookCwd } from "./_project.js";
-import { REST_URL, authHeaders, isSdkChildContext } from "./_runtime.js";
+import { captureObservation, isDrainChild, runDrainChild, withEventId } from "./_capture.js";
+
+
+
+const OBSERVE_TIMEOUT_MS = 3000;
+const EXIT_CAP_MS = 3500;
 
 async function main() {
+  if (isSdkChildContext(undefined)) return;
+  if (isDrainChild()) return runDrainChild();
   let input = "";
   for await (const chunk of process.stdin) {
     input += chunk;
@@ -22,20 +30,21 @@ async function main() {
 
   const cwd = hookCwd(data) || process.cwd();
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      hookType: "prompt_submit",
-      sessionId,
-      project: resolveProject(cwd),
-      cwd,
-      timestamp: new Date().toISOString(),
-      data: { prompt: data.prompt ?? data.userPrompt },
-    }),
-    signal: AbortSignal.timeout(3000),
-  }).catch(() => {});
-  setTimeout(() => process.exit(0), 500).unref();
+  void captureObservation(
+    withEventId(
+      {
+        hookType: "prompt_submit",
+        sessionId,
+        project: resolveProject(cwd),
+        cwd,
+        timestamp: new Date().toISOString(),
+        data: { prompt: data.prompt ?? data.userPrompt },
+      },
+      data,
+    ),
+    OBSERVE_TIMEOUT_MS,
+  );
+  setTimeout(() => process.exit(0), EXIT_CAP_MS).unref();
 }
 
 main().catch(() => process.exit(0));

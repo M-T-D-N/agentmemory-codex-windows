@@ -1,4 +1,5 @@
-import type { ISdk } from "iii-sdk";
+import { withoutObservationSource } from "./observation-source.js";
+import type { IIIClient } from "iii-sdk";
 import type {
   CompactLessonResult,
   CompactSearchResult,
@@ -11,6 +12,7 @@ import { memoryToObservation } from "../state/memory-utils.js";
 import { createSearchCandidateSelection, type SearchCandidateSelection } from "./search-candidates.js";
 import { readArchiveVisibility } from "./archive.js";
 import { StateKV } from "../state/kv.js";
+import { indexObservationSession, lookupObservationSession } from "../state/obs-index.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import {
@@ -81,7 +83,7 @@ export function resetFollowupStatsForTests(): void {
 const LESSON_CONTENT_PREVIEW_CHARS = 240;
 
 export function registerSmartSearchFunction(
-  sdk: ISdk,
+  sdk: IIIClient,
   kv: StateKV,
   searchFn: (query: string, limit: number, selection?: SearchCandidateSelection) => Promise<HybridSearchResult[]>,
   getIndexedSessionId?: (observationId: string) => string | undefined,
@@ -194,7 +196,7 @@ export function registerSmartSearchFunction(
           if (archiveHidden(memory ? { kind: "memory", id: entry.obsId } : { kind: "observation", id: entry.obsId, sessionId: entry.sessionId })) continue;
           const project = memory?.project ?? session?.project;
           if (projectFilter && project !== projectFilter) continue;
-          projectScoped.push({ ...entry, observation, ...(project ? { project } : {}) });
+          projectScoped.push({ ...entry, observation: withoutObservationSource(observation), ...(project ? { project } : {}) });
         }
 
         const scoped = filterAgentId
@@ -335,7 +337,7 @@ export function registerSmartSearchFunction(
 }
 
 async function recallLessons(
-  sdk: ISdk,
+  sdk: IIIClient,
   query: string,
   limit: number,
   project?: string,
@@ -434,7 +436,7 @@ async function findObservations(
         .catch(() => null);
     }
     if (!observations[index] && !sessionId && !exactExpansion) {
-      const indexedSessionId = getIndexedSessionId?.(obsId);
+      const indexedSessionId = getIndexedSessionId?.(obsId) ?? await lookupObservationSession(kv, obsId);
       if (indexedSessionId) {
         const indexedSession = await kv.get<Session>(KV.sessions, indexedSessionId);
         if (indexedSession && (!project || indexedSession.project === project)) {
@@ -468,7 +470,9 @@ async function findObservations(
       for (const observation of sessionObservations) {
         const indexes = indexesByObservationId.get(observation.id);
         if (!indexes) continue;
+        if (observation.sessionId !== session.id) continue;
         for (const index of indexes) observations[index] = observation;
+        await indexObservationSession(kv, observation.id, session.id).catch(() => {});
         indexesByObservationId.delete(observation.id);
       }
       if (indexesByObservationId.size === 0) break;
@@ -482,8 +486,9 @@ async function findObservations(
       KV.observations(session.id),
       items[index].obsId,
     );
-    if (!observation) continue;
+    if (!observation || observation.sessionId !== session.id) continue;
     observations[index] = observation;
+    await indexObservationSession(kv, observation.id, session.id).catch(() => {});
     break;
   }
   return fillMemories();

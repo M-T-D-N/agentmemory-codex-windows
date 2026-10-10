@@ -1,7 +1,8 @@
+import { withoutObservationSource } from "./observation-source.js";
 import { readArchiveVisibility } from "./archive.js";
 import { resolveReadAgentId } from "./read-agent-scope.js";
 import { createHash } from "node:crypto";
-import type { ISdk } from "iii-sdk";
+import type { IIIClient } from "iii-sdk";
 import type {
   CompressedObservation,
   Session,
@@ -175,7 +176,7 @@ async function readTimelineArchives(kv: StateKV) {
   } } as Pick<StateKV, "list">);
 }
 
-export function registerTimelineFunction(sdk: ISdk, kv: StateKV): void {
+export function registerTimelineFunction(sdk: IIIClient, kv: StateKV): void {
   sdk.registerFunction("mem::timeline", async (data: {
     anchor: string;
     project?: string;
@@ -295,7 +296,7 @@ export function registerTimelineFunction(sdk: ISdk, kv: StateKV): void {
         throw new Error("Timeline selected observation changed: " + ref.sessionId + "/" + ref.id);
       }
       const entry: TimelineEntry = {
-        observation,
+        observation: withoutObservationSource(observation),
         sessionId: ref.sessionId,
         relativePosition: start + nextIndex - anchorIndex,
       };

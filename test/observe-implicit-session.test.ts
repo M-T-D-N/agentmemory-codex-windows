@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { currentAuditScope } from "./helpers/mocks.js";
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -56,7 +57,7 @@ function mockSdk() {
   };
 }
 
-describe("observe implicit session create (#638)", () => {
+describe("observe implicit session create", () => {
   beforeEach(() => {
     vi.resetModules();
   });
@@ -226,7 +227,7 @@ describe("observe implicit session create (#638)", () => {
     expect(result).toHaveProperty("observationId");
     const session = kv.store.get("mem:sessions")!.get("ses_completed_tail") as Record<string, unknown>;
     expect(session).toMatchObject({
-      status: "completed",
+      status: "active",
       observationCount: 2,
       semanticGraphStatus: "pending",
       semanticGraphThroughObservationId: "obs_existing",
@@ -268,7 +269,7 @@ describe("observe implicit session create (#638)", () => {
       captureExclusionReason: null,
       firstPrompt: "normal user recovery payload",
     });
-    expect([...((kv.store.get("mem:audit") ?? new Map()).values())]).toEqual([
+    expect([...((kv.store.get(currentAuditScope()) ?? new Map()).values())]).toEqual([
       expect.objectContaining({
         operation: "session_capture_reactivated",
         functionId: "mem::observe",

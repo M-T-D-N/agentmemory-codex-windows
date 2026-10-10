@@ -1,3 +1,4 @@
+import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -70,12 +71,12 @@ describe("source attestation of existing excluded final responses", () => {
   it("preserves the existing ID, content and metadata, never inserts excluded responses, and survives reinitialization", async () => {
     expect(await preview()).toMatchObject({ adopt: 1, adoptExcludedFinal: 1, missing: 2, excluded: 1 });
     expect(await kv.get(KV.observations("s"), old.id)).toEqual(old);
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
     await apply();
     const mapped = await kv.get<CompressedObservation>(KV.observations("s"), old.id);
     expect(mapped).toEqual({ ...old, codexSource: expect.objectContaining({ nativeMessageId: "old-final",
       kind: "assistant_final", legacyExcludedReason: "assistant_without_normal_user" }) });
-    expect(JSON.stringify(await kv.list(KV.audit))).toContain('"adoptExcludedFinalObservationIds":["original"]');
+    expect(JSON.stringify((await queryAudit(kv as never)).entries)).toContain('"adoptExcludedFinalObservationIds":["original"]');
     const run = () => captureCodexSourceWindow(kv as never, scope, managed(), { publish: async () => {} });
     expect(await run()).toMatchObject({ status: "caught_up", inserted: 2, indexPending: false });
     expect(await run()).toMatchObject({ status: "caught_up", inserted: 0 });
@@ -106,7 +107,7 @@ describe("source attestation of existing excluded final responses", () => {
     const before = structuredClone(await kv.list(KV.observations("s")));
     await expect(preview()).rejects.toThrow("Unresolved capture correspondence");
     expect(await kv.list(KV.observations("s"))).toEqual(before);
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
     expect(await kv.get(KV.sessions, "s")).not.toHaveProperty("codexNativeCapture");
   });
 
@@ -116,7 +117,7 @@ describe("source attestation of existing excluded final responses", () => {
     await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
       expectedVersion: plan.expectedVersion, reason: "Must not use stale evidence" }, managed())).rejects.toThrow("preview is stale");
     expect(await kv.get(KV.observations("s"), old.id)).toEqual(old);
-    expect(await kv.list(KV.audit)).toEqual([]);
+    expect((await queryAudit(kv as never)).entries).toEqual([]);
   });
 
   it("does not silently change an already attested capture classification", async () => {
