@@ -183,7 +183,7 @@ describe("mem::compress-file", () => {
   });
 
   it("keeps the original file when writing the compressed version fails", async () => {
-    const path = "/tmp/notes.md";
+    const path = fixturePath("notes.md");
     const original = "# Title\n\nVisit https://example.com\n\n```ts\nconst x = 1;\n```\n\nContent.";
     fileStore.set(path, original);
     summarize.mockResolvedValue("# Title\n\nVisit https://example.com\n\n```ts\nconst x = 1;\n```\n\nShort.");
@@ -194,7 +194,23 @@ describe("mem::compress-file", () => {
     })) as { success: boolean };
     expect(result.success).toBe(false);
     expect(fileStore.get(path)).toBe(original);
+    expect(fileStore.get(fixturePath("notes.original.md"))).toBe(original);
     expect([...fileStore.keys()].filter((k) => k.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("leaves the original untouched when the backup destination is a symlink", async () => {
+    const path = fixturePath("notes.md");
+    const original = "# Title\n\nLong original body.";
+    fileStore.set(path, original);
+    symlinkPaths.add(fixturePath("notes.original.md"));
+    summarize.mockResolvedValue("# Title\n\nShort body.");
+
+    const result = await sdk.trigger("mem::compress-file", { filePath: path });
+
+    expect(result.success).toBe(false);
+    expect(fileStore.get(path)).toBe(original);
+    expect(fileStore.has(fixturePath("notes.original.md"))).toBe(false);
+    expect([...fileStore.keys()].filter((key) => key.endsWith(".tmp"))).toEqual([]);
   });
 
   it("rejects non-markdown paths", async () => {

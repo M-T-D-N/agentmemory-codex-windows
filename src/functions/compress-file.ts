@@ -1,12 +1,11 @@
-import { constants } from "node:fs";
-import { lstat, open, readFile, writeFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { IIIClient } from "iii-sdk";
 import type { MemoryProvider } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { isNoopProvider } from "../providers/capabilities.js";
-import { confinePath, expandHome } from "./path-guard.js";
+import { allowedFileRoots, confinePath, expandHome, writeConfinedFile } from "./path-guard.js";
 
 const SENSITIVE_PATH_TERMS = [
   "secret",
@@ -160,23 +159,21 @@ export function registerCompressFileFunction(
       }
 
       const backupPath = resolveBackupPath(absolutePath);
-      await writeFile(backupPath, original, "utf-8");
-
-      let fd: Awaited<ReturnType<typeof open>> | null = null;
+      const roots = allowedFileRoots();
       try {
-        fd = await open(
-          absolutePath,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-        );
-        await fd.writeFile(compressed, "utf-8");
+        await writeConfinedFile(backupPath, original, roots);
+      } catch {
+        return { success: false, error: "failed to write a confined backup file" };
+      }
+
+      try {
+        await writeConfinedFile(absolutePath, compressed, roots);
       } catch (err: unknown) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === "ELOOP" || code === "EINVAL") {
           return { success: false, error: "symlinks are not supported" };
         }
         return { success: false, error: "failed to write compressed file" };
-      } finally {
-        await fd?.close().catch(() => {});
       }
 
       try {
