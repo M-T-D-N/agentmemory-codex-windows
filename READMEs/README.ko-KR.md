@@ -138,6 +138,9 @@ Windows x64, Node.js 24 이상, Codex가 필요합니다. 업스트림을 먼저
 원본 package·data·설정 경로를 지정해 인계할 수 있습니다. 더 최신인 미지원 원본을 자동으로 내리지 않습니다.
 기존 설치의 업데이트는 같은 설치 루트를 사용합니다. GitHub TGZ는 별도의
 npm 레지스트리 게시 없이 npm으로 실행할 수 있습니다.
+npm 12는 원격 TGZ를 기본 차단하므로 설치 명령의 `--allow-remote=root`로
+명시한 실행기를 해당 호출에서 허용합니다. 전역 npm 설정은 바꾸지 않습니다.
+[npm 정책](https://docs.npmjs.com/cli/install/#allow-remote)
 
 ## 소스 빌드 요구 환경
 

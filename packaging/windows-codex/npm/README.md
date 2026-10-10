@@ -24,6 +24,13 @@ ProgramData may require elevation as that same user.
 All commands default to **dry-run**. Add `--execute` after inspecting the target
 and proposed operation. GitHub TGZ execution needs no npm-registry publication.
 
+npm 12 rejects remote TGZ packages by default. `--allow-remote=root` permits
+the explicitly selected launcher for this command; it changes no global npm
+settings. If a versioned guide or packaged README has an older command without
+this option, add it when using npm 12. The [npm policy](https://docs.npmjs.com/cli/install/#allow-remote)
+and the [preview.15 release instructions](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.15)
+explain the same compatibility requirement.
+
 ## New installation or managed update
 
 Replace the example paths with your own. For a new installation choose an empty
@@ -31,7 +38,7 @@ target; for an update use the existing owned root. Do not create a second root
 to update an existing service.
 
 ```powershell
-npm exec --yes --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.15/agentmemory-codex-windows-0.1.0-preview.15.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
+npm exec --yes --allow-remote=root --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.15/agentmemory-codex-windows-0.1.0-preview.15.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
 ```
 
 `projects.json` is your project registry within that workspace. A minimal
@@ -66,7 +73,7 @@ separate from every source directory. Do not combine these options with
 `--fresh` or `--activate-prepared`.
 
 ```powershell
-npm exec --yes --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.15/agentmemory-codex-windows-0.1.0-preview.15.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json" --upstream-package-root "D:\OriginalAgentMemory\package" --upstream-data-dir "D:\OriginalAgentMemory\data" --upstream-home "C:\Users\YourName\.agentmemory"
+npm exec --yes --allow-remote=root --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.15/agentmemory-codex-windows-0.1.0-preview.15.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json" --upstream-package-root "D:\OriginalAgentMemory\package" --upstream-data-dir "D:\OriginalAgentMemory\data" --upstream-home "C:\Users\YourName\.agentmemory"
 ```
 
 If instance lifecycle metadata lives elsewhere, also pass

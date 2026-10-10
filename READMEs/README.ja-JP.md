@@ -139,6 +139,10 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 preview.15 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
+npm 12 はリモート TGZ を既定で拒否します。インストールコマンドの
+`--allow-remote=root` は指定したランチャーをその呼び出しで許可し、
+グローバル npm 設定を変更しません。[npm の方針](https://docs.npmjs.com/cli/install/#allow-remote)
+
 ## ソースからビルドする
 
 Windows PowerShell で次を実行します。出力ディレクトリは事前に存在していては

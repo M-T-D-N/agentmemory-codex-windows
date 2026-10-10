@@ -201,6 +201,10 @@ managed updates, original upstream adoption, and offline hash verification. The 
 separate npm-registry publication. Users need Windows x64, Node.js 24+, and Codex;
 pnpm, Python, and compilers are only needed by source builders.
 
+npm 12 blocks remote TGZ packages by default. The installer command includes
+`--allow-remote=root` for the explicitly selected launcher; it does not change
+global npm settings. See the [npm policy](https://docs.npmjs.com/cli/install/#allow-remote).
+
 ## Source-build requirements
 
 - Windows with PowerShell 5.1 or newer; this preview is qualified on Windows 11

@@ -14,6 +14,11 @@ installed runtime has its own qualification and installation evidence.
 Use an explicit new `-ReleaseRevision` and the exact source identity for each
 qualified build. Existing versioned installation targets are not replaced.
 
+For prebuilt TGZ installation with npm 12, the [launcher guide](npm/README.md)
+uses command-scoped `--allow-remote=root`; npm 12 otherwise rejects a remote
+tarball URL. This is an installation-command clarification; published package
+hashes and their original source commits remain fixed.
+
 This directory is the source authority for the Windows/Codex adapter around the
 upstream AgentMemory TypeScript package. The adapter keeps iii-engine,
 AgentMemory's official state scopes, and the normal memory, lesson, graph,

@@ -27,6 +27,8 @@ Technical Preview `0.1.0-preview.15` on native Windows.
 Run on Windows with PowerShell 5.1 or newer, Node.js 24 or newer, and pnpm
 `11.19.0`, plus Python 3 on PATH for the HTTP regression tests (CI uses 3.12).
 For a prebuilt installation use the [pinned launcher guide](packaging/windows-codex/npm/README.md); upstream installation is not a prerequisite.
+For npm 12 remote-TGZ execution, include the command-scoped `--allow-remote=root`
+option shown in the current launcher guide; do not change global npm policy.
 Source builders must use the downstream-patched iii engine `0.22.1`, rebuilt with the pinned patch and toolchain described in the [operating guide](packaging/windows-codex/README.md#storage-acknowledgement-and-crash-qualification). The unmodified upstream binary does not match the required hash.
 
 Verify that its SHA-256 equals the value in
