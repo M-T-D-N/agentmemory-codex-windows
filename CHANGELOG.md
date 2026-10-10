@@ -16,6 +16,7 @@ The upstream AgentMemory release history remains in the
 - Separate worker lifecycle metadata by instance. Keep production installation qualification distinct from unit tests and engine data compatibility fixtures; actual fresh installation, managed upgrade, original upstream 0.9.29/0.9.30 adoption, restart and planned adoption failure recovery have been exercised on the owner's Windows host.
 
 - Close only each successful Windows builder invocation's fresh disposable scratch unit and restore the caller environment. Preserve failed units for diagnosis; dependency stores, source outputs, accepted releases and canonical data are outside automatic cleanup. Document one-shot Cargo qualification without incremental targets accumulating between runs.
+- Keep bundled YAML files at LF in Windows Git checkouts and limit source-package hardening assertions to shipped native/Docker configurations; excluded upstream cloud deployment directories are not inputs to the public Windows build.
 
 ### Qualification and limits
 

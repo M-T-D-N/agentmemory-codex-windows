@@ -52,9 +52,6 @@ describe("engine file-store save interval", () => {
       "${AGENTMEMORY_STATE_SAVE_INTERVAL_MS:2000}",
       "${AGENTMEMORY_STATE_SAVE_INTERVAL_MS:2000}",
     ]);
-    for (const platform of ["coolify", "fly", "railway", "render"]) {
-      expect(intervals(read(`deploy/${platform}/entrypoint.sh`))).toEqual(["2000", "2000"]);
-    }
   });
 
   it("keeps 2000 ms through the CLI render of the bundled config", () => {
@@ -131,11 +128,8 @@ describe("engine child environment", () => {
     expect(engineChildEnv({}, "win32")["MALLOC_ARENA_MAX"]).toBeUndefined();
   });
 
-  it("sets it for the docker engine and the deploy entrypoints without overriding the user", () => {
+  it("sets it for the bundled docker engine without overriding the user", () => {
     expect(read("docker-compose.yml")).toContain('MALLOC_ARENA_MAX: "${MALLOC_ARENA_MAX:-2}"');
-    for (const platform of ["coolify", "fly", "railway", "render"]) {
-      expect(read(`deploy/${platform}/entrypoint.sh`)).toContain('if [ -z "${MALLOC_ARENA_MAX:-}" ]; then');
-    }
   });
 });
 
@@ -156,10 +150,7 @@ describe("engine open-file limit", () => {
     else expect(Number(seen)).toBe(Number(hard));
   });
 
-  it("sets the limit for the docker engine and the deploy entrypoints", () => {
+  it("sets the limit for the bundled docker engine", () => {
     expect(read("docker-compose.yml")).toMatch(/ulimits:\n\s+nofile:\n\s+soft: 10240\n\s+hard: 10240/);
-    for (const platform of ["coolify", "fly", "railway", "render"]) {
-      expect(read(`deploy/${platform}/entrypoint.sh`)).toContain("ulimit -n 10240 2>/dev/null");
-    }
   });
 });
