@@ -41,8 +41,6 @@ The final preview.16 candidate is undergoing fixed-source, actual-package isolat
 - Keep bundled YAML files at LF in Windows Git checkouts and limit source-package hardening assertions to shipped native/Docker configurations; excluded upstream cloud deployment directories are not inputs to the public Windows build.
 - Use the existing confined atomic file writer for Markdown compression backups and replacements. Refuse symbolic-link destinations before modifying the source, and preserve the source when replacement writing fails.
 
-- Return HTTP 409 with a retryable admission result when import or forget is refused because observation writers are active. Return HTTP 403 for an exact forget ownership mismatch. Preserve unknown storage failures, source ownership and the existing recovery budget.
-
 ### Qualification and limits
 
 - Installation documentation follow-up: npm 12 defaults to refusing remote TGZ URLs. The current launcher guide uses command-scoped `--allow-remote=root`; the public TGZ and automatic ZIP download were verified through that entry point. This clarifies npm policy and does not replace immutable preview.15 binaries or their recorded source identity.
