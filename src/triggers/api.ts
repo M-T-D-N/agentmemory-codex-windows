@@ -1913,17 +1913,26 @@ export function registerApiTriggers(
           body: { error: "sessionId or memoryId is required" },
         };
       }
-      const result = await sdk.trigger({ function_id: "mem::forget", payload: {
-        sessionId: req.body.sessionId,
-        observationIds: req.body.observationIds,
-        memoryId: req.body.memoryId,
-        project: req.body.project,
-        dryRun: req.body.dryRun,
-        action: req.body.action,
-        expectedVersion: req.body.expectedVersion,
-        reason: req.body.reason,
-      } });
-      return { status_code: 200, body: result };
+      try {
+        const result = await sdk.trigger({ function_id: "mem::forget", payload: {
+          sessionId: req.body.sessionId,
+          observationIds: req.body.observationIds,
+          memoryId: req.body.memoryId,
+          project: req.body.project,
+          dryRun: req.body.dryRun,
+          action: req.body.action,
+          expectedVersion: req.body.expectedVersion,
+          reason: req.body.reason,
+        } });
+        return { status_code: 200, body: result };
+      } catch (error) {
+        const result = archiveOperationError(error);
+        if (result.retryable) return { status_code: 409, body: result };
+        if (/^(?:invocation_failed: )?Forget ownership mismatch$/.test(result.error)) {
+          return { status_code: 403, body: { success: false, error: "Forget ownership mismatch", code: "ownership_mismatch", retryable: false } };
+        }
+        throw error;
+      }
     },
   );
   sdk.registerTrigger({
@@ -2245,8 +2254,14 @@ export function registerApiTriggers(
       if (!req.body?.exportData) {
         return { status_code: 400, body: { error: "exportData is required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::import", payload: req.body });
-      return { status_code: 200, body: result };
+      try {
+        const result = await sdk.trigger({ function_id: "mem::import", payload: req.body });
+        return { status_code: 200, body: result };
+      } catch (error) {
+        const result = archiveOperationError(error);
+        if (result.retryable) return { status_code: 409, body: result };
+        throw error;
+      }
     },
   );
   sdk.registerTrigger({

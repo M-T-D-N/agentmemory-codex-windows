@@ -177,7 +177,7 @@ Set-Location agentmemory-codex-windows
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.22.1.exe `
   -ScratchDirectory D:\staging\agentmemory-build-temp `
-  -ReleaseRevision r198
+  -ReleaseRevision r199
 ```
 
 정상 빌드는 native 입력 hash, 고정 lockfile, skill 일관성, typecheck, build,

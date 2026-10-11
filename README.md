@@ -230,7 +230,7 @@ Set-Location agentmemory-codex-windows
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.22.1.exe `
   -ScratchDirectory D:\staging\agentmemory-build-temp `
-  -ReleaseRevision r198
+  -ReleaseRevision r199
 ```
 
 The normal builder verifies the pinned native input, restores the frozen lock,

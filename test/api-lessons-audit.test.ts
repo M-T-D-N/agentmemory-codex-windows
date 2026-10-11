@@ -71,3 +71,28 @@ describe("GET /agentmemory/audit filters", () => {
     expect(trigger).not.toHaveBeenCalled();
   });
 });
+
+
+describe("REST mutation error classification", () => {
+  const busy = "Observation writers are active; recovery made no changes. Retry after they finish.";
+  it.each(["api::import", "api::forget"])("reports admission contention as HTTP409 for %s", async (id) => {
+    for (const error of [new Error(busy), { message: busy }, new Error("invocation_failed: " + busy)]) {
+      const { call, trigger } = setup();
+      trigger.mockRejectedValueOnce(error);
+      const result = await call(id, { body: id === "api::import" ? { exportData: {} } : { memoryId: "owned-memory", project: "infra" } });
+      expect(result).toMatchObject({ status_code: 409, body: { success: false, code: "observation_writers_active", retryable: true } });
+    }
+  });
+  it("reports the exact forget ownership denial without changing scope", async () => {
+    const { call, trigger } = setup();
+    trigger.mockRejectedValueOnce(new Error("Forget ownership mismatch"));
+    expect(await call("api::forget", { body: { memoryId: "foreign-memory", project: "infra" } }))
+      .toMatchObject({ status_code: 403, body: { success: false, code: "ownership_mismatch", retryable: false } });
+  });
+  it.each(["api::import", "api::forget"])("keeps unrecognized storage failures as errors for %s", async (id) => {
+    const { call, trigger } = setup();
+    trigger.mockRejectedValueOnce(new Error("Canonical flush failed"));
+    await expect(call(id, { body: id === "api::import" ? { exportData: {} } : { memoryId: "owned-memory", project: "infra" } }))
+      .rejects.toThrow("Canonical flush failed");
+  });
+});

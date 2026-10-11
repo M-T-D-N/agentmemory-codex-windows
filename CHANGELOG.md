@@ -20,6 +20,8 @@ The upstream AgentMemory release history remains in the
 - Track headers, body interruption/connection failure, parse failure and final request duration separately. Preserve HTTP status without inferring server completion.
 - Close only successful invocation-owned build scratch and completed installation backup review units. Preserve failed/recovery evidence and canonical data.
 
+- Return HTTP 409 with a retryable admission result when import or forget is refused because observation writers are active. Return HTTP 403 for an exact forget ownership mismatch. Preserve unknown storage failures, source ownership and the existing recovery budget.
+
 ### Qualification and limits
 
 The final preview.16 candidate is undergoing fixed-source, actual-package isolated installation/upgrade/restart/recovery and bounded failure/load qualification. Final results, skips and exact binary identity belong in its release notes. Earlier preview.15 installation results retain their original r186 scope. The previous r194 30-second incident remains unattributed; current passes do not resolve its cause. Local Qwen is not started by this qualification. Unsigned binaries, power-loss and other-host limits remain.
@@ -38,6 +40,8 @@ The final preview.16 candidate is undergoing fixed-source, actual-package isolat
 - Close only each successful Windows builder invocation's fresh disposable scratch unit and restore the caller environment. Preserve failed units for diagnosis; dependency stores, source outputs, accepted releases and canonical data are outside automatic cleanup. Document one-shot Cargo qualification without incremental targets accumulating between runs.
 - Keep bundled YAML files at LF in Windows Git checkouts and limit source-package hardening assertions to shipped native/Docker configurations; excluded upstream cloud deployment directories are not inputs to the public Windows build.
 - Use the existing confined atomic file writer for Markdown compression backups and replacements. Refuse symbolic-link destinations before modifying the source, and preserve the source when replacement writing fails.
+
+- Return HTTP 409 with a retryable admission result when import or forget is refused because observation writers are active. Return HTTP 403 for an exact forget ownership mismatch. Preserve unknown storage failures, source ownership and the existing recovery budget.
 
 ### Qualification and limits
 

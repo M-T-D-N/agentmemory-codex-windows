@@ -166,7 +166,7 @@ Set-Location agentmemory-codex-windows
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.22.1.exe `
   -ScratchDirectory D:\staging\agentmemory-build-temp `
-  -ReleaseRevision r198
+  -ReleaseRevision r199
 ```
 
 通常のビルドは、native 入力の hash、固定 lockfile、skill の整合性、typecheck、

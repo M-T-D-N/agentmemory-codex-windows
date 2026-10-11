@@ -76,6 +76,6 @@ export function registerArchiveFunctions(sdk: IIIClient, kv: StateKV) {
 export function archiveOperationError(error: unknown) {
   const message = error instanceof Error ? error.message : error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string" ? (error as { message: string }).message : "Archive operation failed";
   const safeMessage = message.split(/\r?\n/, 1)[0].slice(0, 1000) || "Archive operation failed";
-  const busy = safeMessage === "Observation writers are active; recovery made no changes. Retry after they finish.";
+  const busy = /^(?:invocation_failed: )?Observation writers are active; recovery made no changes\. Retry after they finish\.$/.test(safeMessage);
   return { success: false, error: safeMessage, ...(busy ? { code: "observation_writers_active", retryable: true } : {}) };
 }
