@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { registerContextFunction } from "../src/functions/context.js";
+import { registerApiTriggers } from "../src/triggers/api.js";
 import { KV } from "../src/state/schema.js";
 
 function mockKV() {
@@ -48,7 +49,7 @@ async function seedPinnedSlot(
   scope: "project" | "global" = "global",
 ) {
   const target = scope === "global" ? KV.globalSlots : KV.slots;
-  await kv.set(target, label, {
+  await kv.set(target, scope === "project" ? JSON.stringify(["/tmp/proj", label]) : label, {
     label,
     content,
     description: "",
@@ -56,6 +57,7 @@ async function seedPinnedSlot(
     pinned: true,
     readOnly: false,
     scope,
+    ...(scope === "project" ? { project: "/tmp/proj" } : {}),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
@@ -173,5 +175,26 @@ describe("mem::context — pinned slot injection", () => {
       expect(result.context).not.toContain("tool_guidelines");
       expect(result.context).not.toContain("rule-alpha");
     });
+  });
+});
+
+
+describe('session start project slot isolation',()=>{
+  it('injects only the exact project slots plus globals through the registered session/start entry',async()=>{
+    vi.stubEnv('AGENTMEMORY_SLOTS','true');
+    try {
+      const kv=mockKV(); const readContext=wireContext(kv);
+      await seedPinnedSlot(kv,'shared','global context','global');
+      await seedPinnedSlot(kv,'shared','project A context','project');
+      await kv.set(KV.slots,'legacy',{label:'legacy',content:'unknown legacy context',scope:'project',pinned:true});
+      const handlers=new Map<string,(data:unknown)=>Promise<any>>();
+      const sdk={registerFunction:(id:string,fn:(data:unknown)=>Promise<any>)=>handlers.set(id,fn),registerTrigger:()=>{},on:()=>{},trigger:async()=>({})};
+      registerApiTriggers(sdk as never,kv as never,readContext);
+      const start=handlers.get('api::session::start')!;
+      const a=await start({headers:{},body:{sessionId:'a',project:'/tmp/proj',cwd:'/tmp/proj'}});
+      expect(a.status_code).toBe(200); expect(a.body.context).toContain('project A context'); expect(a.body.context).not.toContain('global context');
+      const b=await start({headers:{},body:{sessionId:'b',project:'B',cwd:'/tmp/B'}});
+      expect(b.status_code).toBe(200); expect(b.body.context).toContain('global context'); expect(b.body.context).not.toContain('project A context'); expect(b.body.context).not.toContain('unknown legacy context');
+    }finally{vi.unstubAllEnvs();}
   });
 });

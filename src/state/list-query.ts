@@ -97,12 +97,12 @@ export function pageByOffset<T>(
   ordered: T[],
   cursor: string | undefined,
   limit: number,
-): { page: T[]; nextCursor: string | null } {
-  const start = decodeCursor(cursor)?.offset ?? 0;
+  offset = 0,
+): { page: T[]; nextCursor: string | null; offset: number; nextOffset: number | null } {
+  const start = decodeCursor(cursor)?.offset ?? offset;
   const page = ordered.slice(start, start + limit);
-  const nextCursor =
-    start + limit < ordered.length ? encodeCursor({ offset: start + limit }) : null;
-  return { page, nextCursor };
+  const nextOffset = start + page.length < ordered.length ? start + page.length : null;
+  return { page, offset: start, nextOffset, nextCursor: nextOffset === null ? null : encodeCursor({ offset: nextOffset }) };
 }
 
 export function matchesText(q: string | undefined, ...fields: Array<string | undefined | null>): boolean {

@@ -6,8 +6,8 @@ import { TriggerAction, type IIIClient } from "iii-sdk";
 import type { Memory, RawObservation, Session } from "../types.js";
 import { KV, generateId, jaccardSimilarity } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
-import { withKeyedLock } from "../state/keyed-mutex.js";
-import { memoryToObservation } from "../state/memory-utils.js";
+import { withKeyedLock, withKeyedLocks } from "../state/keyed-mutex.js";
+import { currentMemoryHeads, memoryToObservation } from "../state/memory-utils.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { safeAudit } from "./audit.js";
 import {
@@ -18,6 +18,8 @@ import {
   flushIndexSave,
   scheduleIndexSave,
 } from "./search.js";
+import { resolveReadAgentId } from "./read-agent-scope.js";
+import { readArchiveVisibility } from "./archive.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 import {
@@ -105,6 +107,11 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
         return { success: false, error: "project must be at most 512 characters" };
       }
 
+      if (data.agentId !== undefined && (typeof data.agentId !== "string" || data.agentId.length > 512 || data.agentId.trim() === "*")) {
+        return { success: false, error: "agentId must be an exact non-empty owner of at most 512 characters" };
+      }
+      const callAgentId = data.agentId?.trim() || getAgentId();
+
       const result = await withKeyedLock("mem:remember", async () => {
         let provenance = {
           sourceSessionIds: [] as string[],
@@ -141,26 +148,22 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
         // corpus whenever it is non-empty; a cold, never-queried index
         // falls back to the full scan so supersession never silently
         // stops working.
+        const archived = await readArchiveVisibility(kv);
+        const owns = (memory: Memory) => memory.project === project && memory.agentId === callAgentId
+          && !archived({ kind: "memory", id: memory.id });
         const idx = getSearchIndex();
         let candidateMemories: Memory[];
         try {
           if (isMemoryIndexReady() && idx.size > 0) {
-            // 50 hits, not 20: the shared index also holds observations,
-            // which occupy slots but never resolve to memories below. A
-            // >0.7-Jaccard duplicate shares most tokens with the query so
-            // it ranks near the top regardless. Only mem_-prefixed ids can
-            // resolve in KV.memories, so skip the guaranteed-miss lookups.
-            const hits = idx
-              .search(data.content, 50)
-              .filter((h) => h.obsId.startsWith("mem_"));
-            const loaded = await Promise.all(
-              hits.map((h) =>
-                kv.get<Memory>(KV.memories, h.obsId).catch(() => null),
-              ),
-            );
-            candidateMemories = loaded.filter((m): m is Memory => m !== null);
+            const hits = idx.search(data.content, idx.size).filter(h => h.obsId.startsWith("mem_"));
+            candidateMemories = [];
+            for (let offset = 0; offset < hits.length && candidateMemories.length < 50; offset += 50) {
+              const loaded = await Promise.all(hits.slice(offset, offset + 50).map(h => kv.get<Memory>(KV.memories, h.obsId)));
+              candidateMemories.push(...loaded.filter((m): m is Memory => m !== null && owns(m) && m.isLatest !== false));
+            }
+            candidateMemories = candidateMemories.slice(0, 50);
           } else {
-            candidateMemories = await kv.list<Memory>(KV.memories);
+            candidateMemories = currentMemoryHeads(await kv.list<Memory>(KV.memories)).filter(owns);
           }
         } catch (err) {
           // Candidate generation is an optimization; a failure here must
@@ -168,7 +171,7 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
           logger.warn("supersession candidate lookup failed, using full scan", {
             error: err instanceof Error ? err.message : JSON.stringify(err),
           });
-          candidateMemories = await kv.list<Memory>(KV.memories);
+          candidateMemories = currentMemoryHeads(await kv.list<Memory>(KV.memories)).filter(owns);
         }
         let supersededId: string | undefined;
         let supersededVersion = 1;
@@ -178,9 +181,9 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
         // consolidate. Reported back as a hint; never acted on here.
         let nearMatch: { id: string; title: string; similarity: number } | undefined;
         const lowerContent = data.content.toLowerCase();
-        for (const existing of candidateMemories) {
-          if (existing.isLatest === false) continue;
-          if (existing.project !== project) continue;
+        for (const candidate of candidateMemories) {
+          const existing = await kv.get<Memory>(KV.memories, candidate.id);
+          if (!existing || existing.isLatest === false || !owns(existing)) continue;
           const similarity = jaccardSimilarity(
             lowerContent,
             existing.content.toLowerCase(),
@@ -198,15 +201,6 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
             nearMatch = { id: existing.id, title: existing.title, similarity };
           }
         }
-
-        // stamp the agent role on the memory so future recall can
-        // filter by agent. Request body wins (multi-agent runtimes
-        // explicitly tagging at write time), env AGENT_ID fallback,
-        // none → memory is unscoped (legacy behavior).
-        const callAgentId =
-          typeof data.agentId === "string" && data.agentId.trim().length > 0
-            ? data.agentId.trim().slice(0, 128)
-            : getAgentId();
 
         const memory: Memory = {
           id: generateId("mem"),
@@ -247,9 +241,9 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
           memory.forgetAfter = new Date(Date.now() + data.ttlDays * 86400000).toISOString();
         }
 
+        await kv.set(KV.memories, memory.id, memory);
         if (supersededMemory) {
-          supersededMemory.isLatest = false;
-          await kv.set(KV.memories, supersededMemory.id, supersededMemory);
+          await kv.set(KV.memories, supersededMemory.id, { ...supersededMemory, isLatest: false });
           // The superseded version stays in KV (the viewer's version
           // chain reads it there) but leaves both search indexes:
           // recall returning an outdated fact as if current is worse
@@ -259,7 +253,6 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
           } catch {}
           vectorIndexRemove(supersededMemory.id);
         }
-        await kv.set(KV.memories, memory.id, memory);
 
         // Without this, mem::remember persists the row but the BM25
         // index never sees it, so memory_smart_search and memory_recall
@@ -335,6 +328,7 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
       sessionId?: string;
       observationIds?: string[];
       memoryId?: string;
+      agentId?: string;
       project?: string;
       dryRun?: boolean;
       action?: string;
@@ -359,7 +353,17 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
       }
       return withObservationWrite(async () => {
       kv.assertRecoveryImportAllowed({ sessionId: data.sessionId, observationIds: data.observationIds });
-      let finishArchiveForget = data.sessionId ? async () => 0 : await prepareArchiveForget(kv, data);
+      const agentId = resolveReadAgentId(data.agentId, "mem::forget");
+      const assertOwner = (row: { project?: string; agentId?: string } | null) => {
+        if (row && (data.project !== undefined && data.project !== row.project || agentId !== undefined && agentId !== row.agentId)) throw Error("Forget ownership mismatch");
+      };
+      const owners = await Promise.all([
+        data.sessionId ? kv.get<Session>(KV.sessions, data.sessionId) : Promise.resolve(null),
+        data.memoryId ? kv.get<Memory>(KV.memories, data.memoryId) : Promise.resolve(null),
+      ]);
+      owners.forEach(assertOwner);
+      let finishArchiveForget = async () => 0;
+      let memoryArchiveStatesRemoved = 0;
       let deleted = 0;
       const deletedMemoryIds: string[] = [];
       const deletedObservationIds: string[] = [];
@@ -387,11 +391,12 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
         await withKeyedLock(
           GRAPH_WRITE_LOCK,
           () =>
-            withKeyedLock(
-              sessionLifecycleLockKey(sessionId),
+            withKeyedLocks(
+              ["mem:remember", sessionLifecycleLockKey(sessionId)],
               async () => {
                 finishArchiveForget = await prepareArchiveForget(kv, data);
                 const session = await kv.get<Session>(KV.sessions, sessionId);
+                assertOwner(session);
                 const summary = await kv.get(KV.summaries, sessionId);
                 const observations = await kv.list<ForgetObservation>(
                   KV.observations(sessionId),
@@ -476,6 +481,8 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
                     observationCount: remaining.length,
                     updatedAt: new Date().toISOString(),
                   };
+                  delete nextSession.summary;
+                  delete nextSession.firstPrompt;
                   for (const field of [
                     "semanticGraphThroughObservationId",
                     "semanticGraphBackfillThroughObservationId",
@@ -500,23 +507,45 @@ export function registerRememberFunction(sdk: IIIClient, kv: StateKV): void {
         );
       }
 
-      if (data.memoryId) {
-        const mem = await kv.get<Memory>(KV.memories, data.memoryId);
+      const memoryId = data.memoryId;
+      if (memoryId) await withKeyedLock("mem:remember", async () => {
+        const finishMemoryArchive = await prepareArchiveForget(kv, { memoryId: memoryId, project: data.project });
+        const mem = await kv.get<Memory>(KV.memories, memoryId);
         if (mem) {
-          await kv.delete(KV.memories, data.memoryId);
-          deletedMemoryIds.push(data.memoryId);
+          assertOwner(mem);
+          const ancestors = new Map((await kv.list<Memory>(KV.memories)).map(row => [row.id, row]));
+          const pending = [...(mem.supersedes ?? []), ...(mem.parentId ? [mem.parentId] : [])];
+          const visited = new Set<string>();
+          const retired: string[] = [];
+          while (pending.length) {
+            const id = pending.pop()!;
+            if (visited.has(id)) continue;
+            visited.add(id);
+            const ancestor = ancestors.get(id);
+            if (!ancestor || ancestor.project !== mem.project || ancestor.agentId !== mem.agentId
+              || (ancestor.version ?? 1) >= (mem.version ?? 1)) continue;
+            pending.push(...(ancestor.supersedes ?? []), ...(ancestor.parentId ? [ancestor.parentId] : []));
+            if (ancestor.isLatest !== false) {
+              await kv.set(KV.memories, id, { ...ancestor, isLatest: false });
+              retired.push(id);
+            }
+          }
+          if (retired.length) await safeAudit(kv, "forget", "mem::forget", retired, { action: "retire-superseded-ancestors", memoryId });
+          await kv.delete(KV.memories, memoryId);
+          deletedMemoryIds.push(memoryId);
           deleted++;
           alreadyAbsent = false;
-          if (mem.imageRef) await cleanup(data.memoryId, "image", () => decrementImageRef(kv, sdk, mem.imageRef!));
-          await cleanup(data.memoryId, "access", () => deleteAccessLog(kv, data.memoryId!, { requireSuccess: true }));
-          await cleanup(data.memoryId, "keyword-index", () => getSearchIndex().remove(data.memoryId!));
-          await cleanup(data.memoryId, "vector-index", () => vectorIndexRemove(data.memoryId!));
+          if (mem.imageRef) await cleanup(memoryId, "image", () => decrementImageRef(kv, sdk, mem.imageRef!));
+          await cleanup(memoryId, "access", () => deleteAccessLog(kv, memoryId!, { requireSuccess: true }));
+          await cleanup(memoryId, "keyword-index", () => getSearchIndex().remove(memoryId!));
+          await cleanup(memoryId, "vector-index", () => vectorIndexRemove(memoryId!));
         } else if (!sessionId || deleted === 0) {
           alreadyAbsent = true;
         }
-      }
+        memoryArchiveStatesRemoved += await finishMemoryArchive();
+      });
 
-      const archiveStatesRemoved = await finishArchiveForget();
+      const archiveStatesRemoved = memoryArchiveStatesRemoved + await finishArchiveForget();
       if (deleted > 0) { indexFlushAttempted = true; await cleanup("search", "persistence", () => flushIndexSave({ reportFailure: true })); }
       logger.info("Memory forgotten", { deleted });
       return {

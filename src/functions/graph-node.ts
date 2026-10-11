@@ -1,3 +1,4 @@
+import { currentMemoryHeads } from "../state/memory-utils.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import type { CompressedObservation, GraphEdge, GraphNode, GraphSnapshot, Memory, Session } from "../types.js";
@@ -153,7 +154,7 @@ export async function describeGraphNode(kv: StateKV, nodeId: string): Promise<Gr
       offset = page.next_offset;
     }
   } else allMemories.push(...await kv.list<Memory>(KV.memories));
-  for (const m of allMemories) {
+  for (const m of currentMemoryHeads(allMemories)) {
     if (!m || m.isLatest === false || hidden({ kind: "memory", id: m.id }) || (project !== undefined && m.project !== project)) continue;
     const viaObs = (m.sourceObservationIds ?? []).some((id) => obsSet.has(id));
     const viaName = !viaObs && (matchesName(m.concepts, node.name) || matchesName(m.files, node.name));

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import type { CompressedObservation, Session } from "../src/types.js";
 import { KV } from "../src/state/schema.js";
+import { sessionLifecycleLockKey } from "../src/functions/session-lifecycle.js";
 import { keyedLockBusy } from "../src/state/keyed-mutex.js";
 import { resumeGraphWritePlan } from "../src/state/graph-write-plan.js";
 import { graphObservationDigest, readGraphCompletionContext } from "../src/functions/graph-observation-result.js";
@@ -75,7 +76,7 @@ describe("observation-specific graph completion", () => {
         snapshotReads += 1;
         if (snapshotReads === 2) {
           expect(keyedLockBusy("mem:graph-write")).toBe(true);
-          expect(keyedLockBusy("mem:session-lifecycle:s")).toBe(true);
+          expect(keyedLockBusy(sessionLifecycleLockKey("s"))).toBe(true);
         }
         return { resetAt: snapshotReads === 1 ? "" : freshEpoch } as never;
       }

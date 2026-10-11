@@ -30,7 +30,7 @@ full disclosure](#ai-development-disclosure).
 
 ## Start here
 
-Preview.15 packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
+Preview.16 packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
 
 1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
 2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
@@ -77,15 +77,15 @@ only an explicit snapshot rebuild refreshes them.
 Release changes are recorded in [CHANGELOG.md](CHANGELOG.md). Source tags
 identify public releases; each build manifest records its own qualification.
 
-## Changes in preview.15
+## Changes in preview.16
 
-- Integrates upstream AgentMemory 0.9.30 while preserving canonical source text, exact-project filtering and graph provenance.
-- Uses one installer for new installations, managed updates and qualified original upstream adoption; newer unsupported upstream versions are retained rather than silently downgraded.
-- Pins iii 0.22.1 with the file flush barrier and bounded state/stream pagination. Acknowledged managed writes wait for the barrier; process-crash qualification does not certify power-loss recovery.
-- Settles deliberately skipped captures without false dead letters and distinguishes graph-provider availability from intentionally disabled general LLM features.
-- Removes each successful build invocation's own disposable scratch unit; failures remain available for diagnosis. Shared caches, release packages and canonical data are separate.
+- Keeps memory replacement, slot updates, import and deletion within the exact project and agent owner, including partial acknowledgements and concurrent capture.
+- Applies archive and pending-import visibility before recent-result limits; shows derived session summaries only while their canonical source digest still matches.
+- Uses last activity to distinguish a long active session from an idle abandoned session.
+- Records E2E write intent before dispatch and requires actual server completion before cleanup; request headers, body failures and parse failures have distinct outcomes.
+- Adds successful installation backup closeout and bounded synthetic qualification without starting general LLM features.
 
-See [release notes](CHANGELOG.md) for verification scope and retained limitations.
+Final package qualification is recorded in the release notes. Earlier installation evidence remains labelled with its original revision.
 
 ## Changes in preview.15
 
@@ -184,7 +184,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.15` | Public source tag and pinned installer distribution |
+| Downstream release | `0.1.0-preview.16` | Public source tag and pinned installer distribution |
 | AgentMemory compatibility | `0.9.30` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.22.1` | Pinned patched native runtime input, verified by SHA-256 during the build |
@@ -194,7 +194,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 ## Install without building
 
-Use the preview.15 GitHub release ZIP or its version-pinned TGZ launcher with the
+Use the preview.16 GitHub release ZIP or its version-pinned TGZ launcher with the
 [pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
 It covers automatic empty-root installation, optional separate preparation/activation,
 managed updates, original upstream adoption, and offline hash verification. The GitHub TGZ can be run with npm without a
@@ -223,14 +223,14 @@ Clone the repository on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.15 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.16 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.22.1.exe `
   -ScratchDirectory D:\staging\agentmemory-build-temp `
-  -ReleaseRevision r189
+  -ReleaseRevision r198
 ```
 
 The normal builder verifies the pinned native input, restores the frozen lock,

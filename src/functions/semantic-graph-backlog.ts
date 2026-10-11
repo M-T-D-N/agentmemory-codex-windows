@@ -1,3 +1,4 @@
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 import type { IIIClient } from "iii-sdk";
 import {
   statSync,
@@ -417,7 +418,7 @@ async function normalizeCompletedSession(
   kv: StateKV,
   sessionId: string,
 ): Promise<boolean> {
-  const attempt = await tryWithKeyedLock("mem:graph-write", () => withKeyedLock(`mem:session-lifecycle:${sessionId}`, async () => {
+  const attempt = await tryWithKeyedLock("mem:graph-write", () => withKeyedLock(sessionLifecycleLockKey(sessionId), async () => {
     const session = await kv.get<Session>(KV.sessions, sessionId);
     if (!session || session.status !== "completed" && session.semanticGraphCompletionVersion !== 1) return false;
     if (session.semanticGraphStatus === "complete" && !session.semanticGraphBootstrapSkipped) return false;
@@ -563,7 +564,7 @@ export function registerSemanticGraphBacklogFunction(
     }
 
     const sessionId = candidate.session.id;
-    const lifecycleKey = `mem:session-lifecycle:${sessionId}`;
+    const lifecycleKey = sessionLifecycleLockKey(sessionId);
     const sourceStillExists = await withKeyedLock(lifecycleKey, async () => {
       const currentSession = await kv.get<Session>(KV.sessions, sessionId);
       const currentObservations = await Promise.all(

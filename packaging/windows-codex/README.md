@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.15`, based on upstream AgentMemory `v0.9.30`. It is not the
+> Preview `0.1.0-preview.16`, based on upstream AgentMemory `v0.9.30`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -107,7 +107,7 @@ from installed qualification and preserves the current engine/data contracts.
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.15`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.16`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.30` and the `agentmemory` identifier. These are not the
@@ -199,7 +199,7 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.15 -OutputDirectory D:\staging\npm-preview15
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.16 -OutputDirectory D:\staging\npm-preview16
 ```
 
 This produces the versioned Windows ZIP and npm tarball, without publishing.
@@ -259,8 +259,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.16\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.16 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -1335,6 +1335,19 @@ creates the same self-contained release. Validation does not activate a runtime.
 
 ## Build artifact closeout
 
+When a package must be exercised during development, use the existing builder's
+`-DiagnosticOnly -IiiEnginePath <pinned-engine> -QualificationScript <task-script>`
+with a D-owned `-ScratchDirectory`. It materializes one diagnostic release in its
+fresh unit and passes `-ReleaseRoot` and `-ScratchRoot` to the synchronous script.
+Share that release across the script's checks instead of cloning dependencies
+for every trial; keep independent synthetic install roots inside `ScratchRoot`.
+The script must finish its exact child processes before returning, export the
+minimum evidence outside the unit, and fail if any check fails. Success removes
+the diagnostic package and synthetic installations together; failure retains
+them. This is a trusted synchronous callback contract, not OS confinement or a
+proof that arbitrary scripts have no background consumers. It never activates
+the managed service. Use `-ValidationOnly` when no packaged execution is needed.
+
 After build and related validation/qualification, the main agent must perform this
 closeout before reporting the work complete. This applies to validation-only runs,
 engine builds, package builds and installation/compatibility tests as well as
@@ -1414,6 +1427,26 @@ protected paths and maintenance candidates explicitly; successful ZIP compaction
 alone does not finish retention review. Code/config alone is not a data restore.
 Perform any approved maintenance using the workspace storage/approval policy and
 the exact-path checks below, without adding an automatic expiry or runtime gate.
+
+The installer accepts `-MaintenancePlanPath` (npm `--maintenance-plan`) to apply
+explicit backup decisions in this same successful update. The JSON input uses
+`schema_version: 1`, exact `current_release` and `immediate_predecessor` identities
+(`release_revision`, `data_contract_version`, `source_package`), completed
+`code_data_recovery` and `consumers_and_publication` reviews, each with an existing
+`evidence` reference and `protected_paths`, and `decisions` for every older
+reviewed candidate: exact `path`, `action` (`retain` or `recycle`), nonempty
+`reason`, and the approved `sha256` for recycling. These declarations reflect
+the caller's actual review and approval; a Boolean alone proves neither.
+Only direct-child completed ZIP backups classified as older distinct candidates
+can be recycled. Current/predecessor/unknown entries and reviewed recovery or
+consumer pins cannot be selected. The entire decision set and bytes are checked
+before any operation; startup locking rechecks the current installed identity.
+Windows recycling refuses permanent-delete fallback. It never empties the bin.
+The summary's `release_backup_closeout` distinguishes `disposed`, protected-only,
+pending decisions, unresolved identity, omitted protected scope, and failures with actual partial
+results. A healthy update remains healthy if maintenance cannot finish, but its
+artifact closeout is incomplete. Record the returned actual result in the
+existing qualification record; do not create a second cleanup report or ZIP.
 
 Keep the active package, the immediately preceding rollback package, the
 pristine upstream source archive, and the final qualification artifact for the
@@ -1512,46 +1545,41 @@ Windows power-loss recovery, disk failure recovery or full production acceptance
 To rebuild the engine, check out `iii/v0.22.1` at the exact `source_commit` in
 `config/third-party-inputs.json`, apply `patches/iii-0.22.1-state-flush.patch`, then
 run `cargo build --release --locked -p iii --bin iii` in an x64 MSVC build environment.
-For a one-shot workspace rebuild, use the existing registered launcher and keep
-the Cargo target in its fresh temporary unit. From the AgentMemory package root,
-set `$engineSource` to the prepared, patched engine checkout, then run the example
-below with the actual Codex task ID. The child environment must have the x64 MSVC
-toolchain available. `CARGO_INCREMENTAL=0` applies only to that child. The existing
-engine recovery suite qualifies the binary before it is exported outside the
-unit; its report is also outside the unit. Both outputs use no-replace paths.
+For a one-shot rebuild, run the following in a child PowerShell with the x64
+MSVC toolchain available. Set the patched engine checkout, this public source
+checkout and an unused qualification output directory explicitly. The Cargo
+target and temporary files belong to that directory. This example does not
+change your global environment or automatically delete failed qualification data.
 
 ```powershell
-$taskId = $env:CODEX_THREAD_ID
-if ([string]::IsNullOrWhiteSpace($taskId)) { throw 'Supply the actual task ID.' }
-$engineBuild = @'
 $ErrorActionPreference = 'Stop'
+$engineSource = 'D:\source\iii-patched'
+$agentMemorySource = 'D:\source\agentmemory-codex-windows'
+$qualificationRoot = 'D:\staging\iii-qualification'
+if (Test-Path -LiteralPath $qualificationRoot) { throw 'Choose an unused qualification root.' }
+[void][IO.Directory]::CreateDirectory($qualificationRoot)
+$env:TEMP = $qualificationRoot
+$env:TMP = $qualificationRoot
+$env:TMPDIR = $qualificationRoot
 $env:CARGO_INCREMENTAL = '0'
-$env:CARGO_TARGET_DIR = '{ephemeral}/cargo-target'
-& cargo build --release --locked -p iii --bin iii
+$env:CARGO_TARGET_DIR = Join-Path $qualificationRoot 'cargo-target'
+& cargo build --manifest-path (Join-Path $engineSource 'Cargo.toml') --release --locked -p iii --bin iii
 if ($LASTEXITCODE -ne 0) { throw "Cargo build failed: $LASTEXITCODE" }
-$binary = Join-Path $env:CARGO_TARGET_DIR 'release/iii.exe'
+$binary = Join-Path $env:CARGO_TARGET_DIR 'release\iii.exe'
 $env:AGENTMEMORY_TEST_ENGINE = $binary
 $env:AGENTMEMORY_TEST_ENGINE_SHA256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
 $env:AGENTMEMORY_TEST_ENGINE_DURABILITY = 'required'
-$env:AGENTMEMORY_ENGINE_TEST_REPORT = '{task}/engine-write-recovery.json'
-$export = '{task}/iii-qualified.exe'
-if ((Test-Path -LiteralPath $export) -or (Test-Path -LiteralPath $env:AGENTMEMORY_ENGINE_TEST_REPORT)) { throw 'Choose unused qualification output paths.' }
-& pnpm --dir 'D:/Workspace/control/.workspace/packages/agentmemory_codex' exec vitest run test/engine-write-recovery.test.ts
+$env:AGENTMEMORY_ENGINE_TEST_REPORT = Join-Path $qualificationRoot 'engine-write-recovery.json'
+& pnpm --dir $agentMemorySource exec vitest run test/engine-write-recovery.test.ts
 if ($LASTEXITCODE -ne 0) { throw "Engine recovery qualification failed: $LASTEXITCODE" }
-[IO.File]::Copy($binary, $export, $false)
-'@
-python D:/Workspace/control/.workspace/tools/run-with-registered-environment.py `
-  --project workspace --task-id $taskId --ephemeral-unit iii-engine-rebuild `
-  --cwd $engineSource -- powershell.exe -NoProfile -NonInteractive `
-  -ExecutionPolicy Bypass -Command $engineBuild
+[IO.File]::Copy($binary, (Join-Path $qualificationRoot 'iii-qualified.exe'), $false)
 ```
 
-`{ephemeral}` and `{task}` are expanded in command arguments by the launcher;
-`--cwd` is the actual engine checkout and is not expanded. The launcher removes
-only its fresh unit after exit 0 and preserves failures or cleanup errors with
-the exact path. For stable repeated engine development, retain a known owned
-target instead and close it after its consumers finish; do not place a required
-cache or accepted binary in a success-cleaned unit.
+Retain the qualified binary, hash, test report and build provenance. After every
+consumer has finished, remove only this invocation's disposable Cargo target and
+test fixtures; preserve failed inputs until diagnosis ends. A locally rebuilt
+binary must match the pinned manifest before the package builder accepts it.
+Do not overwrite an existing accepted binary or change the pin to hide a failure.
 
 The manifest records the Rust/Cargo, MSVC and Windows SDK versions and Cargo.lock
 hash used for the pinned binary. The package builder verifies the binary hash and
@@ -1822,3 +1850,20 @@ reported as complete historical correspondence. Archiving preserves this status;
 individual forget is blocked until correspondence is resolved. Lifecycle transfer
 discards trusted capture checkpoints and requires reinitialization with a new
 explicit review. No observation is deleted, rewritten or automatically archived.
+
+Project slots now require an exact `project` when created (scope defaults to `project`); pass the same project to slot reads and edits. `scope: "global"` remains shared and ignores `project`. Ownerless legacy slots remain accessible through unscoped slot management and are never injected into project context or assigned automatically.
+
+### Session activity and import recovery
+
+Session inactivity uses `lastActivityAt` when available, with the existing timestamp fallback for older records. Native discovery and capture derive activity from verified source timestamps; reindexing does not count as user activity. Recent genuine user messages can resume abandoned sessions. Completed sessions require a valid completion time and a later user message, or an explicit session start.
+
+Archive retries confirm durable state before reporting success. A worker with an uncertain write outcome requires recovery before retrying. Import validates required memory search arrays and known retained source ownership before changing state; unknown legacy citations retain the existing compatibility behavior. Source forgetting shares the memory-save lock so validation and saving cannot overlap deletion.
+
+### Live qualification and request diagnostics
+
+The maintained local entry point is `node scripts/qualify-live.mjs before|after RECORD INSTALL_ROOT PROJECT HISTORY_SESSION REVISION [LOOPBACK_BASE_URL]`. Supply the backend secret through the command's inherited environment. `before` records 20 original observations and the encrypted authentication file hash; `after` requires the selected installed revision, exercises the REST/MCP paths and removes only its exact owned test records. This command mutates test records and requires authorization for the selected installation; it is not run automatically by the builder.
+
+Reports retain singular `warning`, index/snapshot provenance, optional exactness and revision fields, and elapsed time. Readability and exact indexed results are separate: omitted fields remain unknown. Slot and remember ownership intent is persisted before each write; lost acknowledgements remain unknown until exact owned records are reconciled and their absence verified. Session, slot and memory cleanup runs independently. A session never created remains `not_created`; failure in one cleanup stage cannot produce a successful overall result. Incomplete or ranked memory inventories cannot prove absence.
+
+The existing opt-in runtime diagnostic collector accepts the qualification request header `x-agentmemory-request-id` and retains bounded stage times, read/mutation call counts and server completion records. It does not store payloads or credentials. Client deadlines do not cancel server work; correlate the request ID with a completed server record before claiming completion. Busy recovery diagnostics record writer counts and rejection before mutation; exclusion still prevents recovery work from overlapping an observation writer. Successful bounded retries are not evidence that contention is resolved. A limited cold/warm comparison means fresh process caches, not a cleared operating-system page cache, and cannot establish the cause of a previous unobserved timeout.
+In the managed Windows profile (`AGENTMEMORY_FORCE_PROXY=true` and `AGENTMEMORY_AUTO_COMPRESS=false`), administrative recovery may reserve admission for up to five seconds while existing writers drain. New writers wait for that reservation, preventing continuous native capture from starving archive/import requests. A timeout starts no recovery work and releases the reservation; reentrant recovery and concurrent recovery still reject. Other profiles retain immediate rejection by default. This is in-process bounded admission in the existing coordinator, not durable scheduling or cancellation of client-aborted work.

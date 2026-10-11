@@ -1,9 +1,11 @@
+import { sessionActivityAt } from "./session-lifecycle.js";
 import type { IIIClient } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { resolveMemoryProject } from "../state/memory-utils.js";
 import { recordAudit } from "./audit.js";
+import { getSessionSweepStaleHours } from "../config.js";
 import type {
   Action,
   ActionEdge,
@@ -41,7 +43,6 @@ const ALL_CATEGORIES = [
   "mesh",
 ];
 
-const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
 export function registerDiagnosticsFunction(sdk: IIIClient, kv: StateKV): void {
@@ -290,18 +291,20 @@ export function registerDiagnosticsFunction(sdk: IIIClient, kv: StateKV): void {
 
       if (categories.includes("sessions")) {
         const sessions = await kv.list<Session>(KV.sessions);
+        const staleHours = getSessionSweepStaleHours();
+        const cutoff = now - staleHours * 60 * 60 * 1000;
         let sessionIssues = 0;
 
         for (const session of sessions) {
           if (
             session.status === "active" &&
-            now - new Date(session.startedAt).getTime() > TWENTY_FOUR_HOURS_MS
+            new Date(sessionActivityAt(session)).getTime() < cutoff
           ) {
             checks.push({
               name: `abandoned-session:${session.id}`,
               category: "sessions",
               status: "warn",
-              message: `Session ${session.id} has been active for over 24 hours`,
+              message: `Session ${session.id} is still marked active with no recorded activity for over ${staleHours} hours`,
               fixable: false,
             });
             sessionIssues++;

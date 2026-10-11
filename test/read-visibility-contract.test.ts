@@ -1,3 +1,5 @@
+import { memoryToObservation } from "../src/state/memory-utils.js";
+import { registerRememberFunction } from "../src/functions/remember.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { KV } from "../src/state/schema.js";
@@ -48,6 +50,107 @@ async function lifecycle(action: "archive" | "restore", target: any) {
  return changeArchiveState(kv as never, { ...request, dryRun: false, expectedRevision: preview.expectedRevision, expectedDigest: preview.expectedDigest, reason: "Fixture reviewed" });
 }
 describe("consistent visibility across official reads and derived caches", () => {
+ it("rejects mixed-owner compound forget before deleting any observation", async () => {
+  registerRememberFunction(sdk as never, kv as never);
+  vi.stubEnv("AGENTMEMORY_AGENT_SCOPE", "isolated"); vi.stubEnv("AGENT_ID", "A");
+  await kv.set(KV.memories, "foreign-memory", { id: "foreign-memory", project: "p", agentId: "B", isLatest: true });
+  const before = await kv.list(KV.observations("A0"));
+  await expect(call("mem::forget", { sessionId: "A0", observationIds: ["A0o"], memoryId: "foreign-memory" })).rejects.toThrow(/ownership mismatch/);
+  expect(await kv.list(KV.observations("A0"))).toEqual(before);
+  await expect(call("mem::forget", { sessionId: "B0", observationIds: ["B0o"] })).rejects.toThrow(/ownership mismatch/);
+  expect(await kv.list(KV.observations("B0"))).toHaveLength(1);
+ });
+
+ it("REST, recent and handoff summaries use current sources after partial forget", async () => {
+  registerMcpEndpoints(sdk as never, kv as never);
+  registerApiTriggers(sdk as never, kv as never, async () => ({ context: "", blocks: 0, tokens: 0 }));
+  const observations = await kv.list<CompressedObservation>(KV.observations("A0"));
+  await kv.set(KV.summaries, "A0", { sessionId: "A0", project: "p", createdAt: "2026-10-03T00:00:00Z", visibilityRevision: SUMMARY_VISIBILITY_REVISION, sourceDigest: summarySourceDigest(observations), title: "forgotten-summary-secret", narrative: "old aggregate", keyDecisions: [], filesModified: [], concepts: [], observationCount: 1 });
+  const session = await kv.get<Session>(KV.sessions, "A0");
+  await kv.set(KV.sessions, "A0", { ...session!, summary: "unproved-embedded-secret", firstPrompt: "forgotten-first-prompt-secret" });
+  registerRememberFunction(sdk as never, kv as never);
+  const entryPoints = async () => Promise.all([
+   sdk.trigger("api::sessions", { query_params: { project: "p", sessionId: "A0" } }),
+   sdk.trigger("mcp::resources::read", { body: { uri: "agentmemory://project/p/recent" } }),
+   sdk.trigger("mcp::prompts::get", { body: { name: "session_handoff", arguments: { session_id: "A0" } } }),
+  ]);
+  const before = await entryPoints();
+  for (const result of before) { expect(JSON.stringify(result)).toContain("forgotten-summary-secret"); expect(JSON.stringify(result)).not.toContain("unproved-embedded-secret"); }
+  expect(await call("mem::forget", { sessionId: "A0", observationIds: ["A0o"] })).toMatchObject({ success: true, deleted: 1 });
+  const after = await entryPoints();
+  for (const result of after) { expect(JSON.stringify(result)).not.toContain("forgotten-summary-secret"); expect(JSON.stringify(result)).not.toContain("unproved-embedded-secret"); expect(JSON.stringify(result)).not.toContain("forgotten-first-prompt-secret"); }
+  expect(await kv.get(KV.summaries, "A0")).not.toBeNull();
+ });
+ it("persisted supersession is consistent across latest, search expansion and cross-owner links", async () => {
+  registerMcpEndpoints(sdk as never, kv as never);
+  vi.stubEnv("AGENTMEMORY_AGENT_SCOPE", "isolated"); vi.stubEnv("AGENT_ID", "A");
+  const old = { id: "mem_old", project: "p", agentId: "A", isLatest: true, version: 1, title: "old-head-secret", content: "old content", createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", type: "fact" as const, concepts: [], files: [], sessionIds: [], strength: 7 };
+  const current = { ...old, id: "mem_current", version: 2, title: "current-head-visible", content: "current content", parentId: old.id, supersedes: [old.id] };
+  const foreign = { ...current, id: "mem_foreign", agentId: "B", version: 3, parentId: current.id, supersedes: [current.id] };
+  for (const row of [old, current, foreign]) await kv.set(KV.memories, row.id, row);
+  await rebuildIndex(kv as never);
+  const latest = await sdk.trigger("mcp::resources::read", { body: { uri: "agentmemory://memories/latest" } });
+  expect(JSON.stringify(latest)).toContain("current-head-visible"); expect(JSON.stringify(latest)).not.toContain("old-head-secret");
+  const expanded = await call("mem::smart-search", { expandIds: [{obsId: old.id, sessionId: "memory"}, {obsId: current.id, sessionId: "memory"}], exactExpansion: true, trackAccess: false });
+  expect(expanded.results.map((row: any) => row.obsId)).toEqual([current.id]);
+  registerApiTriggers(sdk as never, kv as never, async () => ({ context: "", blocks: 0, tokens: 0 }));
+  const counted: any = await sdk.trigger("api::memories", { query_params: { project: "p", count: "true" } });
+  expect(counted.body).toMatchObject({ total: 2, latestCount: 1 });
+  const listed: any = await sdk.trigger("api::memories", { query_params: { project: "p", latest: "true" } });
+  expect(listed.body.memories.map((row: any) => row.id)).toEqual([current.id]);
+  expect(memoryToObservation(current).agentId).toBe("A");
+ });
+ it("pending-import rows stay hidden and storage read errors are not empty successes", async () => {
+  registerMcpEndpoints(sdk as never, kv as never);
+  await kv.set(KV.memories, "pending", { id: "pending", project: "p", agentId: "A", title: "pending-memory-secret", isLatest: true });
+  await lifecycle("archive", { kind: "memory", id: "pending" });
+  await lifecycle("restore", { kind: "memory", id: "pending" });
+  for (const state of await kv.list<any>(KV.archiveStates)) await kv.set(KV.archiveStates, state.id, { ...state, importPendingDigest: "a".repeat(64) });
+  const latest: any = await sdk.trigger("mcp::resources::read", { body: { uri: "agentmemory://memories/latest" } });
+  expect(JSON.stringify(latest)).not.toContain("pending-memory-secret");
+  await lifecycle("archive", { kind: "session", id: "A0" });
+  await lifecycle("restore", { kind: "session", id: "A0" });
+  for (const state of await kv.list<any>(KV.archiveStates)) if (state.target.kind === "session") await kv.set(KV.archiveStates, state.id, { ...state, importPendingDigest: "a".repeat(64) });
+  const handoff: any = await sdk.trigger("mcp::prompts::get", { body: { name: "session_handoff", arguments: { session_id: "A0" } } });
+  expect(handoff.status_code).toBe(404);
+  const list = kv.list;
+  kv.list = async scope => { if (scope === KV.memories) throw Error("storage failed"); return list(scope); };
+  const failed: any = await sdk.trigger("mcp::resources::read", { body: { uri: "agentmemory://memories/latest" } });
+  expect(failed.status_code).toBe(500);
+ });
+ it("recent and latest filter hidden and foreign rows before their result limit", async () => {
+  registerMcpEndpoints(sdk as never, kv as never);
+  vi.stubEnv("AGENTMEMORY_AGENT_SCOPE", "isolated"); vi.stubEnv("AGENT_ID", "A");
+  for (let i=0; i<12; i++) {
+   const id = "foreign" + i;
+   await kv.set(KV.sessions, id, { id, project: "p", agentId: "B", startedAt: "2026-10-10T00:00:00Z", cwd: "/p", status: "completed", observationCount: 0 });
+   await kv.set(KV.summaries, id, { sessionId: id, project: "p", createdAt: "2026-10-10T00:00:00Z", visibilityRevision: SUMMARY_VISIBILITY_REVISION, sourceDigest: summarySourceDigest([]), title: "foreign-secret", narrative: "private", keyDecisions: [], filesModified: [], concepts: [], observationCount: 0 });
+   await kv.set(KV.memories, id, { id, project: "p", agentId: "B", title: "foreign-secret", isLatest: true, updatedAt: "2026-10-10T00:00:00Z" });
+  }
+  const original = await kv.list<CompressedObservation>(KV.observations("A0"));
+  await kv.set(KV.summaries, "A0", { sessionId: "A0", project: "p", createdAt: "2026-10-02T00:00:00Z", visibilityRevision: SUMMARY_VISIBILITY_REVISION, sourceDigest: summarySourceDigest(original), title: "own-visible", narrative: "normal", keyDecisions: [], filesModified: [], concepts: [], observationCount: 1 });
+  await kv.set(KV.memories, "own", { id: "own", project: "p", agentId: "A", title: "own-visible", isLatest: true, updatedAt: "2026-10-02T00:00:00Z" });
+  await kv.set(KV.memories, "hidden", { id: "hidden", project: "p", agentId: "A", title: "hidden-secret", isLatest: true, updatedAt: "2026-10-11T00:00:00Z" });
+  await lifecycle("archive", { kind: "memory", id: "hidden" });
+  for (const uri of ["agentmemory://project/p/recent", "agentmemory://memories/latest"]) {
+   const response: any = await sdk.trigger("mcp::resources::read", { body: { uri } });
+   expect(response.status_code).toBe(200);
+   expect(JSON.stringify(response)).toContain("own-visible");
+   expect(JSON.stringify(response)).not.toMatch(/foreign-secret|hidden-secret/);
+  }
+  const foreign: any = await sdk.trigger("mcp::prompts::get", { body: { name: "session_handoff", arguments: { session_id: "foreign0" } } });
+  expect(foreign.status_code).toBe(404);
+  const wildcard: any = await sdk.trigger("mcp::prompts::get", { body: { name: "session_handoff", arguments: { session_id: "foreign0", agentId: "*" } } });
+  expect(wildcard.status_code).toBe(200); expect(JSON.stringify(wildcard)).toContain("foreign-secret");
+  await lifecycle("archive", { kind: "observation", id: "A0o", sessionId: "A0" });
+  const recent = await sdk.trigger("mcp::resources::read", { body: { uri: "agentmemory://project/p/recent" } });
+  expect(JSON.stringify(recent)).not.toContain("own-visible");
+  const handoff = await sdk.trigger("mcp::prompts::get", { body: { name: "session_handoff", arguments: { session_id: "A0" } } });
+  expect(JSON.stringify(handoff)).not.toContain("own-visible");
+  await lifecycle("archive", { kind: "session", id: "A0" });
+  expect((await sdk.trigger("mcp::prompts::get", { body: { name: "session_handoff", arguments: { session_id: "A0" } } }) as any).status_code).toBe(404);
+ });
+
  it("invalid explicit file-history projects cannot widen the read scope", async () => {
   registerMcpEndpoints(sdk as never, kv as never);
   for (const project of ["", 42, { project: "p" }]) {

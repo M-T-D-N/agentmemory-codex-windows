@@ -275,3 +275,63 @@ describe("paginated and filtered list endpoints", () => {
     index.remove("obs_locate_1");
   });
 });
+
+
+describe('query endpoint regression contracts', () => {
+  it.each(['api::sessions', 'api::observations'])('reports cursor-derived offsets for %s through the final page', async (endpoint) => {
+    const rows = Object.fromEntries(Array.from({length:5}, (_,i) => ['s'+i, {id:'s'+i,project:'P',startedAt:'2026-01-0'+(i+1),status:'completed'}]));
+    const observations = Object.fromEntries(Array.from({length:5}, (_,i) => ['o'+i, {id:'o'+i,sessionId:'s0',type:'file_edit',title:'match',timestamp:'2026-01-01',facts:[],narrative:'ok',concepts:[],files:[],importance:5}]));
+    const {handlers} = setup({[KV.sessions]:rows, [KV.observations('s0')]:observations});
+    const q = {project:'P',sessionId:'s0',limit:'2',order:'asc'};
+    if (endpoint === 'api::sessions') delete (q as Partial<typeof q>).sessionId;
+    const first = await call(handlers, endpoint, q);
+    const second = await call(handlers, endpoint, {...q,cursor:first.body.nextCursor as string,offset:'0'});
+    expect(second.body.offset).toBe(2); expect(second.body.nextOffset).toBe(4);
+    const last = await call(handlers, endpoint, {...q,cursor:second.body.nextCursor as string});
+    expect(last.body.offset).toBe(4); expect(last.body.nextOffset).toBeNull(); expect(last.body.nextCursor).toBeNull();
+  });
+  it.each(['api::observations','api::observations-locate'])('fails closed for missing isolated owner in %s', async (endpoint) => {
+    vi.stubEnv('AGENTMEMORY_AGENT_SCOPE','isolated'); vi.stubEnv('AGENT_ID','');
+    try {
+      const {handlers} = setup({[KV.sessions]:{s:{id:'s',project:'P'}}});
+      await expect(call(handlers,endpoint,{project:'P',sessionId:'s',ids:'obs'})).rejects.toThrow('requires an agent id');
+      expect((await call(handlers,endpoint,{project:'P',sessionId:'s',ids:'obs',agentId:'*'})).status_code).toBe(200);
+    } finally { vi.unstubAllEnvs(); }
+  });
+});
+
+
+describe('observation owner filtering', () => {
+  it.each(['api::observations','api::observations-locate'])('honors explicit and environment owner in %s', async(endpoint)=>{
+    vi.stubEnv('AGENTMEMORY_AGENT_SCOPE','isolated'); vi.stubEnv('AGENT_ID','A');
+    const index=getSearchIndex();
+    const a={id:'own_a',sessionId:'sa',agentId:'A',timestamp:'2026-01-01',type:'file_edit',title:'A',facts:[],narrative:'A',concepts:[],files:[],importance:5};
+    const b={...a,id:'own_b',sessionId:'sb',agentId:'B',title:'B'};
+    index.add(a as never); index.add(b as never);
+    try {
+      const {handlers}=setup({[KV.sessions]:{sa:{id:'sa',project:'P',agentId:'A'},sb:{id:'sb',project:'P',agentId:'B'}},[KV.observations('sa')]:{own_a:a, mixed:{...b,id:'mixed',sessionId:'sa'}},[KV.observations('sb')]:{own_b:b}});
+      const env=await call(handlers,endpoint,{project:'P',sessionId:'sa',ids:'own_a,own_b'});
+      if(endpoint==='api::observations') expect((env.body.observations as Array<{id:string}>).map(o=>o.id)).toEqual(['own_a']);
+      else expect(env.body.sessions).toEqual({own_a:'sa'});
+      const explicit=await call(handlers,endpoint,{project:'P',sessionId:'sb',ids:'own_a,own_b',agentId:'B'});
+      if(endpoint==='api::observations') expect((explicit.body.observations as Array<{id:string}>).map(o=>o.id)).toEqual(['own_b']);
+      else expect(explicit.body.sessions).toEqual({own_b:'sb'});
+      const wildcard=await call(handlers,endpoint,{project:'P',sessionId:'sa',ids:'own_a,own_b',agentId:'*'});
+      if(endpoint==='api::observations') expect((wildcard.body.observations as Array<{id:string}>)).toHaveLength(2);
+      else expect(wildcard.body.sessions).toEqual({own_a:'sa',own_b:'sb'});
+    } finally {index.remove(a.id);index.remove(b.id);vi.unstubAllEnvs();}
+  });
+  it.each(['asc','desc'])('walks filtered observation timestamp ties in %s order with consistent cursor metadata',async(order)=>{
+    const obs=Object.fromEntries(['c','a','b','skip'].map(id=>[id,{id,sessionId:'s',timestamp:'2026-01-01',type:id==='skip'?'error':'file_edit',title:'match'}]));
+    const {handlers}=setup({[KV.sessions]:{s:{id:'s',project:'P'}},[KV.observations('s')]:obs});
+    const q={project:'P',sessionId:'s',order,type:'file_edit',q:'match',limit:'1'};
+    const ids:string[]=[]; let cursor:string|undefined;
+    for(let offset=0;offset<3;offset++){
+      const res=await call(handlers,'api::observations',{...q,...(cursor?{cursor}:{})});
+      ids.push((res.body.observations as Array<{id:string}>)[0].id);
+      expect(res.body.offset).toBe(offset); expect(res.body.nextOffset).toBe(offset===2?null:offset+1);
+      cursor=res.body.nextCursor as string|undefined;
+    }
+    expect(ids).toEqual(order==='asc'?['a','b','c']:['c','b','a']);
+  });
+});

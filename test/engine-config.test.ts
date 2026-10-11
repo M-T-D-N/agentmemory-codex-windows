@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   clearPersistedBuiltinConfig,
   persistedBuiltinConfigDirs,
@@ -242,6 +242,20 @@ describe("renderEngineConfig bind hosts", () => {
 });
 
 describe("clearPersistedBuiltinConfig", () => {
+  const fixtureRoots = new Set<string>();
+  const createFixtureRoot = (prefix: string) => {
+    const root = mkdtempSync(join(tmpdir(), prefix));
+    fixtureRoots.add(root);
+    return root;
+  };
+
+  afterEach(() => {
+    for (const root of fixtureRoots) {
+      rmSync(root, { recursive: true, force: true });
+      fixtureRoots.delete(root);
+    }
+  });
+
   const configPath = join("/srv", "state", "iii-config.runtime.yaml");
 
   it("covers the engine cwd, the config file directory and the legacy 0.19 location", () => {
@@ -284,8 +298,8 @@ describe("clearPersistedBuiltinConfig", () => {
   });
 
   it("removes persisted builtin entries from both locations and leaves everything else in place", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "agentmemory-engine-"));
-    const dataDir = mkdtempSync(join(tmpdir(), "agentmemory-data-"));
+    const cwd = createFixtureRoot("agentmemory-engine-");
+    const dataDir = createFixtureRoot("agentmemory-data-");
     const runtimeConfig = join(dataDir, "iii-config.runtime.yaml");
     const current = join(dataDir, "config");
     const legacy = join(cwd, "data", "configuration");
@@ -306,7 +320,7 @@ describe("clearPersistedBuiltinConfig", () => {
   });
 
   it("removes the entries the engine persisted under a custom configuration directory", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "agentmemory-engine-"));
+    const cwd = createFixtureRoot("agentmemory-engine-");
     const dir = join(cwd, "custom-cfg");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "iii-http.yaml"), "id: iii-http\nvalue:\n  port: 3111\n");
@@ -323,7 +337,7 @@ describe("clearPersistedBuiltinConfig", () => {
   });
 
   it("leaves files that are not engine entries alone, even under a seeded builtin name", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "agentmemory-engine-"));
+    const cwd = createFixtureRoot("agentmemory-engine-");
     const dir = join(cwd, "config");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "http.yaml"), "host: 0.0.0.0\nport: 8080\n");
@@ -338,7 +352,7 @@ describe("clearPersistedBuiltinConfig", () => {
   });
 
   it("is a no-op when the engine has never persisted anything", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "agentmemory-engine-"));
+    const cwd = createFixtureRoot("agentmemory-engine-");
 
     expect(
       clearPersistedBuiltinConfig(cwd, join(cwd, "iii-config.runtime.yaml")),
@@ -346,7 +360,7 @@ describe("clearPersistedBuiltinConfig", () => {
   });
 
   it("fails loudly when a persisted entry exists but cannot be removed", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "agentmemory-engine-"));
+    const cwd = createFixtureRoot("agentmemory-engine-");
     mkdirSync(join(cwd, "config", "http.yaml"), { recursive: true });
 
     expect(() =>

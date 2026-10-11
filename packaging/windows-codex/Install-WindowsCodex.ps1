@@ -12,7 +12,8 @@ param(
     [string]$UpstreamHome = '',
     [switch]$Execute,
     [switch]$Fresh,
-    [switch]$ActivatePrepared
+    [switch]$ActivatePrepared,
+    [string]$MaintenancePlanPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -999,4 +1000,14 @@ try {
     $summary.backup_compaction_error = $_.Exception.Message
 }
 $summary.release_backup_retention_review = Get-ReleaseBackupRetentionReview -InstallRoot $root -CurrentManifest $installed -PreviousManifest $previousReleaseManifest
+$maintenanceHelper = Join-Path $PSScriptRoot 'payload\scripts\Complete-ReleaseBackupReview.ps1'
+if (-not (Test-Path -LiteralPath $maintenanceHelper -PathType Leaf)) {
+    $maintenanceHelper = Join-Path $PSScriptRoot 'powershell\Complete-ReleaseBackupReview.ps1'
+}
+try {
+    . $maintenanceHelper
+    $summary.release_backup_closeout = Complete-ReleaseBackupReview -InstallRoot $root -Review $summary.release_backup_retention_review -DecisionPath $MaintenancePlanPath -Execute
+} catch {
+    $summary.release_backup_closeout = [ordered]@{ status = 'incomplete'; error = $_.Exception.Message; recycled = @() }
+}
 $summary | ConvertTo-Json -Depth 8

@@ -14,7 +14,7 @@ import {
   vectorIndexAddGuarded,
   vectorIndexRemove,
 } from "./search.js";
-import { memoryToObservation } from "../state/memory-utils.js";
+import { currentMemoryHeads, memoryToObservation } from "../state/memory-utils.js";
 import { readArchiveVisibility } from "./archive.js";
 
 function computeConfidence(
@@ -47,18 +47,14 @@ function computeConfidence(
 }
 
 export function registerRelationsFunction(sdk: IIIClient, kv: StateKV): void {
-  sdk.registerFunction("mem::relate", 
+  registerObservationWriter(sdk, "mem::relate",
     async (data: {
       sourceId: string;
       targetId: string;
       type: MemoryRelation["type"];
       confidence?: number;
     }) => {
-      const [firstId, secondId] = [data.sourceId, data.targetId].sort();
-      const lockKey =
-        firstId === secondId ? `mem:${firstId}` : `mem:${firstId}:${secondId}`;
-
-      return withKeyedLock(lockKey, async () => {
+      return withKeyedLock("mem:remember", async () => {
         const source = await kv.get<Memory>(KV.memories, data.sourceId);
         const target = await kv.get<Memory>(KV.memories, data.targetId);
         if (!source || !target) {
@@ -152,7 +148,7 @@ export function registerRelationsFunction(sdk: IIIClient, kv: StateKV): void {
         return { success: false, error: "memory not found", code: "not_found" };
       }
 
-      if (existing.isLatest === false) return { success: false, error: "memory is not the latest version; edit the latest version instead", code: "not_latest" };
+      if (!currentMemoryHeads(await kv.list<Memory>(KV.memories)).some(memory => memory.id === existing.id)) return { success: false, error: "memory is not the latest version; edit the latest version instead", code: "not_latest" };
       const newType = (data.newType ?? existing.type) as Memory["type"];
       if (data.newContent === existing.content && newType === existing.type && (!data.newTitle || data.newTitle === existing.title)) return { success: false, error: "nothing changed", code: "unchanged" };
       const now = new Date().toISOString();
@@ -170,15 +166,14 @@ export function registerRelationsFunction(sdk: IIIClient, kv: StateKV): void {
         isLatest: true,
       };
 
-      existing.isLatest = false;
-      await kv.set(KV.memories, existing.id, existing);
+      await kv.set(KV.memories, evolved.id, evolved);
+      await kv.set(KV.memories, existing.id, { ...existing, isLatest: false });
       await safeAudit(kv, "evolve", "mem::evolve", [existing.id], {
         operation: "evolve",
         action: "mark_non_latest",
         newId: evolved.id,
       });
 
-      await kv.set(KV.memories, evolved.id, evolved);
       getSearchIndex().remove(existing.id);
       vectorIndexRemove(existing.id);
       getSearchIndex().add(memoryToObservation(evolved));

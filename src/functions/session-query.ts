@@ -60,9 +60,10 @@ export function selectSessionPage(sessions: Session[], query: SessionQuery, arch
       return (query.order === "desc" ? -byTime : byTime) || a.id.localeCompare(b.id);
     });
   const page = filtered.slice(query.offset, query.offset + query.limit).map(session => {
-    if (!archived?.hasArchivedObservations(session.id)) return session;
-    const { summary: _summary, firstPrompt: _prompt, ...visible } = session;
-    return visible;
+    const { summary: _summary, ...visible } = session;
+    if (!archived?.hasArchivedObservations(session.id)) return visible;
+    const { firstPrompt: _prompt, ...withoutArchivedPrompt } = visible;
+    return withoutArchivedPrompt;
   });
   return { sessions: page, total: filtered.length, limit: query.limit, offset: query.offset,
     nextOffset: query.offset + page.length < filtered.length ? query.offset + page.length : null };

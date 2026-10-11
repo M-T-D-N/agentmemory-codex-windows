@@ -155,7 +155,11 @@ export async function changeArchiveState(kv: StateKV, request: ArchiveRequest) {
       state: previous?.state ?? "active", action: request.action, expectedRevision: revision, expectedDigest: digest, changed: same ? 0 : 1 };
     const retry = same && request.expectedRevision === revision - 1 && previous?.targetDigest === request.expectedDigest;
     if (request.expectedDigest !== digest || (request.expectedRevision !== revision && !retry)) throw Error("Archive preview is stale; inspect the current target again");
-    if (same) return { success: true, dryRun: false, changed: 0, archive: previous! };
+    if (kv.requiresWriteRecovery?.()) throw Error("Archive write outcome is uncertain; verify canonical state and restart the worker before retrying");
+    if (same) {
+      await kv.flush?.();
+      return { success: true, dryRun: false, changed: 0, archive: previous! };
+    }
     const audit = await recordAudit(kv, request.action === "archive" ? "archive" : "archive_restore", "mem::archive", [address.target.id], {
       project: request.project, target: address.target, phase: "intent", previousRevision: revision, targetDigest: digest, reason: request.reason!.trim(),
     });

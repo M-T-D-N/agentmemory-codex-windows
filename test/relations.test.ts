@@ -129,6 +129,16 @@ describe("Relations Functions", () => {
   });
 
   describe("mem::evolve", () => {
+    it("preserves the original head when the successor write fails", async () => {
+      const original = makeMemory({ id: "mem_old" });
+      await kv.set("mem:memories", original.id, original);
+      const set = kv.set;
+      kv.set = async (scope, id, value) => { if (scope === "mem:memories" && id !== original.id) throw Error("successor failed"); return set(scope, id, value); };
+      await expect(sdk.trigger("mem::evolve", {memoryId: original.id, newContent: "New content"})).rejects.toThrow("successor failed");
+      expect(await kv.get("mem:memories", original.id)).toEqual(original);
+      expect(original.isLatest).toBe(true);
+    });
+
     it("marks old memory as not latest and creates new version", async () => {
       const original = makeMemory({ id: "mem_old", version: 1 });
       await kv.set("mem:memories", "mem_old", original);

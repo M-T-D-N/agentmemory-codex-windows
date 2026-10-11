@@ -123,17 +123,22 @@ export async function captureExportData(
       }
 
       const profiles: ProjectProfile[] = [];
-      const uniqueProjects = [...new Set(paginatedSessions.map((s) => s.project))];
-      const profileResults = await Promise.all(
-        uniqueProjects.map((project) =>
-          kv.get<ProjectProfile>(KV.profiles, project),
-        ),
-      );
-      for (const profile of profileResults) {
-        if (profile) profiles.push(profile);
+      const uniqueProjects = new Set(paginatedSessions.map(session => session.project));
+      if (uniqueProjects.size && kv.usesManagedState) {
+        let offset = 0;
+        for (;;) {
+          const page = await kv.listPage<ProjectProfile>(KV.profiles, offset);
+          const selected = page.entries.map(entry => entry.value).filter(row => uniqueProjects.has(row.project));
+          if (selected.length) onCollection?.(selected, "profiles");
+          profiles.push(...selected);
+          if (page.next_offset === null) break;
+          offset = page.next_offset;
+        }
+        if (!profiles.length) onCollection?.(profiles, "profiles");
+      } else {
+        if (uniqueProjects.size) profiles.push(...(await kv.list<ProjectProfile>(KV.profiles)).filter(row => uniqueProjects.has(row.project)));
+        onCollection?.(profiles, "profiles");
       }
-
-      onCollection?.(profiles, "profiles");
 
       const graphSnapshot = await kv.get<{ resetAt?: string }>(KV.graphSnapshot, "current");
       const resetAt = graphSnapshot?.resetAt;
@@ -237,6 +242,7 @@ export async function captureExportData(
         summaries: summaries.length,
       });
 
+      validateImportRows(exportData);
       assertCodexExclusionContent(exportData, codexCaptureExclusions);
       const archiveStates = await collectArchiveExport(kv, exportData);
       onCollection?.(archiveStates, "archiveStates");
@@ -246,6 +252,206 @@ export async function captureExportData(
       }
       return exportData;
   });
+}
+
+function validateImportRows(data: ExportData): void {
+  const record = (value: unknown, label: string): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw Error(`Invalid imported ${label} row`);
+    return value as Record<string, unknown>;
+  };
+  const identity = (value: unknown, label: string): string => {
+    if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.length > 512 || /[\0]/.test(value)) throw Error(`Invalid imported ${label} identity`);
+    return value;
+  };
+  const searchIds = new Set<string>();
+  const collections = ["sessions", "memories", "summaries", "profiles", "graphNodes", "graphEdges", "semanticMemories", "proceduralMemories", "actions", "actionEdges", "routines", "signals", "checkpoints", "sentinels", "sketches", "crystals", "facets", "lessons", "insights", "accessLogs"] as const;
+  const rows = (name: string, values: unknown, key: string) => {
+    if (!Array.isArray(values) || values.length > 500_000) throw Error(`Invalid imported ${name} collection`);
+    const ids = new Set<string>();
+    for (const value of values) {
+      const row = record(value, name), id = identity(row[key], name);
+      const address = name === "profiles" ? profileCacheKey(id, typeof row.agentId === "string" ? row.agentId : undefined) : id;
+      if (ids.has(address)) throw Error(`Duplicate imported ${name} identity`);
+      ids.add(address);
+      if (name === "observations" || name === "memories") {
+        if (searchIds.has(id)) throw Error("Imported search ID collision between canonical addresses");
+        searchIds.add(id);
+      }
+      for (const field of ["project", "agentId", "sessionId", "parentId", "sourceNodeId", "targetNodeId"]) {
+        if (row[field] !== undefined) identity(row[field], `${name}.${field}`);
+      }
+      if (row.project === "*" || row.agentId === "*") throw Error("Imported owners cannot use wildcard identities");
+      for (const field of ["sessionIds", "sourceSessionIds", "sourceObservationIds", "supersedes", "concepts", "files", "facts", "keyDecisions", "filesModified"]) {
+        if (row[field] !== undefined && (!Array.isArray(row[field]) || !(row[field] as unknown[]).every(item => typeof item === "string"))) throw Error(`Invalid imported ${name}.${field}`);
+      }
+      for (const field of ["title", "content", "narrative", "name", "type", "cwd"]) {
+        if (row[field] !== undefined && typeof row[field] !== "string") throw Error(`Invalid imported ${name}.${field}`);
+      }
+      for (const field of ["isLatest", "stale"]) {
+        if (row[field] !== undefined && typeof row[field] !== "boolean") throw Error(`Invalid imported ${name}.${field}`);
+      }
+      for (const field of ["observationCount", "version", "importance", "strength", "weight"]) {
+        if (row[field] !== undefined && (typeof row[field] !== "number" || !Number.isFinite(row[field] as number))) throw Error(`Invalid imported ${name}.${field}`);
+      }
+      for (const field of ["sessionIds", "sourceSessionIds", "sourceObservationIds", "supersedes"]) {
+        for (const id of (row[field] ?? []) as unknown[]) identity(id, `${name}.${field}`);
+      }
+      if (name === "sessions" || name === "summaries") identity(row.project, `${name}.project`);
+      if (name === "sessions" && row.lastActivityAt !== undefined && (typeof row.lastActivityAt !== "string" || !Number.isFinite(Date.parse(row.lastActivityAt)))) throw Error("Invalid imported sessions.lastActivityAt");
+      if (name === "memories" && (typeof row.content !== "string" || typeof row.title !== "string")) throw Error("Invalid imported memory content");
+      if (name === "memories" && (!Array.isArray(row.concepts) || !Array.isArray(row.files))) throw Error("Imported memories require concepts and files arrays");
+      if (name === "observations") {
+        const compressedFields = ["type", "title", "narrative", "facts", "concepts", "files", "importance"];
+        const raw = Object.hasOwn(row, "raw") && typeof row.hookType === "string" && row.hookType.trim() &&
+          !compressedFields.some(field => Object.hasOwn(row, field));
+        if (typeof row.timestamp !== "string") throw Error("Invalid imported observations.timestamp");
+        if (!raw) {
+          if (!["facts", "concepts", "files"].every(field => Array.isArray(row[field]))) {
+            throw Error("Imported observations require facts, concepts and files arrays");
+          }
+          if (!["type", "title", "narrative"].every(field => typeof row[field] === "string") ||
+              typeof row.importance !== "number" || !Number.isFinite(row.importance)) {
+            throw Error("Invalid imported compressed observation fields");
+          }
+        }
+      }
+    }
+  };
+  for (const name of collections) {
+    if (data[name] !== undefined) rows(name, data[name], name === "summaries" ? "sessionId" : name === "profiles" ? "project" : name === "accessLogs" ? "memoryId" : "id");
+  }
+  for (const [sessionId, observations] of Object.entries(data.observations)) {
+    identity(sessionId, "observation bucket"); rows("observations", observations, "id");
+    for (const observation of observations) {
+      if (observation.sessionId !== sessionId) throw Error("Imported observation does not match its session bucket");
+    }
+  }
+}
+
+async function validateImportOwners(kv: StateKV, data: ExportData, existing: Session[], strategy: string) {
+  const existingObservations = new Map<string, CompressedObservation[]>();
+  const replacementObservations: Array<{ sessionId: string; obsId: string; captureKey?: string }> = [];
+  const incomingObservations = new Map(Object.entries(data.observations).flatMap(([sessionId, rows]) => rows.map(row => [row.id, sessionId] as const)));
+  const incomingMemories = new Set(data.memories.map(row => row.id));
+  const previous = new Map(existing.map(row => [row.id, row]));
+  const sessions = new Map((strategy === "replace" ? [] : existing).map(row => [row.id, row]));
+  for (const incoming of data.sessions) {
+    const prior = previous.get(incoming.id);
+    if (prior && (prior.project !== incoming.project || prior.agentId !== incoming.agentId)) throw Error("Import cannot reassign existing session ownership");
+    sessions.set(incoming.id, strategy === "skip" && prior ? prior : incoming);
+  }
+  for (const [sessionId, observations] of Object.entries(data.observations)) {
+    const session = sessions.get(sessionId);
+    if (!session) throw Error("Imported observation bucket requires its session");
+    for (const row of observations) {
+      if (row.project !== undefined && row.project !== session.project || row.agentId !== undefined && session.agentId !== undefined && row.agentId !== session.agentId) throw Error("Imported observation owner does not match its session");
+    }
+  }
+  for (const summary of data.summaries) {
+    const session = sessions.get(summary.sessionId);
+    if (session && summary.project !== session.project) throw Error("Imported summary owner does not match its session");
+  }
+  const observationOwners = new Map<string, Set<string>>();
+  for (const [sessionId, observations] of Object.entries(data.observations)) {
+    for (const observation of observations) {
+      const owners = observationOwners.get(observation.id) ?? new Set<string>();
+      owners.add(sessionId); observationOwners.set(observation.id, owners);
+    }
+  }
+  const ownedCollections = [["memories", KV.memories], ["graphNodes", KV.graphNodes], ["graphEdges", KV.graphEdges], ["semanticMemories", KV.semantic], ["proceduralMemories", KV.procedural], ["lessons", KV.lessons], ["actions", KV.actions], ["routines", KV.routines], ["signals", KV.signals], ["checkpoints", KV.checkpoints], ["sentinels", KV.sentinels], ["sketches", KV.sketches], ["crystals", KV.crystals], ["facets", KV.facets], ["insights", KV.insights]] as const;
+  const referencedObservations = new Set<string>();
+  for (const [name] of ownedCollections) {
+    for (const row of data[name] ?? []) {
+      for (const id of (row as unknown as { sourceObservationIds?: string[] }).sourceObservationIds ?? []) referencedObservations.add(id);
+    }
+  }
+  const removedSources = new Set<string>();
+  const inspectRetained = (sessionId: string, rows: CompressedObservation[]) => {
+    const session = previous.get(sessionId);
+    const deletedByReplace = strategy === "replace" && session !== undefined;
+    if (deletedByReplace) replacementObservations.push(...rows.map(row => ({ sessionId, obsId: row.id, captureKey: row.captureKey })));
+    if (strategy !== "replace" && Object.hasOwn(data.observations, sessionId)) {
+      const retained = existingObservations.get(sessionId) ?? [];
+      retained.push(...rows.filter(row => row.emptyDeletion?.state !== "deleted"));
+      existingObservations.set(sessionId, retained);
+    }
+    for (const row of rows) {
+      const incomingSessionId = incomingObservations.get(row.id);
+      if (!deletedByReplace && (incomingMemories.has(row.id) ||
+          incomingSessionId !== undefined && (incomingSessionId !== sessionId || !session))) {
+        throw Error("Imported search ID collision with a retained canonical observation");
+      }
+      if (!referencedObservations.has(row.id) && incomingSessionId !== sessionId) continue;
+      if (!session || row.sessionId !== session.id || row.project !== undefined && row.project !== session.project ||
+          row.agentId !== undefined && session.agentId !== undefined && row.agentId !== session.agentId) throw Error("Canonical source observation owner mismatch");
+      if (deletedByReplace) {
+        if (!observationOwners.has(row.id)) removedSources.add(row.id);
+        continue;
+      }
+      if (!referencedObservations.has(row.id)) continue;
+      const owners = observationOwners.get(row.id) ?? new Set<string>();
+      owners.add(session.id); observationOwners.set(row.id, owners);
+    }
+  };
+  if (referencedObservations.size || incomingObservations.size || incomingMemories.size || strategy === "replace") {
+    const sessionIds = new Set([...previous.keys(), ...Object.keys(data.observations)]);
+    if (kv.usesManagedState) {
+      const prefix = KV.observations("");
+      for (const scope of await kv.listGroups()) if (scope.startsWith(prefix)) sessionIds.add(scope.slice(prefix.length));
+    }
+    for (const sessionId of sessionIds) {
+      const scope = KV.observations(sessionId);
+      if (kv.usesManagedState) {
+        let offset = 0;
+        for (;;) {
+          const page = await kv.listPage<CompressedObservation>(scope, offset, { includeDeleted: true });
+          inspectRetained(sessionId, page.entries.map(entry => entry.value));
+          if (page.next_offset === null) break;
+          offset = page.next_offset;
+        }
+      } else inspectRetained(sessionId, await kv.list<CompressedObservation>(scope, { includeDeleted: true }));
+    }
+    if (strategy !== "replace" && incomingObservations.size) {
+      if (kv.usesManagedState) {
+        let offset = 0;
+        for (;;) {
+          const page = await kv.listPage<Memory>(KV.memories, offset);
+          if (page.entries.some(entry => incomingObservations.has(entry.key))) throw Error("Imported search ID collision with a retained canonical memory");
+          if (page.next_offset === null) break;
+          offset = page.next_offset;
+        }
+      } else {
+        await runChunked([...incomingObservations.keys()], async id => {
+          if (await kv.get(KV.memories, id)) throw Error("Imported search ID collision with a retained canonical memory");
+        });
+      }
+    }
+  }
+  for (const [name, scope] of ownedCollections) {
+    await runChunked<{ id: string }>(data[name] ?? [], async row => {
+      const incoming = row as unknown as Record<string, unknown>;
+      const prior = await kv.get<Record<string, unknown>>(scope, row.id);
+      if (prior && (prior.project !== incoming.project || prior.agentId !== incoming.agentId)) throw Error(`Import cannot reassign existing ${name} ownership`);
+      const sourceSessions = [...(Array.isArray(incoming.sessionIds) ? incoming.sessionIds : []), ...(Array.isArray(incoming.sourceSessionIds) ? incoming.sourceSessionIds : [])];
+      for (const id of Array.isArray(incoming.sourceObservationIds) ? incoming.sourceObservationIds : []) {
+        if (removedSources.has(id)) throw Error(`Imported ${name} source observation is removed by replace`);
+        const owners = observationOwners.get(id);
+        if (!owners) continue;
+        const selected = [...owners].filter(sessionId => !sourceSessions.length || sourceSessions.includes(sessionId));
+        if (!selected.length) throw Error(`Imported ${name} source observation/session mismatch`);
+        if (typeof incoming.project === "string" && selected.some(sessionId => sessions.get(sessionId)?.project !== incoming.project)) throw Error(`Imported ${name} source observation owner mismatch`);
+        if (typeof incoming.agentId === "string" && selected.some(sessionId => sessions.get(sessionId)?.agentId !== undefined && sessions.get(sessionId)?.agentId !== incoming.agentId)) throw Error(`Imported ${name} source observation agent mismatch`);
+      }
+      if (typeof incoming.project === "string") {
+        for (const sessionId of [...(Array.isArray(incoming.sessionIds) ? incoming.sessionIds : []), ...(Array.isArray(incoming.sourceSessionIds) ? incoming.sourceSessionIds : [])]) {
+          const source = sessions.get(sessionId);
+          if (source && source.project !== incoming.project) throw Error(`Imported ${name} source owner mismatch`);
+          if (source && incoming.agentId !== undefined && source.agentId !== undefined && source.agentId !== incoming.agentId) throw Error(`Imported ${name} source agent mismatch`);
+        }
+      }
+    });
+  }
+  return { existingObservations, replacementObservations };
 }
 
 export async function importExportData(
@@ -350,6 +556,8 @@ export async function importExportData(
         };
       }
 
+      validateImportRows(importData);
+
       if (importData.version === ARCHIVE_LIFECYCLE_EXPORT_VERSION ? !Array.isArray(importData.archiveStates) : importData.archiveStates !== undefined) {
         return { success: false, error: "Archive state requires the archive lifecycle export format" };
       }
@@ -402,6 +610,7 @@ export async function importExportData(
         }
         if (incoming && existing.codexNativeCapture && !incoming.codexNativeCapture) throw Error("Import cannot remove native capture identity");
       }
+      const inventory = await validateImportOwners(kv, importData, existingSessions, strategy);
       const graphChanged = strategy === "replace" || Boolean(importData.graphNodes?.length || importData.graphEdges?.length);
       const graphBefore = graphChanged ? {
         nodes: await kv.list<GraphNode>(KV.graphNodes), edges: await kv.list<GraphEdge>(KV.graphEdges),
@@ -416,13 +625,40 @@ export async function importExportData(
       const archivePlan = await prepareArchiveImport(kv, importData, strategy);
       let sourceTruncated = 0, sourceOmitted = 0;
       for (const [sessionId, incoming] of Object.entries(importData.observations)) {
-        const existing = strategy === "replace" ? [] : await kv.list<CompressedObservation>(KV.observations(sessionId));
+        const existing = strategy === "replace" ? [] : inventory.existingObservations.get(sessionId) ?? await kv.list<CompressedObservation>(KV.observations(sessionId));
         const planned = budgetImportedObservationSources(incoming, existing, strategy);
         if (!planned.success) return planned;
         importData.observations[sessionId] = planned.observations;
         sourceTruncated += planned.sourceTruncated;
         sourceOmitted += planned.sourceOmitted;
       }
+
+      archivePlan.validateOriginals();
+
+      const replacement = strategy === "replace" ? {
+        observations: inventory.replacementObservations,
+        collections: [] as Array<{ scope: string; keys: string[] }>,
+      } : undefined;
+      if (replacement) {
+        const scopes = [
+          [KV.memories, "id"], [KV.summaries, "sessionId"], [KV.actions, "id"], [KV.actionEdges, "id"],
+          [KV.routines, "id"], [KV.signals, "id"], [KV.checkpoints, "id"], [KV.sentinels, "id"],
+          [KV.sketches, "id"], [KV.crystals, "id"], [KV.facets, "id"], [KV.lessons, "id"],
+          [KV.insights, "id"], [KV.graphNodes, "id"], [KV.graphEdges, "id"],
+          [KV.semantic, "id"], [KV.procedural, "id"], [KV.profiles, "project"], [KV.accessLog, "memoryId"],
+        ] as const;
+        for (const [scope, key] of scopes) {
+          if (scope === KV.profiles) {
+            const profiles = await kv.list<ProjectProfile>(scope);
+            replacement.collections.push({ scope, keys: profiles.map(row => profileCacheKey(row.project, row.agentId)) });
+            continue;
+          }
+          const rows = scope === KV.graphNodes ? graphBefore!.nodes : scope === KV.graphEdges ? graphBefore!.edges :
+            await kv.list<Record<string, string>>(scope);
+          replacement.collections.push({ scope, keys: rows.map(row => row[key as keyof typeof row] as string) });
+        }
+      }
+
 
       if (archivePlan.pending.length) await recordAudit(kv, "import", "mem::import", archivePlan.pending.map(row => row.id), {
         phase: "retain-archive-state", count: archivePlan.pending.length,
@@ -457,105 +693,22 @@ export async function importExportData(
         sourceOmitted,
       };
 
-      if (strategy === "replace") {
-        const existing = existingSessions;
+      if (replacement) {
         await runChunked(existingResults, row => kv.delete(KV.graphObservationResults(row.sessionId), row.id));
-        // Collect observation deletes across all sessions, then run them in
-        // one bounded pass: a runChunked nested inside a runChunked callback
-        // multiplies in-flight deletes to chunk-size squared.
-        const obsDeletes: Array<{ sessionId: string; obsId: string; captureKey?: string }> = [];
-        await runChunked(existing, async (session) => {
+        await runChunked(existingSessions, async session => {
           await kv.delete(KV.sessions, session.id);
           await removeSessionFromProjectIndex(kv, session.project, session.id);
-          const obs = await kv
-            .list<CompressedObservation>(KV.observations(session.id))
-            .catch(() => []);
-          for (const o of obs) {
-            obsDeletes.push({ sessionId: session.id, obsId: o.id, captureKey: o.captureKey });
-          }
         });
-        await runChunked(obsDeletes, async d => {
-          await markCaptureEventDeleted(kv, { id: d.obsId, sessionId: d.sessionId, captureKey: d.captureKey });
-          await kv.delete(KV.observations(d.sessionId), d.obsId);
-          await unindexObservationSession(kv, d.obsId);
+        await runChunked(replacement.observations, async row => {
+          await markCaptureEventDeleted(kv, { id: row.obsId, sessionId: row.sessionId, captureKey: row.captureKey });
+          await kv.delete(KV.observations(row.sessionId), row.obsId);
+          await unindexObservationSession(kv, row.obsId);
         });
-        await runChunked(await kv.list<Memory>(KV.memories), (m) =>
-          kv.delete(KV.memories, m.id),
-        );
-        await runChunked(
-          await kv.list<SessionSummary>(KV.summaries),
-          (s) => kv.delete(KV.summaries, s.sessionId),
-        );
-        await runChunked(await kv.list<Action>(KV.actions).catch(() => []), (a) =>
-          kv.delete(KV.actions, a.id),
-        );
-        await runChunked(
-          await kv.list<ActionEdge>(KV.actionEdges).catch(() => []),
-          (e) => kv.delete(KV.actionEdges, e.id),
-        );
-        await runChunked(
-          await kv.list<Routine>(KV.routines).catch(() => []),
-          (r) => kv.delete(KV.routines, r.id),
-        );
-        await runChunked(
-          await kv.list<Signal>(KV.signals).catch(() => []),
-          (s) => kv.delete(KV.signals, s.id),
-        );
-        await runChunked(
-          await kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
-          (c) => kv.delete(KV.checkpoints, c.id),
-        );
-        await runChunked(
-          await kv.list<Sentinel>(KV.sentinels).catch(() => []),
-          (s) => kv.delete(KV.sentinels, s.id),
-        );
-        await runChunked(
-          await kv.list<Sketch>(KV.sketches).catch(() => []),
-          (s) => kv.delete(KV.sketches, s.id),
-        );
-        await runChunked(
-          await kv.list<Crystal>(KV.crystals).catch(() => []),
-          (c) => kv.delete(KV.crystals, c.id),
-        );
-        await runChunked(
-          await kv.list<Facet>(KV.facets).catch(() => []),
-          (f) => kv.delete(KV.facets, f.id),
-        );
-        await runChunked(
-          await kv.list<Lesson>(KV.lessons).catch(() => []),
-          (l) => kv.delete(KV.lessons, l.id),
-        );
+        for (const { scope, keys } of replacement.collections) {
+          await runChunked(keys, key => kv.delete(scope, key));
+        }
         resetLessonIndex();
-        await runChunked(
-          await kv.list<Insight>(KV.insights).catch(() => []),
-          (i) => kv.delete(KV.insights, i.id),
-        );
-        await runChunked(
-          await kv.list<{ id: string }>(KV.graphNodes).catch(() => []),
-          (n) => kv.delete(KV.graphNodes, n.id),
-        );
-        await runChunked(
-          await kv.list<{ id: string }>(KV.graphEdges).catch(() => []),
-          (e) => kv.delete(KV.graphEdges, e.id),
-        );
-        await runChunked(
-          await kv.list<{ id: string }>(KV.semantic).catch(() => []),
-          (s) => kv.delete(KV.semantic, s.id),
-        );
-        await runChunked(
-          await kv.list<{ id: string }>(KV.procedural).catch(() => []),
-          (p) => kv.delete(KV.procedural, p.id),
-        );
-        await runChunked(
-          await kv.list<ProjectProfile>(KV.profiles).catch(() => []),
-          (profile) => kv.delete(KV.profiles, profileCacheKey(profile.project, profile.agentId)),
-        );
-        await runChunked(
-          await kv.list<AccessLogExport>(KV.accessLog).catch(() => []),
-          (a) => kv.delete(KV.accessLog, a.memoryId),
-        );
       }
-
       // Records actually written this run, accumulated for search
       // indexing after the KV writes settle. Skipped (already-present)
       // and merge-overwritten rows are already in the index or will be
@@ -628,8 +781,7 @@ export async function importExportData(
         if (archivePlan.protects(KV.memories, memory.id)) { stats.skipped++; return; }
         if (strategy === "skip") {
           const existing = await kv
-            .get<Memory>(KV.memories, memory.id)
-            .catch(() => null);
+            .get<Memory>(KV.memories, memory.id);
           if (existing) {
             stats.skipped++;
             return;
@@ -645,8 +797,7 @@ export async function importExportData(
       await runChunked(importData.summaries, async (summary) => {
         if (strategy === "skip") {
           const existing = await kv
-            .get<SessionSummary>(KV.summaries, summary.sessionId)
-            .catch(() => null);
+            .get<SessionSummary>(KV.summaries, summary.sessionId);
           if (existing) {
             stats.skipped++;
             return;
@@ -660,7 +811,7 @@ export async function importExportData(
         await runChunked(importData.graphNodes, async (node) => {
           if (archivePlan.protects(KV.graphNodes, node.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
-            const existing = await kv.get(KV.graphNodes, node.id).catch(() => null);
+            const existing = await kv.get(KV.graphNodes, node.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.graphNodes, node.id, node);
@@ -670,7 +821,7 @@ export async function importExportData(
         await runChunked(importData.graphEdges, async (edge) => {
           if (archivePlan.protects(KV.graphEdges, edge.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
-            const existing = await kv.get(KV.graphEdges, edge.id).catch(() => null);
+            const existing = await kv.get(KV.graphEdges, edge.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.graphEdges, edge.id, edge);
@@ -680,7 +831,7 @@ export async function importExportData(
         await runChunked(importData.semanticMemories, async (sem) => {
           if (archivePlan.protects(KV.semantic, sem.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
-            const existing = await kv.get(KV.semantic, sem.id).catch(() => null);
+            const existing = await kv.get(KV.semantic, sem.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.semantic, sem.id, sem);
@@ -690,7 +841,7 @@ export async function importExportData(
         await runChunked(importData.proceduralMemories, async (proc) => {
           if (archivePlan.protects(KV.procedural, proc.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
-            const existing = await kv.get(KV.procedural, proc.id).catch(() => null);
+            const existing = await kv.get(KV.procedural, proc.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.procedural, proc.id, proc);
@@ -700,8 +851,7 @@ export async function importExportData(
         await runChunked(importData.profiles, async (profile) => {
           if (strategy === "skip") {
             const existing = await kv
-              .get<ProjectProfile>(KV.profiles, profileCacheKey(profile.project, profile.agentId))
-              .catch(() => null);
+              .get<ProjectProfile>(KV.profiles, profileCacheKey(profile.project, profile.agentId));
             if (existing) {
               stats.skipped++;
               return;
@@ -714,7 +864,7 @@ export async function importExportData(
       if (importData.actions) {
         await runChunked(importData.actions, async (action) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.actions, action.id).catch(() => null);
+            const existing = await kv.get(KV.actions, action.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.actions, action.id, action);
@@ -723,7 +873,7 @@ export async function importExportData(
       if (importData.actionEdges) {
         await runChunked(importData.actionEdges, async (edge) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.actionEdges, edge.id).catch(() => null);
+            const existing = await kv.get(KV.actionEdges, edge.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.actionEdges, edge.id, edge);
@@ -732,7 +882,7 @@ export async function importExportData(
       if (importData.routines) {
         await runChunked(importData.routines, async (routine) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.routines, routine.id).catch(() => null);
+            const existing = await kv.get(KV.routines, routine.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.routines, routine.id, routine);
@@ -741,7 +891,7 @@ export async function importExportData(
       if (importData.signals) {
         await runChunked(importData.signals, async (signal) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.signals, signal.id).catch(() => null);
+            const existing = await kv.get(KV.signals, signal.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.signals, signal.id, signal);
@@ -750,7 +900,7 @@ export async function importExportData(
       if (importData.checkpoints) {
         await runChunked(importData.checkpoints, async (checkpoint) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.checkpoints, checkpoint.id).catch(() => null);
+            const existing = await kv.get(KV.checkpoints, checkpoint.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.checkpoints, checkpoint.id, checkpoint);
@@ -759,7 +909,7 @@ export async function importExportData(
       if (importData.sentinels) {
         await runChunked(importData.sentinels, async (sentinel) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.sentinels, sentinel.id).catch(() => null);
+            const existing = await kv.get(KV.sentinels, sentinel.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.sentinels, sentinel.id, sentinel);
@@ -768,7 +918,7 @@ export async function importExportData(
       if (importData.sketches) {
         await runChunked(importData.sketches, async (sketch) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.sketches, sketch.id).catch(() => null);
+            const existing = await kv.get(KV.sketches, sketch.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.sketches, sketch.id, sketch);
@@ -777,7 +927,7 @@ export async function importExportData(
       if (importData.crystals) {
         await runChunked(importData.crystals, async (crystal) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.crystals, crystal.id).catch(() => null);
+            const existing = await kv.get(KV.crystals, crystal.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.crystals, crystal.id, crystal);
@@ -786,7 +936,7 @@ export async function importExportData(
       if (importData.facets) {
         await runChunked(importData.facets, async (facet) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.facets, facet.id).catch(() => null);
+            const existing = await kv.get(KV.facets, facet.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.facets, facet.id, facet);
@@ -796,7 +946,7 @@ export async function importExportData(
         await runChunked(importData.lessons, async (lesson) => {
           if (archivePlan.protects(KV.lessons, lesson.id)) { stats.skipped++; return; }
           if (strategy === "skip") {
-            const existing = await kv.get(KV.lessons, lesson.id).catch(() => null);
+            const existing = await kv.get(KV.lessons, lesson.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.lessons, lesson.id, lesson);
@@ -806,7 +956,7 @@ export async function importExportData(
       if (importData.insights) {
         await runChunked(importData.insights, async (insight) => {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.insights, insight.id).catch(() => null);
+            const existing = await kv.get(KV.insights, insight.id);
             if (existing) { stats.skipped++; return; }
           }
           await kv.set(KV.insights, insight.id, insight);
@@ -830,8 +980,7 @@ export async function importExportData(
           if (!log.memoryId || !memoryIds.has(log.memoryId)) return;
           if (strategy === "skip") {
             const existing = await kv
-              .get(KV.accessLog, log.memoryId)
-              .catch(() => null);
+              .get(KV.accessLog, log.memoryId);
             if (existing) {
               stats.skipped++;
               return;

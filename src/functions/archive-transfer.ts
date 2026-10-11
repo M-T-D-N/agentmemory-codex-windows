@@ -83,7 +83,7 @@ export async function prepareArchiveImport(kv: StateKV, data: ExportData, strate
   const pending: ArchiveState[] = [];
   const completed: ArchiveState[] = [];
   const protects = (scope: string, id: string) => protectedKeys.has(addressKey(scope, id));
-  if (!incoming.length && !existing.length) return { pending, completed, protects };
+  if (!incoming.length && !existing.length) return { pending, completed, protects, validateOriginals() {} };
   if (strategy === "replace" && existing.length) throw Error("Replace import would erase lifecycle originals; use merge or an empty destination");
   const { rows, duplicates } = archiveRows(data);
   const current = new Map(existing.map(state => [state.id, state]));
@@ -126,7 +126,19 @@ export async function prepareArchiveImport(kv: StateKV, data: ExportData, strate
     }
     protectedKeys.add(key);
   }
-  return { pending, completed, protects };
+  const originals = new Map<string, string>();
+  for (const state of [...incoming, ...existing]) {
+    const address = archiveTargetAddress(state.target), key = addressKey(address.scope, state.target.id);
+    const row = rows.get(key);
+    if (row) originals.set(key, archiveTargetDigest(row));
+  }
+  const validateOriginals = () => {
+    const planned = archiveRows(data).rows;
+    for (const [key, digest] of originals) {
+      if (!planned.has(key) || archiveTargetDigest(planned.get(key)) !== digest) throw Error("Import budgeting would change an archive original; split the import or preserve the exact original");
+    }
+  };
+  return { pending, completed, protects, validateOriginals };
 }
 
 export async function finishArchiveImport(kv: StateKV, data: ExportData, states: ArchiveState[]) {

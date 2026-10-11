@@ -272,6 +272,66 @@ describe("native source capture checkpoints", () => {
     await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: true, retainUnmatched: true }, managed())).rejects.toThrow("correspondence");
     await expectUninitialized();
   });
+  it('activity regression: initialization and old index rebuild preserve original activity',async()=>{
+    await initialize(); await capture(async()=>{});
+    const before=(await kv.get<Session>(KV.sessions,'s'))!;
+    expect(before.lastActivityAt).toBe(message('m2',21).timestamp);
+    expect(await captureCodexSourceWindow(kv as never,scope,managed(),{rebuildIndex:true,publish:async()=>{}})).toMatchObject({inserted:0});
+    expect((await kv.get<Session>(KV.sessions,'s'))!.lastActivityAt).toBe(before.lastActivityAt);
+  });
+  it('activity boundary: initialized recent user reopens abandoned session on first capture',async()=>{
+    await kv.set(KV.sessions,'s',{...session,status:'abandoned',endedAt:new Date().toISOString()});
+    const timestamp=new Date(Date.now()-1000).toISOString();
+    await appendFile(join(root,sourcePath),JSON.stringify({...message('initial-live',3,'recent request before initialization'),timestamp})+'\n');
+    await initialize();
+    expect(await kv.get(KV.sessions,'s')).toMatchObject({status:'abandoned',lastActivityAt:timestamp});
+    expect(await capture()).toMatchObject({inserted:3});
+    expect(await kv.get(KV.sessions,'s')).toMatchObject({status:'active',lastActivityAt:timestamp});
+    expect(await kv.get(KV.sessions,'s')).not.toHaveProperty('endedAt');
+  });
+  it.each([undefined,'invalid-end'])('activity boundary: completed with unknown end %s preserves lifecycle on recent replay',async(endedAt)=>{
+    await initialize();await capture(async()=>{});
+    const before=(await kv.get<Session>(KV.sessions,'s'))!;
+    await kv.set(KV.sessions,'s',{...before,status:'completed',endedAt});
+    const timestamp=new Date(Date.now()-1000).toISOString();
+    await appendFile(join(root,sourcePath),JSON.stringify({...message('recent-replay',3,'recent archived replay'),timestamp})+'\n');
+    expect(await capture()).toMatchObject({inserted:1});
+    expect(await kv.get(KV.sessions,'s')).toMatchObject({status:'completed',lastActivityAt:before.lastActivityAt});
+  });
+  it('activity regression: newly appended recent user reopens abandoned session',async()=>{
+    await initialize();await capture(async()=>{});
+    const before=(await kv.get<Session>(KV.sessions,'s'))!;
+    await kv.set(KV.sessions,'s',{...before,status:'abandoned',endedAt:new Date().toISOString()});
+    const timestamp=new Date(Date.now()-1000).toISOString();
+    await appendFile(join(root,sourcePath),JSON.stringify({...message('live',3,'new live request'),timestamp})+'\n');
+    expect(await capture()).toMatchObject({inserted:1});
+    expect(await kv.get(KV.sessions,'s')).toMatchObject({status:'active',lastActivityAt:timestamp});
+    expect(await kv.get(KV.sessions,'s')).not.toHaveProperty('endedAt');
+  });
+  it.each(['assistant','future'])('activity regression: %s message preserves completed lifecycle and raw timestamp',async(kind)=>{
+    await initialize();await capture(async()=>{});
+    const before=(await kv.get<Session>(KV.sessions,'s'))!;
+    const endedAt=new Date(Date.now()-30*60*1000).toISOString();
+    await kv.set(KV.sessions,'s',{...before,status:'completed',endedAt});
+    const timestamp=new Date(Date.now()+(kind==='future'?60*60*1000:-1000)).toISOString();
+    const row=kind==='future'?message('future',3,'future request'):assistantMessage('late',3,'late answer');
+    await appendFile(join(root,sourcePath),JSON.stringify({...row,timestamp})+'\n');
+    expect(await capture()).toMatchObject({inserted:1});
+    expect(await kv.get(KV.sessions,'s')).toMatchObject({status:'completed',endedAt,lastActivityAt:before.lastActivityAt});
+    expect((await kv.list<CompressedObservation>(KV.observations('s'))).some(o=>o.timestamp===timestamp)).toBe(true);
+  });
+  it('activity regression: retries activity after a canonical insert and failed final checkpoint',async()=>{
+    await initialize();await capture(async()=>{});
+    const before=(await kv.get<Session>(KV.sessions,'s'))!;
+    await kv.set(KV.sessions,'s',{...before,status:'abandoned',endedAt:new Date().toISOString()});
+    const timestamp=new Date(Date.now()-1000).toISOString();
+    await appendFile(join(root,sourcePath),JSON.stringify({...message('retry-live',3,'new retry request'),timestamp})+'\n');
+    const set=kv.set;let sessionWrites=0;
+    kv.set=async(group,id,value)=>{if(group===KV.sessions&&++sessionWrites===2)throw Error('final checkpoint failed');return set(group,id,value);};
+    await expect(capture()).rejects.toThrow('final checkpoint failed'); kv.set=set;
+    expect(await capture()).toMatchObject({inserted:0});
+    expect(await kv.get(KV.sessions,'s')).toMatchObject({status:'active',lastActivityAt:timestamp});
+  });
   let root: string; let kv: ReturnType<typeof mockKV>;
   const sourcePath = "sessions/rollout-a.jsonl";
   const scope = { project: "p", sessionId: "s" };

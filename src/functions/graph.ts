@@ -1,3 +1,5 @@
+import { runtimeDiagnosticPhase } from "../telemetry/runtime-diagnostics.js";
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { inObservationRecovery, registerObservationWriter, withObservationWrite } from "../state/observation-write.js";
 import type { IIIClient } from "iii-sdk";
 import { readArchiveVisibility, archiveTargetAddress } from "./archive.js";
@@ -289,6 +291,7 @@ async function ensureGraphQueryIndex(
   rebuilt: boolean;
 } | null> {
   const current = await readGraphQueryIndexManifest(kv);
+  runtimeDiagnosticPhase("graph.manifest", { present: current ? 1 : 0, dirty: current?.dirty ? 1 : 0, revision: current?.revision ?? 0, matches: queryIndexMatchesSnapshot(current, snapshot) ? 1 : 0 });
   if (queryIndexMatchesSnapshot(current, snapshot)) {
     return { manifest: current, snapshot, rebuilt: false };
   }
@@ -3297,7 +3300,7 @@ export function registerGraphFunction(
           };
         }
         const preparationResult = await withKeyedLock(
-          `mem:session-lifecycle:${sessionId}`,
+          sessionLifecycleLockKey(sessionId),
           async () => {
             try {
               await validateObservationProvenance(kv, {
@@ -3619,7 +3622,7 @@ export function registerGraphFunction(
       }
       };
       if (!sessionId) return persistExtraction();
-      return withKeyedLock(`mem:session-lifecycle:${sessionId}`, async () => {
+      return withKeyedLock(sessionLifecycleLockKey(sessionId), async () => {
         try {
           await validateObservationProvenance(kv, {
             project, sources: [{ sessionId, observationIds: processedObservationIds }],
@@ -3647,12 +3650,14 @@ export function registerGraphFunction(
           ? data.project.trim()
           : undefined;
       const project = requestedProject === "*" ? undefined : requestedProject;
+      runtimeDiagnosticPhase("graph.start");
       const canonicalSnapshot = await readSnapshot(kv);
       const sourceCache = new Map<string, boolean>();
       const snapshot = canonicalSnapshot ? { ...canonicalSnapshot,
         topNodes: await filterCodexGraphSources(kv, canonicalSnapshot.topNodes, sourceCache),
         topEdges: await filterCodexGraphSources(kv, canonicalSnapshot.topEdges, sourceCache),
       } : null;
+      runtimeDiagnosticPhase("graph.snapshot_visibility", { sessionsChecked: sourceCache.size, nodes: snapshot?.topNodes.length ?? 0, edges: snapshot?.topEdges.length ?? 0 });
       const internalSnapshotFiltered = !!canonicalSnapshot && (snapshot!.topNodes.length !== canonicalSnapshot.topNodes.length || snapshot!.topEdges.length !== canonicalSnapshot.topEdges.length);
       const archived = await readArchiveVisibility(kv);
 

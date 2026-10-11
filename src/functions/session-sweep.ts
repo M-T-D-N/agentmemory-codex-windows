@@ -1,6 +1,7 @@
 import type { IIIClient } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { sessionActivityAt, sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import type { Session } from "../types.js";
 import { logger } from "../logger.js";
@@ -22,7 +23,7 @@ export interface SessionSweepResult {
 
 function isStaleActive(session: Session | null, cutoff: number): session is Session {
   if (!session || session.status !== "active") return false;
-  const freshness = session.updatedAt ?? session.startedAt;
+  const freshness = sessionActivityAt(session);
   if (!freshness) return false;
   const ts = new Date(freshness).getTime();
   return Number.isFinite(ts) && ts < cutoff;
@@ -50,7 +51,7 @@ export function registerSessionSweepFunction(sdk: IIIClient, kv: StateKV): void 
       for (const candidate of sessions) {
         if (!isStaleActive(candidate, cutoff)) continue;
         try {
-          const marked = await withKeyedLock(`obs:${candidate.id}`, async () => {
+          const marked = await withKeyedLock(sessionLifecycleLockKey(candidate.id), async () => {
             const current = await kv.get<Session>(KV.sessions, candidate.id);
             if (!isStaleActive(current, cutoff)) return false;
             await kv.update(KV.sessions, candidate.id, [

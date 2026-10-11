@@ -303,7 +303,7 @@ export class StateKV {
       if (payload.scope === KV.graphWritePlan && payload.key === 'current' || !permitsGraphPlanAccess(this, payload.scope, payload.key as string, true)) await this.flush()
       return result
     } catch (error) {
-      if (payload.scope === SESSIONS || payload.scope.startsWith(OBS) || payload.scope.startsWith('mem:enriched:') || payload.scope.startsWith('mem:graph:') || referenceScopes.has(payload.scope)) {
+      if (payload.scope === KV.archiveStates || payload.scope === SESSIONS || payload.scope.startsWith(OBS) || payload.scope.startsWith('mem:enriched:') || payload.scope.startsWith('mem:graph:') || referenceScopes.has(payload.scope)) {
         this.recoveryUncertain = true
       }
       throw error

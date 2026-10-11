@@ -8,7 +8,7 @@ import { KV } from "../state/schema.js";
 import { withObservationWrite } from "../state/observation-write.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { checkPayloadFrameSize } from "../state/frame-guard.js";
-import { sessionLifecycleLockKey } from "./session-lifecycle.js";
+import { advanceSessionActivity, seedSourceSessionActivity, sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { canonicalCodexCwd } from "./codex-source-identity.js";
 import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
@@ -236,7 +236,8 @@ export async function initializeCodexSourceCapture(kv: StateKV,
     }
     const initializedAt = new Date().toISOString();
     const indexPending = prepared.size > 0 || counts.linkDuplicateCaptures > 0 || decisions.some(row => row.action === "adopt" && byKey.get(row.sourceKey)?.retainedSourcePath) || session.codexNativeCapture?.indexPending === true;
-    const next: Session = { ...session, semanticGraphCompletionVersion: 1, semanticGraphStatus: "pending", codexNativeCapture: {
+    const activitySession = seedSourceSessionActivity(session, messages.filter(message => !message.legacyExcludedReason).map(message => message.timestamp), last.source.createdAt, initializedAt);
+    const next: Session = { ...activitySession, semanticGraphCompletionVersion: 1, semanticGraphStatus: "pending", codexNativeCapture: {
       version: sourceHolds.length ? 2 : 1, ...(sourceHolds.length ? { sourceHolds } : {}), source: last.source, initializedAt, status: "pending", ...(capturedAfter ? { capturedAfter } : {}),
       ...(captureCwd ? { captureCwd } : {}),
       ...(unresolvedCaptures.length ? { unresolvedCaptures } : {}),
@@ -309,12 +310,21 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
     const status = window.issue ? "unknown" as const : window.caughtUp ? (sourceHolds.length ? "caught_up_with_holds" as const : "caught_up" as const) : "pending" as const;
     const indexRows = state.indexPending || options.rebuildIndex ? [...existing.values()].filter(row => row.emptyDeletion?.state !== "deleted") : rows;
     let indexPending = indexRows.length > 0;
-    const next: Session = { ...session,
+    let activitySession = session.lastActivityAt === undefined
+      ? seedSourceSessionActivity(session, observations.filter(row => row.codexSource && !row.codexSource.duplicateOfObservationId && !row.codexSource.legacyExcludedReason).map(row => row.codexSource!.timestamp), state.source.createdAt, capturedAt)
+      : session;
+    const currentMessages = new Map(window.messages.map(message => [message.key, message]));
+    for (const decision of decisions) {
+      if (decision.action !== "insert" && decision.action !== "present") continue;
+      const message = currentMessages.get(decision.sourceKey);
+      if (message) activitySession = advanceSessionActivity(activitySession, message.timestamp, message.kind === "user", capturedAt);
+    }
+    const next: Session = { ...activitySession,
       observationCount: [...existing.values()].filter(row => row.emptyDeletion?.state !== "deleted").length,
       updatedAt: capturedAt, ...(rows.length ? { semanticGraphStatus: "pending" } : {}),
       codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, indexPending, snapshotBytes: window.snapshotBytes },
     };
-    const unchangedCheckpoint = rows.length === 0 && !indexPending && state.indexPending === false &&
+    const unchangedCheckpoint = isDeepStrictEqual(activitySession, session) && rows.length === 0 && !indexPending && state.indexPending === false &&
       next.observationCount === session.observationCount && status === state.status &&
       window.issue?.reason === state.issue && window.snapshotBytes === state.snapshotBytes &&
       isDeepStrictEqual(window.cursor, state.cursor);

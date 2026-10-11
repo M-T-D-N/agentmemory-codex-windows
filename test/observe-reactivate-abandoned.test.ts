@@ -123,3 +123,23 @@ describe("observe reactivates abandoned sessions", () => {
     expect(session.observationCount).toBe(4);
   });
 });
+
+
+describe('native managed observe activity',()=>{
+  it.each(['live','backfill','future','ambient','assistant'])('handles %s hook activity without storing duplicate original bodies',async(kind)=>{
+    const {registerObserveFunction}=await import('../src/functions/observe.js');
+    const sdk=mockSdk();const kv=mockKV();seedSession(kv.store,'native','abandoned');
+    const prior=kv.store.get('mem:sessions')!.get('native') as Record<string,unknown>;
+    const lastActivityAt=new Date(Date.now()-48*60*60*1000).toISOString();
+    kv.store.get('mem:sessions')!.set('native',{...prior,lastActivityAt,codexNativeCapture:{version:1}});
+    registerObserveFunction(sdk as never,kv as never);
+    const timestamp=new Date(Date.now()+(kind==='future'?60*60*1000:-1000)).toISOString();
+    const data=kind==='assistant'?{tool_name:'assistant_response',tool_output:'late final',codex_turn_id:'turn-live'}:{prompt:kind==='ambient'?'<subagent_notification>internal</subagent_notification>':'new user request',codex_turn_id:'turn-live',...(kind==='backfill'?{backfill:true}:{})};
+    await sdk.trigger('mem::observe',{sessionId:'native',project:'/home/user/myrepo',cwd:'/home/user/myrepo',hookType:kind==='assistant'?'post_tool_use':'prompt_submit',timestamp,data});
+    const updated=await kv.get<Record<string,unknown>>('mem:sessions','native');
+    expect(updated!.status).toBe(kind==='live'?'active':'abandoned');
+    expect(updated!.lastActivityAt).toBe(kind==='live'?timestamp:lastActivityAt);
+    expect(await kv.list('mem:obs:native')).toEqual([]);
+    if(kind==='live')expect(updated).not.toHaveProperty('endedAt');
+  });
+});

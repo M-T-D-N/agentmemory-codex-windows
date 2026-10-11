@@ -1,7 +1,7 @@
 # Evaluate AgentMemory for Codex on Windows (agent runbook)
 
 This runbook is for coding agents evaluating the independent
-Technical Preview `0.1.0-preview.15` on native Windows.
+Technical Preview `0.1.0-preview.16` on native Windows.
 
 > [!IMPORTANT]
 > Do not install `@agentmemory/*` from npm, run an upstream `npx` command, use
@@ -36,7 +36,7 @@ Verify that its SHA-256 equals the value in
 
 ## 2. Verify the source checkout
 
-Use the `v0.1.0-preview.15` tag for this runbook and record `git rev-parse HEAD`.
+Use the `v0.1.0-preview.16` tag for this runbook and record `git rev-parse HEAD`.
 From the repository root:
 
 ```powershell
@@ -61,18 +61,18 @@ Choose a new staging path and the exact verified iii executable:
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.22.1.exe `
   -ScratchDirectory D:\staging\agentmemory-build-temp `
-  -ReleaseRevision r189
+  -ReleaseRevision r198
 ```
 
 Expect a folder named
-`agentmemory-codex-windows-0.1.0-preview.15`. Its `release-manifest.json` must
+`agentmemory-codex-windows-0.1.0-preview.16`. Its `release-manifest.json` must
 identify:
 
 - product `AgentMemory for Codex on Windows`;
 - product ID `agentmemory-codex-windows`;
-- downstream version `0.1.0-preview.15`;
+- downstream version `0.1.0-preview.16`;
 - AgentMemory compatibility version `0.9.30`; and
-- qualification revision `r189` when using the example command.
+- qualification revision `r198` when using the example command.
 
 The generated folder is a diagnostic candidate, not a signed public release.
 
@@ -82,8 +82,8 @@ Use an owned AgentMemoryCodex installation, workspace root, project registry,
 and Node executable. Omit `-Execute`:
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.15 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.16\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.16 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -101,7 +101,7 @@ actual cutover.
 ## 5. Update an owned installation
 
 Use a fresh staging directory and an unused runtime revision in the form
-`-ReleaseRevision rN`. The example r189 label must be changed if that revision
+`-ReleaseRevision rN`. The example r198 label must be changed if that revision
 already exists. A public preview version and an internal runtime revision are
 different identities; a new public version never permits same-revision replacement.
 

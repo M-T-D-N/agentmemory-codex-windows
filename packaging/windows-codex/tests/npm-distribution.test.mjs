@@ -21,6 +21,10 @@ test('strict CLI input keeps paths as literal arguments and requires explicit ex
   const args = powershellArgs('C:\\dir space\\install.ps1', { InstallRoot: 'C:\\dir space', Execute: true });
   assert.equal(args.at(-2), 'C:\\dir space');
   assert.equal(args.at(-1), '-Execute');
+  const maintenance = 'D:\\qualification\\backup decisions.json';
+  assert.equal(parseArgs([...input, '--maintenance-plan', maintenance])['maintenance-plan'], maintenance);
+  assert.deepEqual(powershellArgs('install.ps1', { MaintenancePlanPath: maintenance }).slice(-2), ['-MaintenancePlanPath', maintenance]);
+  assert.throws(() => parseArgs([...input, '--maintenance-plan', '..\\unreviewed.json']));
 });
 
 test('PowerShell child environment normalizes Windows keys before overriding module paths', () => {

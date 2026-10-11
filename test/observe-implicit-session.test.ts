@@ -220,8 +220,8 @@ describe("observe implicit session create", () => {
       project: "/project/a",
       cwd: "/project/a",
       hookType: "prompt_submit",
-      timestamp: "2026-01-01T02:00:00Z",
-      data: { prompt: "tail captured before an abrupt shutdown" },
+      timestamp: new Date().toISOString(),
+      data: { prompt: "new live tail after a completed session" },
     });
 
     expect(result).toHaveProperty("observationId");

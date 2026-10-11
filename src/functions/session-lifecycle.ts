@@ -1,3 +1,4 @@
+import { getSessionSweepStaleHours } from "../config.js";
 import type { Session } from "../types.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
@@ -21,6 +22,47 @@ export type SessionEndResult =
 
 export function sessionLifecycleLockKey(sessionId: string): string {
   return `obs:${sessionId}`;
+}
+
+export function sessionActivityAt(session: Session): string {
+  return session.lastActivityAt ?? session.updatedAt ?? session.startedAt;
+}
+
+export function seedSourceSessionActivity(
+  session: Session,
+  timestamps: Iterable<string>,
+  sourceCreatedAt: string,
+  observedAt = new Date().toISOString(),
+): Session {
+  const now = Date.parse(observedAt);
+  let latest = new Date(0).toISOString();
+  for (const timestamp of [session.lastActivityAt, sourceCreatedAt, session.startedAt, ...timestamps]) {
+    if (typeof timestamp !== "string") continue;
+    const time = Date.parse(timestamp);
+    if (Number.isFinite(time) && time <= now && time > Date.parse(latest)) latest = timestamp;
+  }
+  return { ...session, lastActivityAt: latest };
+}
+
+export function advanceSessionActivity(
+  session: Session,
+  timestamp: string,
+  userPrompt: boolean,
+  observedAt = new Date().toISOString(),
+): Session {
+  const time = Date.parse(timestamp);
+  const now = Date.parse(observedAt);
+  const previous = Date.parse(sessionActivityAt(session));
+  if (!Number.isFinite(time) || time > now || (Number.isFinite(previous) &&
+      (time < previous || (time === previous && session.status === "active")))) return session;
+  if (session.status !== "active") {
+    if (!userPrompt || time < now - getSessionSweepStaleHours() * 60 * 60 * 1000 ||
+        (session.status === "completed" && (!session.endedAt || !Number.isFinite(Date.parse(session.endedAt)) ||
+          time <= Date.parse(session.endedAt)))) return session;
+    const { endedAt: _endedAt, ...active } = session;
+    return { ...active, status: "active", lastActivityAt: timestamp };
+  }
+  return { ...session, lastActivityAt: timestamp };
 }
 
 function isCompleteSessionRecord(
@@ -107,6 +149,7 @@ export function prepareSessionStart(
         observationCount: existing.observationCount ?? 0,
         status: "active",
         updatedAt: now,
+        lastActivityAt: now,
       },
     };
   }
@@ -121,6 +164,7 @@ export function prepareSessionStart(
       cwd: input.cwd,
       startedAt: now,
       updatedAt: now,
+      lastActivityAt: now,
       status: "active",
       observationCount: 0,
       ...(title ? { summary: title.slice(0, 200), firstPrompt: title.slice(0, 200) } : {}),

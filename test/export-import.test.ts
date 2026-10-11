@@ -11,7 +11,9 @@ import { selectSemanticGraphBatch } from "../src/functions/semantic-graph-backlo
 import { VERSION, CODEX_LIFECYCLE_EXPORT_VERSION } from "../src/version.js";
 import { codexTextDigest } from "../src/replay/codex-match.js";
 import { codexExclusionId } from "../src/functions/codex-capture-exclusion.js";
-import { getSearchIndex } from "../src/functions/search.js";
+import { getSearchIndex, rebuildIndex } from "../src/functions/search.js";
+import { indexObservationSession, lookupObservationSession } from "../src/state/obs-index.js";
+import { addSessionToProjectIndex } from "../src/state/session-index.js";
 import { KV } from "../src/state/schema.js";
 import { graphObservationComplete, graphObservationDigest, readGraphCompletionContext } from "../src/functions/graph-observation-result.js";
 import type {
@@ -119,6 +121,29 @@ describe("Export/Import Functions", () => {
   });
 
   afterEach(() => vi.unstubAllEnvs());
+
+  it.each(["sessions", "memories", "summaries", "profiles", "graphNodes", "graphEdges", "semanticMemories", "proceduralMemories", "actions", "actionEdges", "routines", "signals", "checkpoints", "sentinels", "sketches", "crystals", "facets", "lessons", "insights", "accessLogs"])("rejects a malformed %s row before any replace writes", async field => {
+    const exported = structuredClone(await sdk.trigger("mem::export", {})) as ExportData;
+    (exported as unknown as Record<string, unknown>)[field] = [null];
+    const before = structuredClone(kv.store);
+    const set = vi.spyOn(kv, "set"), del = vi.spyOn(kv, "delete"), update = vi.spyOn(kv, "update");
+    await expect(sdk.trigger("mem::import", { exportData: exported, strategy: "replace" })).rejects.toThrow();
+    expect(set).not.toHaveBeenCalled(); expect(del).not.toHaveBeenCalled(); expect(update).not.toHaveBeenCalled();
+    expect(kv.store).toEqual(before);
+  });
+  it.each(["duplicate", "bucket-owner", "summary-owner", "session-owner", "memory-owner"])("rejects inconsistent %s identities before writes", async variant => {
+    const exported = structuredClone(await sdk.trigger("mem::export", {})) as ExportData;
+    if (variant === "duplicate") exported.observations.ses_1.push({ ...testObs });
+    if (variant === "bucket-owner") exported.observations.ses_1[0].sessionId = "other";
+    if (variant === "summary-owner") exported.summaries[0].project = "other";
+    if (variant === "session-owner") exported.sessions[0].project = "other";
+    if (variant === "memory-owner") exported.memories[0].agentId = "other";
+    const before = structuredClone(kv.store);
+    const set = vi.spyOn(kv, "set"), del = vi.spyOn(kv, "delete"), update = vi.spyOn(kv, "update");
+    await expect(sdk.trigger("mem::import", { exportData: exported })).rejects.toThrow();
+    expect(set).not.toHaveBeenCalled(); expect(del).not.toHaveBeenCalled(); expect(update).not.toHaveBeenCalled();
+    expect(kv.store).toEqual(before);
+  });
 
   async function graphExport() {
     await kv.set(KV.sessions, testSession.id, { ...testSession, semanticGraphCompletionVersion: 1, semanticGraphStatus: "complete" });
@@ -774,5 +799,188 @@ describe("import preserves complete graph provenance", () => {
     expect(n!.sourceObservationIds).toEqual(bloatedIds("obs", 400));
     expect(s!.sourceObservationIds).toEqual(["obs_x"]);
     expect(e!.sourceObservationIds).toEqual(bloatedIds("eobs", 100));
+  });
+});
+
+
+describe("retained import sources and index shape", () => {
+  it.each(["merge", "skip", "replace"] as const)("rejects a memory-only foreign canonical source before writes (%s)", async strategy => {
+    const sdk = mockSdk(), kv = mockKV(); registerExportImportFunction(sdk as never, kv as never);
+    const foreign = { ...testSession, id: "foreign", project: "B", agentId: "B" };
+    await kv.set(KV.sessions, foreign.id, foreign);
+    await kv.set(KV.observations(foreign.id), "foreign_obs", { ...testObs, id: "foreign_obs", sessionId: foreign.id, project: "B", agentId: "B" });
+    const data = { version: "0.9.30", exportedAt: testMemory.createdAt, sessions: [], observations: {}, summaries: [], memories: [{ ...testMemory, id: "mem_new", project: "A", agentId: "A", sessionIds: [], sourceObservationIds: ["foreign_obs"] }] };
+    const set = vi.spyOn(kv, "set"), remove = vi.spyOn(kv, "delete");
+    await expect(sdk.trigger("mem::import", { exportData: data, strategy })).rejects.toThrow(/source observation/);
+    expect(set).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+  });
+  it("accepts a same-owner retained source and indexes the memory-only import", async () => {
+    const sdk = mockSdk(), kv = mockKV(); registerExportImportFunction(sdk as never, kv as never);
+    await kv.set(KV.sessions, testSession.id, { ...testSession, agentId: "A" });
+    await kv.set(KV.observations(testSession.id), testObs.id, testObs);
+    const memory = { ...testMemory, id: "mem_same_owner", project: testSession.project, agentId: "A", sessionIds: [], sourceObservationIds: [testObs.id] };
+    const data = { version: "0.9.30", exportedAt: testMemory.createdAt, sessions: [], observations: {}, summaries: [], memories: [memory] };
+    expect(await sdk.trigger("mem::import", { exportData: data })).toMatchObject({ success: true });
+    expect(getSearchIndex().has(memory.id)).toBe(true);
+  });
+  it("rejects a retained source from a different agent in the same project", async () => {
+    const sdk = mockSdk(), kv = mockKV(); registerExportImportFunction(sdk as never, kv as never);
+    await kv.set(KV.sessions, testSession.id, { ...testSession, agentId: "B" });
+    await kv.set(KV.observations(testSession.id), testObs.id, testObs);
+    const data = { version: "0.9.30", exportedAt: testMemory.createdAt, sessions: [], observations: {}, summaries: [], memories: [{ ...testMemory, id: "mem_foreign_agent", project: testSession.project, agentId: "A", sessionIds: [], sourceObservationIds: [testObs.id] }] };
+    const set = vi.spyOn(kv, "set");
+    await expect(sdk.trigger("mem::import", { exportData: data })).rejects.toThrow(/source observation agent/);
+    expect(set).not.toHaveBeenCalled();
+  });
+  it.each(["concepts", "files", "both"])("rejects missing memory %s arrays before mutation", async field => {
+    const sdk = mockSdk(), kv = mockKV(); registerExportImportFunction(sdk as never, kv as never);
+    const memory: any = { ...testMemory, id: "mem_missing" };
+    if (field !== "files") delete memory.concepts;
+    if (field !== "concepts") delete memory.files;
+    const data = { version: "0.9.30", exportedAt: testMemory.createdAt, sessions: [], observations: {}, summaries: [], memories: [memory] };
+    const set = vi.spyOn(kv, "set"), remove = vi.spyOn(kv, "delete");
+    await expect(sdk.trigger("mem::import", { exportData: data, strategy: "replace" })).rejects.toThrow(/concepts and files arrays/);
+    expect(set).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+  });
+});
+
+describe("Import failure boundaries", () => {
+  let kv: ReturnType<typeof mockKV>;
+  let sdk: ReturnType<typeof mockSdk>;
+  const empty = () => ({ version: VERSION, exportedAt: new Date().toISOString(), sessions: [], observations: {}, memories: [], summaries: [] });
+  beforeEach(() => {
+    vi.stubEnv("GRAPH_EXTRACTION_ENABLED", "false");
+    kv = mockKV(); sdk = mockSdk(); getSearchIndex().clear();
+    registerExportImportFunction(sdk as never, kv as never);
+  });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+  const collections = [
+    ["memories", KV.memories, 1], ["summaries", KV.summaries, 0],
+    ["graphNodes", KV.graphNodes, 1], ["graphEdges", KV.graphEdges, 1],
+    ["semanticMemories", KV.semantic, 1], ["proceduralMemories", KV.procedural, 1],
+    ["profiles", KV.profiles, 0], ["actions", KV.actions, 1], ["actionEdges", KV.actionEdges, 0],
+    ["routines", KV.routines, 1], ["signals", KV.signals, 1], ["checkpoints", KV.checkpoints, 1],
+    ["sentinels", KV.sentinels, 1], ["sketches", KV.sketches, 1], ["crystals", KV.crystals, 1],
+    ["facets", KV.facets, 1], ["lessons", KV.lessons, 1], ["insights", KV.insights, 1],
+    ["accessLogs", KV.accessLog, 0],
+  ] as const;
+  const rowFor = (name: string) => name === "memories" ? { ...testMemory, sessionIds: [] } :
+    name === "summaries" ? { ...testSummary } : name === "profiles" ? { project: "my-project", title: "old" } :
+    name === "accessLogs" ? { memoryId: testMemory.id, accessCount: 1, lastAccessAt: testMemory.createdAt, timestamps: [] } :
+    { id: "row", project: "my-project", type: "concept", name: "old", title: "old", createdAt: testMemory.createdAt,
+      sourceNodeId: "node-a", targetNodeId: "node-b", sourceSessionIds: [], sourceObservationIds: [] };
+  const keyFor = (name: string, row: ReturnType<typeof rowFor>) => name === "summaries" ? testSummary.sessionId :
+    name === "profiles" ? "my-project" : name === "accessLogs" ? testMemory.id : (row as { id: string }).id;
+  it.each(collections)("skip propagates %s (%s) existence-read failure after %s preflight reads", async (name, scope, preflightReads) => {
+    const original = rowFor(name), key = keyFor(name, original);
+    await kv.set(scope, key, original);
+    const read = kv.get.bind(kv); let reads = 0;
+    vi.spyOn(kv, "get").mockImplementation(async (requested, id) => {
+      if (requested === scope && id === key && ++reads === preflightReads + 1) throw Error("existence read failed");
+      return read(requested, id);
+    });
+    const set = vi.spyOn(kv, "set");
+    const payload = { ...empty(), [name]: [{ ...original, title: "overwrite", content: "overwrite" }] };
+    if (name === "accessLogs") payload.memories = [testMemory] as never;
+    await expect(sdk.trigger("mem::import", { exportData: payload, strategy: "skip" })).rejects.toThrow("existence read failed");
+    expect(reads).toBe(preflightReads + 1);
+    expect(set.mock.calls.filter(([s, id]) => s === scope && id === key)).toHaveLength(0);
+    expect(await read(scope, key)).toEqual(original);
+  });
+  it.each(collections)("skip preserves present %s and writes an absent row", async (name, scope) => {
+    const original = rowFor(name), key = keyFor(name, original);
+    const payload = { ...empty(), [name]: [original] };
+    if (name === "accessLogs") payload.memories = [testMemory] as never;
+    expect(await sdk.trigger("mem::import", { exportData: payload, strategy: "skip" })).toMatchObject({ success: true });
+    const saved = await kv.get(scope, key);
+    expect(saved).not.toBeNull();
+    const set = vi.spyOn(kv, "set");
+    payload[name] = [{ ...original, title: "overwrite", content: "overwrite" }] as never;
+    expect(await sdk.trigger("mem::import", { exportData: payload, strategy: "skip" })).toMatchObject({ success: true });
+    expect(set.mock.calls.filter(([s, id]) => s === scope && id === key)).toHaveLength(0);
+    expect(await kv.get(scope, key)).toEqual(saved);
+  });
+  it("replace removes canonical observations and both address indexes", async () => {
+    await kv.set(KV.sessions, testSession.id, testSession);
+    await kv.set(KV.observations(testSession.id), testObs.id, { ...testObs, sessionId: "stale-row-address" });
+    await indexObservationSession(kv as never, testObs.id, testSession.id);
+    await addSessionToProjectIndex(kv as never, testSession.project, testSession);
+    expect(await sdk.trigger("mem::import", { exportData: empty(), strategy: "replace" })).toMatchObject({ success: true });
+    expect(await kv.get(KV.sessions, testSession.id)).toBeNull();
+    expect(await kv.list(KV.observations(testSession.id))).toEqual([]);
+    expect(await lookupObservationSession(kv as never, testObs.id)).toBeNull();
+    expect(await kv.get(KV.projectSessionsIndex, testSession.project)).toEqual([]);
+  });
+  it("skip distinguishes a successful absent row from a failed preflight read", async () => {
+    const payload = { ...empty(), memories: [{ ...testMemory, sessionIds: [] }] };
+    expect(await sdk.trigger("mem::import", { exportData: payload, strategy: "skip" })).toMatchObject({ success: true, memories: 1 });
+    const before = await kv.get(KV.memories, testMemory.id);
+    const read = kv.get.bind(kv); const set = vi.spyOn(kv, "set"); set.mockClear();
+    vi.spyOn(kv, "get").mockImplementation(async (scope, id) => { if (scope === KV.memories) throw Error("preflight read failed"); return read(scope, id); });
+    await expect(sdk.trigger("mem::import", { exportData: payload, strategy: "skip" })).rejects.toThrow("preflight read failed");
+    expect(set).not.toHaveBeenCalled(); expect(await read(KV.memories, testMemory.id)).toEqual(before);
+  });
+  it.each([KV.observations(testSession.id), KV.memories, KV.summaries, ...collections.filter(([name]) => !["memories", "summaries"].includes(name)).map(([, scope]) => scope)])(
+    "replace acquires %s before any persistent mutation", async (failedScope) => {
+      await kv.set(KV.sessions, testSession.id, testSession);
+      await kv.set(KV.observations(testSession.id), testObs.id, testObs);
+      const list = kv.list.bind(kv);
+      vi.spyOn(kv, "list").mockImplementation(async scope => { if (scope === failedScope) throw Error("delete inventory failed"); return list(scope); });
+      const set = vi.spyOn(kv, "set"), remove = vi.spyOn(kv, "delete"), update = vi.spyOn(kv, "update");
+      await expect(sdk.trigger("mem::import", { exportData: empty(), strategy: "replace" })).rejects.toThrow("delete inventory failed");
+      expect(set).not.toHaveBeenCalled();expect(remove).not.toHaveBeenCalled();expect(update).not.toHaveBeenCalled();
+      expect(await kv.get(KV.sessions, testSession.id)).toEqual(testSession);
+      expect(await kv.get(KV.observations(testSession.id), testObs.id)).toEqual(testObs);
+    },
+  );
+  it("replace failure during deletion remains an explicit partial application", async () => {
+    await kv.set(KV.sessions, testSession.id, testSession); await kv.set(KV.observations(testSession.id), testObs.id, testObs);
+    const remove = kv.delete.bind(kv);
+    vi.spyOn(kv, "delete").mockImplementation(async (scope, id) => { if (scope === KV.observations(testSession.id)) throw Error("delete failed"); return remove(scope, id); });
+    await expect(sdk.trigger("mem::import", { exportData: empty(), strategy: "replace" })).rejects.toThrow("delete failed");
+    expect(await kv.get(KV.sessions, testSession.id)).toBeNull();
+    expect(await kv.get(KV.observations(testSession.id), testObs.id)).toEqual(testObs);
+  });
+  const malformed = [
+    ...["facts", "concepts", "files"].flatMap(field => ["missing", "null", "string", "bad-element"].map(kind => ({ field, kind }))),
+    { field: "all", kind: "missing" },
+  ];
+  it.each(malformed)("rejects compressed $field/$kind before any audit or canonical write", async ({field,kind}) => {
+    const bad: Record<string, unknown> = {...testObs};
+    for(const target of field === "all" ? ["facts","concepts","files"] : [field]) {
+      if(kind === "missing") delete bad[target]; else bad[target] = kind === "null" ? null : kind === "string" ? "bad" : [42];
+    }
+    const set=vi.spyOn(kv,"set"), remove=vi.spyOn(kv,"delete"), update=vi.spyOn(kv,"update");
+    const payload={...empty(),sessions:[testSession],observations:{[testSession.id]:[bad,{...testObs,id:"valid-2"},{...testObs,id:"valid-3"}]}};
+    await expect(sdk.trigger("mem::import",{exportData:payload,strategy:"merge"})).rejects.toThrow(/observations.*facts|observations.*concepts|observations.*files|observations require/);
+    expect(set).not.toHaveBeenCalled();expect(remove).not.toHaveBeenCalled();expect(update).not.toHaveBeenCalled();
+    expect(await kv.list(KV.observations(testSession.id))).toEqual([]); expect(getSearchIndex().size).toBe(0);
+  });
+  it.each(["merge", "skip", "replace"])("%s round-trips legal raw observations without indexing unfinished content", async strategy => {
+    const raw = { id: "raw_1", sessionId: testSession.id, timestamp: testObs.timestamp, hookType: "prompt_submit", raw: { prompt: "unfinished raw capture" }, userPrompt: "unfinished raw capture" };
+    await kv.set(KV.sessions, testSession.id, { ...testSession, codexNativeCapture: {
+      version: 1, source: { sessionId: testSession.id, source: "cli", cwd: testSession.cwd, createdAt: testSession.startedAt, relativePath: "sessions/2026/02/source.jsonl" },
+      initializedAt: testSession.startedAt, status: "pending", indexPending: true,
+    } }); await kv.set(KV.observations(testSession.id), raw.id, raw);
+    const exported = await sdk.trigger("mem::export", {}) as ExportData;
+    const destination=mockKV(), receiver=mockSdk();registerExportImportFunction(receiver as never,destination as never);
+    expect(await receiver.trigger("mem::import",{exportData:exported,strategy})).toMatchObject({success:true,observations:1});
+    const retained=await destination.get(KV.observations(testSession.id),raw.id);
+    expect(retained).toMatchObject(raw);expect(getSearchIndex().search("unfinished raw capture")).toEqual([]);
+    expect(await destination.get(KV.sessions,testSession.id)).toMatchObject({codexNativeCapture:{status:"reconcile_required",indexPending:true}});
+    expect((await receiver.trigger("mem::export", {}) as ExportData).observations[testSession.id][0]).toMatchObject(raw);
+  });
+  it("a raw marker cannot hide missing arrays on an otherwise compressed row",async()=>{
+    const bad={...testObs,raw:{},hookType:"prompt_submit"} as Record<string,unknown>;delete bad.facts;
+    const set=vi.spyOn(kv,"set");
+    await expect(sdk.trigger("mem::import",{exportData:{...empty(),sessions:[testSession],observations:{[testSession.id]:[bad]}},strategy:"merge"})).rejects.toThrow("observations require");
+    expect(set).not.toHaveBeenCalled();
+  });
+  it("accepts and immediately indexes normal empty compressed arrays",async()=>{
+    const observation={...testObs,facts:[],concepts:[],files:[],title:"importneedle valid"};
+    expect(await sdk.trigger("mem::import",{exportData:{...empty(),sessions:[testSession],observations:{[testSession.id]:[observation]}},strategy:"merge"})).toMatchObject({success:true,observations:1});
+    expect(getSearchIndex().search("importneedle").map(hit=>hit.obsId)).toContain(testObs.id);
+    getSearchIndex().clear();expect(await rebuildIndex(kv as never)).toBe(1);
+    expect(getSearchIndex().search("importneedle").map(hit=>hit.obsId)).toContain(testObs.id);
   });
 });

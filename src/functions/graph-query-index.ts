@@ -1,3 +1,4 @@
+import { runtimeDiagnosticPhase } from "../telemetry/runtime-diagnostics.js";
 import { createHash } from "node:crypto";
 import { filterCodexGraphSources } from "./observation-visibility.js";
 import type { StateKV } from "../state/kv.js";
@@ -357,6 +358,7 @@ export function queryGraphFromSnapshotFallback(
   offset: number,
   archived?: ArchiveVisibility,
 ): GraphQueryResult {
+  runtimeDiagnosticPhase("graph.snapshot_fallback");
   const warning =
     "The exact graph query index is temporarily unavailable. Returned a " +
     "bounded top-degree snapshot without enumerating canonical graph state; " +
@@ -503,6 +505,7 @@ export async function readAllGraphQueryDocuments(
     );
     for (const shard of shards) documents.push(...(shard ?? []));
   }
+  runtimeDiagnosticPhase("graph.documents", { shards: GRAPH_QUERY_INDEX_SHARDS, documents: documents.length });
   return documents;
 }
 
@@ -705,6 +708,7 @@ export async function queryGraphFromIndex(
         queryTerms.length === 0 ||
         queryTerms.some((term) => document.searchText.includes(term)),
     ), sourceCache)).sort(graphQueryDocumentOrder);
+  runtimeDiagnosticPhase("graph.visible_documents", { documents: documents.length, sessionsChecked: sourceCache.size });
   const totalNodes = documents.length;
   const pageDocuments = documents.slice(offset, offset + limit);
   const pageNodes = await hydrateGraphNodes(
@@ -715,6 +719,7 @@ export async function queryGraphFromIndex(
   const universeIds = new Set(documents.map((document) => document.id));
   const pageIds = new Set(pageNodes.map((node) => node.id));
   const { refs } = await readGraphQueryEdgeRefs(kv, universeIds);
+  runtimeDiagnosticPhase("graph.edge_refs", { refs: refs.length, universeNodes: universeIds.size });
   const universeEdges = (await filterCodexGraphSources(kv, refs, sourceCache)).filter(
     (ref) =>
       visibleEdge(ref) &&
@@ -737,6 +742,7 @@ export async function queryGraphFromIndex(
     archived,
     sourceCache,
   );
+  runtimeDiagnosticPhase("graph.edge_inventory", { edges: universeEdges.length, sessionsChecked: sourceCache.size });
   const pageEdgeIds = universeEdges
     .filter(
       (ref) =>

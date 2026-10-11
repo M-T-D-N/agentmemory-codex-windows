@@ -86,6 +86,11 @@ describe("mem::session-sweep", () => {
     registerSessionSweepFunction(sdk as never, kv as never);
   });
 
+  it('activity regression: metadata write cannot hide stale source activity',async()=>{
+    await kv.set(KV.sessions,'s-old',session({id:'s-old',updatedAt:new Date().toISOString(),lastActivityAt:new Date(nowMs-30*H).toISOString()}));
+    const result=await sdk.trigger({function_id:'mem::session-sweep',payload:{}});
+    expect(result.abandoned).toBe(1);expect(await kv.get(KV.sessions,'s-old')).toMatchObject({status:'abandoned'});
+  });
   it("marks stale active sessions as abandoned with endedAt", async () => {
     kv.set(KV.sessions, "s-old", session({ id: "s-old", updatedAt: new Date(nowMs - 30 * H).toISOString() }));
     const sweep = await (sdk as any).trigger({ function_id: "mem::session-sweep", payload: {} });

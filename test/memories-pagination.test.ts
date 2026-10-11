@@ -11,7 +11,7 @@ describe("memories + export pagination (#544)", () => {
     expect(api).toMatch(/req\.query_params\?\.\["count"\]\s*===\s*"true"/);
     // count must report the SAME scope as the list path (#554 follow-up).
     expect(api).toMatch(/total:\s*filtered\.length/);
-    expect(api).toMatch(/latestCount:\s*filtered\.filter/);
+    expect(api).toMatch(/latestCount:\s*currentMemoryHeads\(filtered\)\.length/);
   });
 
   it("api::memories accepts limit + offset query params", () => {

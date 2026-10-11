@@ -4,9 +4,6 @@ vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-vi.mock("../src/state/keyed-mutex.js", () => ({
-  withKeyedLock: <T>(_key: string, fn: () => Promise<T>) => fn(),
-}));
 
 import { KV } from "../src/state/schema.js";
 import { codexTextDigest } from "../src/replay/codex-match.js";

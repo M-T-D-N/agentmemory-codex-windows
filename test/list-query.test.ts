@@ -66,7 +66,7 @@ describe("list query helpers", () => {
     const first = pageByOffset(ordered, undefined, 2);
     expect(first.page).toEqual(["x", "y"]);
     const second = pageByOffset(ordered, first.nextCursor ?? undefined, 2);
-    expect(second).toEqual({ page: ["z"], nextCursor: null });
+    expect(second).toEqual({ page: ["z"], nextCursor: null, offset: 2, nextOffset: null });
   });
 
   it("ignores malformed cursors", () => {

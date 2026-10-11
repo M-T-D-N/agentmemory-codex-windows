@@ -31,7 +31,7 @@ import {
   isExcludedCodexAmbientSession,
 } from "./observation-visibility.js";
 import { safeAudit } from "./audit.js";
-import { sessionLifecycleLockKey } from "./session-lifecycle.js";
+import { advanceSessionActivity, sessionActivityAt, sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { canonicalCodexCwd } from "./codex-source-identity.js";
 
 function sameCodexCaptureCwd(session: Session, cwd: string): boolean {
@@ -255,6 +255,10 @@ export function registerObserveFunction(
           return { success: false, error: "Codex session project or cwd mismatch" };
         }
         if (isCodexCapture && existingSession?.codexNativeCapture) {
+          if (livePrompt && !isExcludedCodexAmbientSession(existingSession)) {
+            const active = advanceSessionActivity(existingSession, payload.timestamp, true);
+            if (active !== existingSession) await kv.set(KV.sessions, payload.sessionId, { ...active, updatedAt: new Date().toISOString() });
+          }
           return { success: true, skipped: true, nativeSourceManaged: true, sessionId: payload.sessionId };
         }
         const normalCodexPrompt = isCodexCapture && payload.hookType === "prompt_submit"
@@ -309,7 +313,8 @@ export function registerObserveFunction(
           recordDedupSkip();
           if (existingSession && captureUpdates.length) {
             await kv.update(KV.sessions, payload.sessionId, [
-              ...captureUpdates, { type: "set", path: "updatedAt", value: new Date().toISOString() },
+              ...captureUpdates, { type: "set", path: "lastActivityAt", value: sessionActivityAt(existingSession) },
+              { type: "set", path: "updatedAt", value: new Date().toISOString() },
             ]);
             await auditReactivation();
           }
@@ -398,6 +403,7 @@ export function registerObserveFunction(
 
         const session = existingSession;
         if (session) {
+          const activitySession = backfillPrompt ? session : advanceSessionActivity(session, payload.timestamp, Boolean(livePrompt) || (!isCodexCapture && raw.toolName !== "assistant_response"));
           const updates: Array<{ type: "set" | "remove"; path: string; value?: unknown }> = [
             { type: "set", path: "updatedAt", value: new Date().toISOString() },
             {
@@ -406,7 +412,8 @@ export function registerObserveFunction(
               value: (session.observationCount || 0) + 1,
             },
           ];
-          if (session.status === "completed" || session.status === "abandoned") {
+          updates.push({ type: "set", path: "lastActivityAt", value: activitySession.lastActivityAt ?? sessionActivityAt(session) });
+          if (activitySession.status === "active" && (session.status === "completed" || session.status === "abandoned")) {
             updates.push({ type: "set", path: "status", value: "active" }, { type: "remove", path: "endedAt" });
           }
           if (isGraphExtractionEnabled()) {
@@ -449,6 +456,7 @@ export function registerObserveFunction(
             cwd: payload.cwd,
             startedAt: payload.timestamp ?? ts,
             updatedAt: ts,
+            lastActivityAt: Number.isFinite(Date.parse(payload.timestamp)) && Date.parse(payload.timestamp) <= Date.parse(ts) ? payload.timestamp : new Date(0).toISOString(),
             status: "active",
             observationCount: 1,
             ...(normalCodexPrompt ? { codexCaptureTurnId: codexTurnId } : {}),

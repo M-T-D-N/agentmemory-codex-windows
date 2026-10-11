@@ -403,7 +403,8 @@ export function loadAgentScope(): {
   const env = getMergedEnv();
   const raw = env["AGENT_ID"];
   if (!raw) return null;
-  const agentId = raw.trim().slice(0, 128);
+  const agentId = raw.trim();
+  if (agentId.length > 512 || agentId === "*") throw Error("AGENT_ID must be an exact owner of at most 512 characters");
   if (!agentId) return null;
   const mode = env["AGENTMEMORY_AGENT_SCOPE"] === "isolated"
     ? "isolated"

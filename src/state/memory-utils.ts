@@ -79,3 +79,17 @@ export function lessonToObservation(l: Lesson): CompressedObservation {
     importance: l.confidence,
   };
 }
+
+
+export function currentMemoryHeads(memories: readonly Memory[]): Memory[] {
+  const byId = new Map(memories.map(memory => [memory.id, memory]));
+  const superseded = new Set<string>();
+  for (const successor of memories) {
+    for (const id of new Set([...(successor.supersedes ?? []), ...(successor.parentId ? [successor.parentId] : [])])) {
+      const parent = byId.get(id);
+      if (parent && parent.project === successor.project && parent.agentId === successor.agentId
+        && (successor.version ?? 1) > (parent.version ?? 1)) superseded.add(id);
+    }
+  }
+  return memories.filter(memory => memory.isLatest !== false && !superseded.has(memory.id));
+}

@@ -1,11 +1,11 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, stat, writeFile, lstat, rm, open, rename } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { join, resolve, basename, dirname, sep } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { registerWorker, type IIIClient } from "iii-sdk";
 import { StateKV } from "../src/state/kv.js";
 import { IndexPersistence } from "../src/state/index-persistence.js";
@@ -21,8 +21,9 @@ import type { CompressedObservation, Session } from "../src/types.js";
 const binary = process.env.AGENTMEMORY_TEST_ENGINE;
 const expectedHash = process.env.AGENTMEMORY_TEST_ENGINE_SHA256;
 const requireDurability = process.env.AGENTMEMORY_TEST_ENGINE_DURABILITY === "required";
-const report: object[] = [];
+const report: Record<string, unknown>[] = [];
 const runs: string[] = [];
+const closedFixtures = new Set<string>();
 type Identity = { pid: number; parent: number; created: string; executable: string; command: string; listening: boolean };
 const enabled = process.platform === "win32" && !!binary && !!expectedHash;
 const ps = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -143,13 +144,23 @@ async function fixture(label: string) {
   }
   async function close() {
     try {
-      if (sdk) { await bounded(sdk.shutdown(), "SDK shutdown timed out"); sdk = undefined; }
-    } finally {
-      try { await stopEngine("fixture-cleanup"); }
-      finally {
-        await writeFile(join(root, "engine.log"), log);
-        await writeFile(join(root, "process-evidence.json"), JSON.stringify(events, null, 2));
+      try {
+        if (sdk) { await bounded(sdk.shutdown(), "SDK shutdown timed out"); sdk = undefined; }
+      } finally {
+        try { await stopEngine("fixture-cleanup"); }
+        finally {
+          await writeFile(join(root, "engine.log"), log);
+          await writeFile(join(root, "process-evidence.json"), JSON.stringify(events, null, 2));
+        }
       }
+      closedFixtures.add(root);
+    } catch (error) {
+      for (const entry of report.filter(entry => entry.root === root)) {
+        entry.passed = false;
+        entry.recovered = false;
+        entry.teardownFailed = true;
+      }
+      throw error;
     }
   }
   return { root, connect, restart, close, events, get sdk(): IIIClient {
@@ -186,7 +197,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       await writer.save({ requireSuccess: true });
       for (const shard of old!.shards) expect(await resumed.get(shard.scope, shard.key)).toBeNull();
       expect((await writer.load()).bm25?.search("searchable")[0]?.obsId).toBe("new");
-      report.push({ case: f.label, passed: true });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true });
     } finally { writer?.stop(); await f.close(); }
   }, 90_000);
 
@@ -220,7 +231,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       expect(await resumed.get(abandonedScope, "data")).toBeNull();
       expect((await writer.load()).bm25?.search("historical")[0]?.obsId).toBe("historical");
 
-      report.push({ case: f.label, passed: true });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true });
     } finally { writer?.stop(); await f.close(); }
   }, 90_000);
   it("durably completes concurrent large managed writes on one worker connection", async () => {
@@ -243,7 +254,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
         expect(row?.revision).toBe(4);
         expect(row?.payload === payload).toBe(true);
       }
-      report.push({ case: f.label, passed: true });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true });
     } finally { await f.close(); }
   }, 90_000);
 
@@ -291,15 +302,64 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       const measurements = { engineSha256: expectedHash, scopeBytes: diskBytes, rows: 80, seedMs, writeMs,
         medianMs: (sorted[4] + sorted[5]) / 2, maxMs: Math.max(...writeMs), run: f.root };
       f.events.push({ phase: "durable-write-performance", ...measurements });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true, measurements });
       if (process.env.AGENTMEMORY_ENGINE_PERFORMANCE_REPORT) {
         await writeFile(process.env.AGENTMEMORY_ENGINE_PERFORMANCE_REPORT, JSON.stringify(measurements, null, 2));
       }
     } finally { await f.close(); }
   }, 90_000);
   afterAll(async () => {
-    if (process.env.AGENTMEMORY_ENGINE_TEST_REPORT) await writeFile(process.env.AGENTMEMORY_ENGINE_TEST_REPORT,
-      JSON.stringify({ engineVersion: "0.22.1", engineSha256: expectedHash, nodeVersion: process.version,
-        passedCases: report.length, cases: report, runs }, null, 2));
+    const reportPath = process.env.AGENTMEMORY_ENGINE_TEST_REPORT;
+    // Interrupted runs, absent durable results, failed cases and failed teardown
+    // retain their synthetic stores. Process exit alone does not prove success.
+    if (!reportPath) return;
+    const target = join(await realpath(dirname(resolve(reportPath))), basename(reportPath));
+    const pathKey = (path: string) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+    const targetKey = pathKey(target);
+    if (runs.some(root => targetKey === pathKey(root) || targetKey.startsWith(pathKey(root) + sep))) {
+      throw Error("Recovery result must be outside fixture directories");
+    }
+    const cleanup: { root: string; status: string }[] = [];
+    const successful = report.filter(entry => entry.passed === true || entry.recovered === true);
+    const save = async () => {
+      const temporary = target + "." + randomUUID() + ".tmp";
+      try {
+        const file = await open(temporary, "wx");
+        try {
+          await file.writeFile(JSON.stringify({
+            engineVersion: "0.22.1", engineSha256: expectedHash, nodeVersion: process.version,
+            passedCases: successful.length, cases: report, runs, cleanup,
+          }, null, 2));
+          await file.sync();
+        } finally { await file.close(); }
+        await rename(temporary, target);
+      } finally { await rm(temporary, { force: true }); }
+    };
+    // Persist the existing result before reclaiming any task-created state.
+    await save();
+    for (const root of runs) {
+      if (!closedFixtures.has(root) || !successful.some(entry => entry.root === root)) {
+        cleanup.push({ root, status: "retained_failed_or_incomplete" });
+        continue;
+      }
+      const entry = { root, status: "pending" };
+      cleanup.push(entry);
+      await save();
+      try {
+        const info = await lstat(root);
+        if (!info.isDirectory() || info.isSymbolicLink() ||
+            !basename(root).startsWith("agentmemory-engine-recovery-") ||
+            await realpath(root) !== resolve(root)) throw Error("Fixture identity changed");
+        await rm(root, { recursive: true });
+        entry.status = "removed";
+        await save();
+      } catch (error) {
+        entry.status = "cleanup_failed";
+        await save();
+        throw error;
+      }
+    }
+    await save();
   });
   it.each(["intent", "node", "completion", "intent-removal"])("recovers graph assignments after %s commit and physical engine exit", async boundary => {
     const f = await fixture("graph-" + boundary);
@@ -329,7 +389,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       expect(await resumed.get(KV.graphObservationResults("s"), "o")).toMatchObject({ id: "o", outcome: "extracted" });
       expect(await resumeGraphWritePlan(resumed)).toEqual({ recovered: false, writes: 0 });
       expect(await resumed.list(KV.observations("s"))).toHaveLength(1);
-      report.push({ case: f.label, passed: true });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true });
     } finally { await f.close(); }
   }, 90_000);
   it.each(["graph-delete", "archive-delete"])("recovers exact deletion after %s and physical engine exit", async boundary => {
@@ -352,7 +412,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       expect(await resumed.get(KV.memories, "retained")).toEqual({ id: "retained", content: "independent synthetic memory" });
       expect(await resumed.get(KV.graphSnapshot, "current")).toMatchObject({ stats: { totalNodes: 0, totalEdges: 0 } });
       expect(await resumeGraphWritePlan(resumed)).toEqual({ recovered: false, writes: 0 });
-      report.push({ case: f.label, passed: true });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true });
     } finally { await f.close(); }
   }, 90_000);
   it("reads byte-bounded native pages and rejects an oversized row without a full list", async () => {
@@ -371,7 +431,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       await kv.set("oversized-page", "row", "x".repeat(1_048_576));
       await expect(kv.listPage("oversized-page")).rejects.toThrow();
       expect(await kv.get("synthetic-pages", "actual-a")).toEqual(value);
-      report.push({ case: f.label, passed: true, firstPageBytes: Buffer.byteLength(JSON.stringify(first)) });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true, firstPageBytes: Buffer.byteLength(JSON.stringify(first)) });
     } finally { await f.close(); }
   }, 90_000);
 
@@ -423,7 +483,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       } while (true);
       expect(pages).toBeGreaterThan(1);
       expect(ids).toEqual(Array.from({ length: 8 }, (_, index) => "timeline-" + index));
-      report.push({ case: f.label, passed: true, pages });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true, pages });
     } finally { await f.close(); }
   }, 90_000);
   it.each(["observation", "checkpoint"])("recaptures native messages after %s commit and physical engine exit", async boundary => {
@@ -459,7 +519,7 @@ describe.skipIf(!enabled)("physical iii-engine write-boundary recovery", () => {
       expect(new Set(rows.map(row => row.id)).size).toBe(2);
       for (const row of existing) expect(rows.find(after => after.id === row.id)).toEqual(row);
       expect(await resumed.get<Session>(KV.sessions, "s")).toMatchObject({ observationCount: 2, codexNativeCapture: { status: "caught_up" } });
-      report.push({ case: f.label, passed: true });
+      report.push({ root: f.root, events: f.events, case: f.label, passed: true });
     } finally { await f.close(); }
   }, 90_000);
 });

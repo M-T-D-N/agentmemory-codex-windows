@@ -1,7 +1,7 @@
 import type { CompressedObservation, Memory, Session } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
-import { memoryToObservation } from "../state/memory-utils.js";
+import { currentMemoryHeads, memoryToObservation } from "../state/memory-utils.js";
 import { readArchiveVisibility } from "./archive.js";
 import { isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation, observationSourceKind } from "./observation-visibility.js";
 
@@ -19,24 +19,24 @@ export interface SearchCandidateSelection {
 }
 
 export function createSearchCandidateSelection(kv: StateKV, scope: { project?: string; cwd?: string; agentId?: string; sourceKind?: "user" | "assistant" }): SearchCandidateSelection & { resolve: NonNullable<SearchCandidateSelection["resolve"]> } {
-  let metadata: Promise<{ sessions: Map<string, Session>; memories: Map<string, Memory>; archived: Awaited<ReturnType<typeof readArchiveVisibility>> }> | undefined;
+  let metadata: Promise<{ sessions: Map<string, Session>; memories: Map<string, Memory>; heads: Set<string>; archived: Awaited<ReturnType<typeof readArchiveVisibility>> }> | undefined;
   const cache = new Map<string, Promise<ResolvedSearchCandidate | null>>();
   const readMetadata = () => metadata ??= Promise.all([kv.list<Session>(KV.sessions), kv.list<Memory>(KV.memories), readArchiveVisibility(kv)])
-    .then(([sessions, memories, archived]) => ({ sessions: new Map(sessions.map(row => [row.id, row])), memories: new Map(memories.map(row => [row.id, row])), archived }));
+    .then(([sessions, memories, archived]) => ({ sessions: new Map(sessions.map(row => [row.id, row])), memories: new Map(memories.map(row => [row.id, row])), heads: new Set(currentMemoryHeads(memories).map(row => row.id)), archived }));
   const resolve = (candidate: SearchCandidate, indexedSession?: (obsId: string) => string | undefined) => {
     const key = JSON.stringify([candidate.obsId, candidate.sessionId, candidate.sourceSessionIds]);
     let result = cache.get(key);
     if (!result) {
       result = (async () => {
-        const { sessions, memories, archived } = await readMetadata();
+        const { sessions, memories, heads, archived } = await readMetadata();
         const memory = memories.get(candidate.obsId);
         if (memory) {
-          if (scope.sourceKind) return null;
+          if (scope.sourceKind || !heads.has(memory.id)) return null;
           if (archived({ kind: "memory", id: memory.id })) return null;
           const sessionId = memory.sessionIds?.[0] ?? "memory";
           const session = sessions.get(sessionId);
           const observation = sanitizeCodexAmbientObservation(memoryToObservation(memory));
-          if (memory.isLatest === false || !observation || isExcludedCodexAmbientSession(session) ||
+          if (!observation || isExcludedCodexAmbientSession(session) ||
               (scope.project && (memory.project ?? session?.project) !== scope.project) ||
               (scope.cwd && session?.cwd !== scope.cwd) || (scope.agentId && memory.agentId !== scope.agentId)) return null;
           return { observation, session, project: memory.project ?? session?.project };

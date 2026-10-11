@@ -13,7 +13,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> `0.1.0-preview.15` です。
+> `0.1.0-preview.16` です。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -62,6 +62,16 @@ index の更新には明示的な snapshot rebuild を使用します。
 各 node・edge にゼロ起点の `sourceIndexes` を指定するか、共有出典として
 `sharedSources: true` を明示します。空 observation の復元は既存の REST forget
 endpoint で正確な ID・version・graph cursor を保護して行います。
+
+## preview.16 の変更
+
+memory の置換、slot 更新、import、削除で project と agent の所有境界を保護し、
+archive と処理中 import の可視性を最新件数の制限より前に適用します。session の
+要約は正規データの件数と原文 digest が一致する場合だけ表示します。長時間 session
+の警告は最終活動時刻を基準にします。E2E は送信前に書き込みの意図を記録し、
+server の実際の完了を確認してから cleanup します。body 中断、transport failure、
+JSON parse failure を区別します。導入 backup と build scratch の回収も改善しました。
+最終 package の検証結果と未実施の範囲は release notes に記録します。
 
 ## preview.15 の変更
 
@@ -120,7 +130,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.15` | 公開リポジトリ版とソース tag |
+| 公開ダウンストリーム版 | `0.1.0-preview.16` | 公開リポジトリ版とソース tag |
 | AgentMemory 互換版 | `0.9.30` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.22.1` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -137,7 +147,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、ダウンストリーム修正済み iii engine `0.22.1` Windows 実行ファイル
 
-preview.15 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
+preview.16 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
 npm 12 はリモート TGZ を既定で拒否します。インストールコマンドの
 `--allow-remote=root` は指定したランチャーをその呼び出しで許可し、
@@ -149,14 +159,14 @@ Windows PowerShell で次を実行します。出力ディレクトリは事前�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.15 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.16 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
   -OutputDirectory D:\staging\agentmemory-codex `
   -IiiEnginePath D:\inputs\iii-0.22.1.exe `
   -ScratchDirectory D:\staging\agentmemory-build-temp `
-  -ReleaseRevision r189
+  -ReleaseRevision r198
 ```
 
 通常のビルドは、native 入力の hash、固定 lockfile、skill の整合性、typecheck、

@@ -1,3 +1,4 @@
+import { currentMemoryHeads } from "../state/memory-utils.js";
 import type { IIIClient } from "iii-sdk";
 import type { Memory } from "../types.js";
 import { KV, generateId } from "../state/schema.js";
@@ -132,7 +133,7 @@ export function registerWorkingMemoryFunctions(
       const archivalLines: string[] = [];
 
       const memories = await kv.list<Memory>(KV.memories);
-      const active = memories
+      const active = currentMemoryHeads(memories)
         .filter((m) => m.isLatest !== false && !archived({ kind: "memory", id: m.id }))
         .sort((a, b) => {
           const strengthDiff = b.strength - a.strength;

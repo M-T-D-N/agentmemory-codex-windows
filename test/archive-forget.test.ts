@@ -14,7 +14,7 @@ async function fixture() {
   const sdk = mockSdk({ looseTrigger: true });
   registerRememberFunction(sdk as never, kv as never); registerArchiveFunctions(sdk as never, kv as never);
   await kv.set(KV.sessions, "s", { id: "s", project: "p", agentId: "test", observationCount: 1, startedAt: "2026-01-01T00:00:00Z" });
-  await kv.set(KV.observations("s"), "o", { id: "o", sessionId: "s", title: "original", narrative: "original evidence", timestamp: "2026-01-01T00:00:00Z" });
+  await kv.set(KV.observations("s"), "o", { id: "o", sessionId: "s", title: "original", narrative: "original evidence", type: "other", facts: [], concepts: [], files: [], importance: 5, timestamp: "2026-01-01T00:00:00Z" });
   await kv.set(KV.memories, "m", { id: "m", project: "p", title: "decision", content: "original evidence", sessionIds: ["s"], isLatest: true });
   const call = (id: string, data: object) => sdk.trigger(id, data) as Promise<any>;
   const archive = async (target: object) => {

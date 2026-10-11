@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 const windows = process.platform === 'win32';
 const builder = fileURLToPath(new URL('../Build-WindowsCodex.ps1', import.meta.url));
 const quote = value => "'" + value.replaceAll("'", "''") + "'";
@@ -30,7 +31,7 @@ async function fixture() {
   env.PATH = bin + path.delimiter + env.PATH;
   env.PSMODULEPATH = path.join(env.SYSTEMROOT, 'System32/WindowsPowerShell/v1.0/Modules');
   env.AM_VALIDATION_TRACE = path.join(root, 'trace.txt');
-  return { root, source, script, scratch, env };
+  return { root, source, bin, script, scratch, env };
 }
 function run(f, args, env = f.env, explicitScratch = true) {
   const scratchArg = explicitScratch ? `-ScratchDirectory ${quote(f.scratch)}` : '';
@@ -127,6 +128,119 @@ test('release mode still rejects dirty source before producing output', { skip:!
   const f=await fixture();
   try { const out=path.join(f.root,'release');const r=run(f,`-OutputDirectory ${quote(out)} -IiiEnginePath ${quote(process.execPath)}`);assert.notEqual(r.status,0);assert.match(r.stderr,/clean source checkout/);await assert.rejects(readdir(out),{code:'ENOENT'}); }
   finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+// Synthetic package commands exercise diagnostic materialization and lifecycle;
+// they do not qualify the real AgentMemory build, engine, installer or service.
+async function diagnosticFixture(callback) {
+  const f = await fixture();
+  const packaging = path.dirname(f.script);
+  const digest = text => createHash('sha256').update(text).digest('hex');
+  const engine = path.join(f.root, 'synthetic-engine.bin');
+  const patch = 'synthetic engine patch\n', license = 'synthetic engine license';
+  await writeFile(engine, 'synthetic engine bytes');
+  await writeFile(path.join(f.source, 'upstream-source.json'), JSON.stringify({ tag:'synthetic', commit:'b'.repeat(40), tree:'c'.repeat(40), npm_artifact:{sha256:'d'.repeat(64)} }));
+  for (const directory of ['node_modules', 'dist', 'source-cache']) {
+    await mkdir(path.join(f.source, directory));
+    await writeFile(path.join(f.source, directory, 'caller.txt'), 'source-owned');
+  }
+  for (const directory of ['config', 'patches', 'licenses', 'powershell', 'hooks', 'node', 'launcher', 'tests']) {
+    await mkdir(path.join(packaging, directory), { recursive: true });
+  }
+  await writeFile(path.join(packaging, 'patches/state.patch'), patch);
+  await writeFile(path.join(packaging, 'config/third-party-inputs.json'), JSON.stringify({ iii_engine: {
+    state_durability:'file-flush-v1', patch:'patches/state.patch', source_commit:'b'.repeat(40),
+    patch_sha256:digest(patch), build_profile:'release', sha256:digest('synthetic engine bytes'),
+    license_sha256:digest(license), version:'synthetic-engine',
+  } }));
+  for (const name of ['iii-LICENSE_ELv2', 'iii-NOTICE', 'iii-PATENTS', 'THIRD-PARTY-NOTICES.md']) {
+    await writeFile(path.join(packaging, 'licenses', name), license);
+  }
+  for (const name of ['LICENSE', 'NOTICE']) await writeFile(path.join(f.source, name), 'synthetic license');
+  for (const name of ['iii-config.yaml', 'hook-spec.json', 'mcp-launcher-environment.json']) {
+    await writeFile(path.join(packaging, 'config', name), '{}');
+  }
+  for (const name of ['codex-turn.mjs', 'codex-visibility.mjs', 'codex-project.mjs', 'codex-recall-evidence.mjs']) {
+    await writeFile(path.join(packaging, 'hooks', name), '// synthetic hook\n');
+  }
+  for (const name of ['Install-WindowsCodex.ps1', 'Initialize-WindowsCodex.ps1', 'Adopt-WindowsCodex.ps1']) {
+    await writeFile(path.join(packaging, name), '# synthetic installer; never invoked\n');
+  }
+  await writeFile(path.join(packaging, 'powershell/fixture.ps1'), '# synthetic package script\n');
+  await writeFile(path.join(packaging, 'node/agentmemory-worker.mjs'), '// synthetic worker; never invoked\n');
+  await writeFile(path.join(packaging, 'launcher/AgentMemoryHiddenLauncher.cs'), 'class Fixture { static void Main() {} }');
+  await writeFile(path.join(packaging, 'tests/release-smoke.mjs'), `import { existsSync } from 'node:fs'; import assert from 'node:assert/strict'; import path from 'node:path'; assert.ok(existsSync(path.join(process.argv[2], 'dist/index.mjs')));`);
+  const deployStub=path.join(f.bin,'synthetic-deploy.mjs');
+  await writeFile(deployStub, `import { mkdir, writeFile } from 'node:fs/promises'; import path from 'node:path'; const root=process.argv[2]; await mkdir(path.join(root,'node_modules'),{recursive:true}); await mkdir(path.join(root,'dist'),{recursive:true}); await writeFile(path.join(root,'dist/index.mjs'),'synthetic module');`);
+  f.env.AM_VALIDATION_NODE=process.execPath;
+  f.env.AM_VALIDATION_DEPLOY=deployStub;
+  await writeFile(path.join(f.bin, 'pnpm.cmd'), '@echo off\r\nif "%~1"=="--version" goto version\r\necho %*>>"%AM_VALIDATION_TRACE%"\r\necho SCRATCH=%TEMP%>>"%AM_VALIDATION_TRACE%"\r\nif not exist "%NODE_COMPILE_CACHE%" mkdir "%NODE_COMPILE_CACHE%"\r\necho synthetic fixture>"%TEMP%\\fixture.tmp"\r\nif "%AM_VALIDATION_FAIL%"=="1" if "%~2"=="typecheck" exit /b 9\r\nset AM_DEPLOY_SELECTED=\r\n:args\r\nif "%~1"=="" goto done\r\nif "%~1"=="deploy" set AM_DEPLOY_SELECTED=1\r\nset "AM_DEPLOY_TARGET=%~1"\r\nshift\r\ngoto args\r\n:done\r\nif not defined AM_DEPLOY_SELECTED exit /b 0\r\n"%AM_VALIDATION_NODE%" "%AM_VALIDATION_DEPLOY%" "%AM_DEPLOY_TARGET%"\r\nexit /b %errorlevel%\r\n:version\r\necho synthetic-pnpm\r\nexit /b 0\r\n');
+  const qualification = path.join(f.root, 'qualification.ps1');
+  await writeFile(qualification, 'param($ReleaseRoot,$ScratchRoot)\n$ErrorActionPreference="Stop"\n' + callback);
+  return { ...f, engine, qualification };
+}
+const diagnosticArgs = f => `-DiagnosticOnly -SkipTests -IiiEnginePath ${quote(f.engine)} -QualificationScript ${quote(f.qualification)}`;
+
+test('diagnostic qualification sees one scratch-owned package and success removes the whole unit', { skip:!windows }, async () => {
+  const f = await diagnosticFixture(`if([IO.Path]::GetDirectoryName($ReleaseRoot) -ne $ScratchRoot){throw 'Release escaped unit'}
+if($env:TEMP -ne $ScratchRoot){throw 'Temporary environment escaped unit'}
+if(-not(Test-Path (Join-Path $ReleaseRoot 'release-manifest.json'))){throw 'Manifest missing'}
+[void][IO.Directory]::CreateDirectory((Join-Path $ScratchRoot 'synthetic-install/runtime'))
+[IO.File]::WriteAllText((Join-Path $ScratchRoot 'synthetic-install/runtime/consumer.txt'),'synchronously consumed')
+`);
+  try {
+    const r = run(f, diagnosticArgs(f));
+    assert.equal(r.status,0,r.stderr+'\n'+r.stdout+'\n'+await readFile(f.env.AM_VALIDATION_TRACE,'utf8'));
+    const result=JSON.parse(r.stdout);
+    assert.equal(result.diagnostic_only,true); assert.equal(result.source_dirty,true);
+    assert.equal(result.qualification_completed,true); assert.equal(result.release_retained,false);
+    assert.deepEqual(await readdir(f.scratch),['caller.txt']);
+    const trace=await readFile(f.env.AM_VALIDATION_TRACE,'utf8');
+    assert.equal((trace.match(/deploy --prod/g)||[]).length,1);
+    assert.equal(new Set([...trace.matchAll(/^SCRATCH=(.+)\r?$/gm)].map(match=>match[1].trim())).size,1);
+    assert.equal(await readFile(path.join(f.scratch,'caller.txt'),'utf8'),'caller-owned');
+    assert.ok((await readFile(path.join(f.source,'package.json'),'utf8')).includes('0.9.30'));
+    for (const directory of ['node_modules', 'dist', 'source-cache']) {
+      assert.equal(await readFile(path.join(f.source,directory,'caller.txt'),'utf8'),'source-owned');
+    }
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+for (const callback of ["throw 'qualification fixture failure'", 'exit 23']) {
+  test(`diagnostic preserves its package after qualification failure: ${callback}`, { skip:!windows }, async () => {
+    const f=await diagnosticFixture(callback);
+    try {
+      const r=run(f,diagnosticArgs(f));
+      assert.notEqual(r.status,0); assert.doesNotMatch(r.stdout,/"success"\s*:\s*true/);
+      assert.match(r.stderr,/retained after failure/);
+      const units=(await readdir(f.scratch)).filter(name=>name.startsWith('agentmemory-build-'));
+      assert.equal(units.length,1);
+      const release=path.join(f.scratch,units[0],'agentmemory-codex-windows-0.1.0-preview.15');
+      assert.equal(JSON.parse(await readFile(path.join(release,'release-manifest.json'),'utf8')).release_revision,'r32');
+      assert.ok(r.stderr.includes(path.dirname(release)));
+    } finally { await rm(f.root,{recursive:true,force:true}); }
+  });
+}
+
+test('diagnostic build failure preserves the unit without calling qualification', { skip:!windows }, async () => {
+  const f=await diagnosticFixture("throw 'qualification must not run'");
+  try {
+    const r=run(f,diagnosticArgs(f),{...f.env,AM_VALIDATION_FAIL:'1'});
+    assert.notEqual(r.status,0); assert.match(r.stderr,/typecheck failed/);
+    assert.doesNotMatch(r.stderr,/qualification must not run/);
+    assert.doesNotMatch(r.stdout,/"success"\s*:\s*true/);
+    assert.equal((await readdir(f.scratch)).filter(name=>name.startsWith('agentmemory-build-')).length,1);
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test('diagnostic does not accept a persistent output directory', { skip:!windows }, async () => {
+  const f=await fixture();
+  try {
+    const out=path.join(f.root,'forbidden-output');
+    const r=run(f,`-DiagnosticOnly -QualificationScript ${quote(f.script)} -IiiEnginePath ${quote(process.execPath)} -OutputDirectory ${quote(out)}`);
+    assert.notEqual(r.status,0); await assert.rejects(readdir(out),{code:'ENOENT'});
+    await assert.rejects(readFile(f.env.AM_VALIDATION_TRACE),{code:'ENOENT'});
+  } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
 for (const host of ['powershell.exe', 'pwsh.exe']) {

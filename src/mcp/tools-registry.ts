@@ -1246,15 +1246,17 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   {
     name: "memory_slot_list",
     description:
-      "List effective editable memory slots, sorted by label, returning {success,slots} with content, size limits, pinning and scope. Project-scope slots shadow global slots with the same label; unpinned and empty slots are included. Use to inspect current context before creating or editing a slot, or memory_slot_get when you know its label. Slots are fixed-size context units rather than relevance-ranked memories.",
-    inputSchema: { type: "object", properties: {} },
+      "List effective editable memory slots, sorted by label, returning {success,slots} with content, size limits, pinning and scope. Exact project slots shadow global slots with the same label; omit project to manage only global and ownerless legacy slots; unpinned and empty slots are included. Use to inspect current context before creating or editing a slot, or memory_slot_get when you know its label. Slots are fixed-size context units rather than relevance-ranked memories.",
+    inputSchema: { type: "object", properties: { project: { type: "string", description: "Exact project; omit for global and ownerless legacy slots only" }, scope: { type: "string", enum: ["project", "global"], description: "Optional scope; global ignores project" } } },
   },
   {
     name: "memory_slot_get",
-    description: "Read the effective slot named by label, returning {success,slot,scope} with its content and metadata. A project-scope slot takes precedence over a global slot with the same label. Invalid labels or missing slots return success:false. Use memory_slot_list to discover labels, and memory_slot_replace or memory_slot_append to edit the retrieved context unit.",
+    description: "Read the effective slot named by label, returning {success,slot,scope} with its content and metadata. Pass the exact project to select owned project slots; omitted project selects only global or ownerless legacy slots. A matching project-scope slot takes precedence over a global slot with the same label. Invalid labels or missing slots return success:false. Use memory_slot_list to discover labels, and memory_slot_replace or memory_slot_append to edit the retrieved context unit.",
     inputSchema: {
       type: "object",
       properties: {
+        project: { type: "string", minLength: 1, maxLength: 512, description: "Exact project (not *). Required for project-scope creation; omit on management reads for ownerless legacy and global slots only." },
+        scope: { type: "string", enum: ["project", "global"], description: "Optional scope; global ignores project" },
         label: { type: "string", description: "Slot label (e.g. 'persona', 'pending_items')" },
       },
       required: ["label"],
@@ -1262,16 +1264,17 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_slot_create",
-    description: "Persist a new size-limited context slot, returning {success,slot}. label is lowercase, starts with a letter, uses letters/digits/underscores and is at most 64 characters. sizeLimit is an integer from 1 to 20000; content must fit. Rejects duplicate labels within the selected scope; a project slot can shadow a global one. Pinned slots participate in context injection. Use memory_slot_replace for existing content; creation records an audit entry.",
+    description: "Persist a new size-limited context slot, returning {success,slot}. label is lowercase, starts with a letter, uses letters/digits/underscores and is at most 64 characters. sizeLimit is an integer from 1 to 20000; content must fit. Rejects duplicate labels within the selected scope; a project slot can shadow a global one. New project slots require an exact project; global scope ignores project. Pinned project slots are injected only for that exact project; ownerless legacy slots remain available through unscoped management only. Use memory_slot_replace for existing content; creation records an audit entry.",
     inputSchema: {
       type: "object",
       properties: {
+        project: { type: "string", minLength: 1, maxLength: 512, description: "Exact project (not *). Required for project-scope creation; omit on management reads for ownerless legacy and global slots only." },
+        scope: { type: "string", enum: ["project", "global"], description: "Optional scope; global ignores project" },
         label: { type: "string", description: "Slot label — lowercase, starts with letter, [a-z0-9_]" },
         content: { type: "string", description: "Initial content (default empty)" },
         sizeLimit: { type: "number", description: "Max chars (default 2000, hard cap 20000)" },
         description: { type: "string", description: "What this slot is for" },
         pinned: { type: "string", description: "'false' to exclude from context injection; default true" },
-        scope: { type: "string", description: "'project' (default) or 'global' (shared across projects)" },
       },
       required: ["label"],
     },
@@ -1279,10 +1282,12 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   {
     name: "memory_slot_append",
     description:
-      "Append text to an existing effective slot, inserting a newline when needed, and record an audit entry. Returns the updated slot and size, or success:false for a missing/read-only slot or sizeLimit overflow. Overflow leaves the content unchanged; use memory_slot_replace to compact it first. Project slots shadow global slots with the same label. Repeated calls append again; use memory_slot_create when the label does not exist.",
+      "Append text to an existing effective slot, inserting a newline when needed, and record an audit entry. Returns the updated slot and size, or success:false for a missing/read-only slot or sizeLimit overflow. Overflow leaves the content unchanged; use memory_slot_replace to compact it first. Exact project selects owned slots; omitted project manages only global or ownerless legacy slots. Project slots shadow global slots with the same label. Repeated calls append again; use memory_slot_create when the label does not exist.",
     inputSchema: {
       type: "object",
       properties: {
+        project: { type: "string", minLength: 1, maxLength: 512, description: "Exact project (not *). Required for project-scope creation; omit on management reads for ownerless legacy and global slots only." },
+        scope: { type: "string", enum: ["project", "global"], description: "Optional scope; global ignores project" },
         label: { type: "string", description: "Slot label" },
         text: { type: "string", description: "Text to append" },
       },
@@ -1291,10 +1296,12 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_slot_replace",
-    description: "Replace the complete content of an existing effective slot, preserving its metadata and size limit. Empty content clears the slot. Returns {success,slot,size}; missing/read-only slots or oversized content fail without replacement. Project slots take precedence over global slots with the same label. Records an audit entry. Use memory_slot_append to add text or memory_slot_create for a new label.",
+    description: "Replace the complete content of an existing effective slot, preserving its metadata and size limit. Empty content clears the slot. Returns {success,slot,size}; missing/read-only slots or oversized content fail without replacement. Exact project selects owned slots; omitted project manages only global or ownerless legacy slots. Project slots take precedence over global slots with the same label. Records an audit entry. Use memory_slot_append to add text or memory_slot_create for a new label.",
     inputSchema: {
       type: "object",
       properties: {
+        project: { type: "string", minLength: 1, maxLength: 512, description: "Exact project (not *). Required for project-scope creation; omit on management reads for ownerless legacy and global slots only." },
+        scope: { type: "string", enum: ["project", "global"], description: "Optional scope; global ignores project" },
         label: { type: "string", description: "Slot label" },
         content: { type: "string", description: "New full content" },
       },
@@ -1303,10 +1310,12 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
   {
     name: "memory_slot_delete",
-    description: "Delete the effective slot and record an audit entry, returning {success:true}. Missing or read-only slots fail; seeded default slots are deletable when writable. With duplicate labels, deletes the project slot first, revealing the global slot on later reads. This removes the context unit rather than clearing its content; use memory_slot_replace with empty content to retain it.",
+    description: "Delete the effective slot and record an audit entry, returning {success:true}. Missing or read-only slots fail; seeded default slots are deletable when writable. With an exact project, deletes its matching slot first, revealing the global slot on later reads. This removes the context unit rather than clearing its content; use memory_slot_replace with empty content to retain it.",
     inputSchema: {
       type: "object",
       properties: {
+        project: { type: "string", minLength: 1, maxLength: 512, description: "Exact project (not *). Required for project-scope creation; omit on management reads for ownerless legacy and global slots only." },
+        scope: { type: "string", enum: ["project", "global"], description: "Optional scope; global ignores project" },
         label: { type: "string", description: "Slot label" },
       },
       required: ["label"],

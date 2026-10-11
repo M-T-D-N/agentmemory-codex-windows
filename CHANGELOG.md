@@ -4,6 +4,26 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+## 0.1.0-preview.16
+
+- Keep replacement candidates within the exact project and agent owner, preserving long agent IDs without prefix truncation. Persist a successor before retiring its predecessor; share memory mutation locks and select effective heads consistently after a partial acknowledgement. Forget checks all supplied owners before deletion and does not revive superseded ancestors.
+- Validate import row identities, owner consistency and known source references before audit, lifecycle metadata or data writes. Reject source budgeting that would alter an archived original; keep existing lifecycle decision digests and historical missing-reference compatibility.
+- Apply project, agent, archive and pending-import visibility before recent/latest limits and session handoffs. Show session summaries only when their existing revision, source digest and count still match visible canonical observations; partial forget clears unproved session aggregates without activating LLM summaries.
+
+- Diagnose stale active sessions using their last recorded activity, falling back to the start time when no activity timestamp exists. Use the same configurable idle threshold as the upstream session sweep, so recently active long-running sessions do not produce abandoned-session warnings. Diagnostics remain read-only.
+
+
+- Persist slot updates and memory replacement successors under exact owner locks, recover durable partial intents, and preserve foreign ownership on collisions.
+- Journal E2E write intents before dispatch, retain ownership through capture/import acknowledgement loss, and require observed server completion before cleanup. Missing completion proof remains UNKNOWN/HOLD; temporary absence is not success.
+- Track headers, body interruption/connection failure, parse failure and final request duration separately. Preserve HTTP status without inferring server completion.
+- Close only successful invocation-owned build scratch and completed installation backup review units. Preserve failed/recovery evidence and canonical data.
+
+### Qualification and limits
+
+The final preview.16 candidate is undergoing fixed-source, actual-package isolated installation/upgrade/restart/recovery and bounded failure/load qualification. Final results, skips and exact binary identity belong in its release notes. Earlier preview.15 installation results retain their original r186 scope. The previous r194 30-second incident remains unattributed; current passes do not resolve its cause. Local Qwen is not started by this qualification. Unsigned binaries, power-loss and other-host limits remain.
+
 ## 0.1.0-preview.15
 
 - Settle intentionally skipped native-managed and excluded captures without creating false dead letters. Preserve real failures and retry limits.

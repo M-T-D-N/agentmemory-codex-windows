@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appendFile, copyFile, mkdir, mkdtemp, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { discoverCodexSession } from "../src/functions/codex-source-discovery.js";
@@ -26,7 +27,7 @@ describe("source discovery without a prior Codex hook", () => {
   } };
   const writeSource = async (rows: unknown[]) => writeFile(join(root, candidate.sourcePath), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   beforeEach(async () => {
-    await mkdir(resolve(".tmp"), { recursive: true }); parent = await realpath(resolve(".tmp"));
+    await mkdir(tmpdir(), { recursive: true }); parent = await realpath(tmpdir());
     root = await mkdtemp(join(parent, "codex-discovery-")); cwd = join(root, "project");
     await mkdir(cwd); await mkdir(join(root, "sessions"));
     candidate = { status: "candidate", sessionId: "new-task", sourcePath: "sessions/rollout-new.jsonl", cwd: canonicalCodexCwd(cwd),
@@ -44,7 +45,7 @@ describe("source discovery without a prior Codex hook", () => {
   it("creates one canonical session at the source timestamp and lets native capture ingest each message once", async () => {
     expect(await discoverCodexSession(kv as never, candidate, managed())).toEqual({ status: "created", project: "registered-project" });
     const session = await kv.get<Session>(KV.sessions, candidate.sessionId);
-    expect(session).toMatchObject({ project: "registered-project", agentId: "codex-main", startedAt: stamp, observationCount: 0,
+    expect(session).toMatchObject({ project: "registered-project", agentId: "codex-main", startedAt: stamp, lastActivityAt: user.timestamp, observationCount: 0,
       semanticGraphCompletionVersion: 1, codexNativeCapture: { status: "pending", cursor: { byteOffset: 0, ordinal: 0 } } });
     expect(projectForCwd).toHaveBeenCalledWith(cwd);
     expect(await discoverCodexSession(kv as never, candidate, managed())).toEqual({ status: "managed" });

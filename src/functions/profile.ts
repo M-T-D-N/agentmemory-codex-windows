@@ -9,7 +9,7 @@ import type {
   ProjectProfile,
 } from "../types.js";
 import { KV } from "../state/schema.js";
-import { memoryToObservation } from "../state/memory-utils.js";
+import { currentMemoryHeads, memoryToObservation } from "../state/memory-utils.js";
 import { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { logger } from "../logger.js";
@@ -197,7 +197,7 @@ export async function readProfileSources(kv: StateKV, project: string, agentId?:
   const selectedSessions = [...sessions].sort((a,b) => String(b.startedAt ?? "").localeCompare(String(a.startedAt ?? "")) || a.id.localeCompare(b.id)).slice(0,20);
   const observations = await Promise.all(selectedSessions.map(async session => (await kv.list<CompressedObservation>(KV.observations(session.id))).map(sanitizeCodexAmbientObservation).filter((o): o is CompressedObservation => o !== null && !archived({ kind: "observation", id: o.id, sessionId: session.id }) && (agentId === undefined || o.agentId === agentId))));
   const sessionMap = new Map(sessions.map(session => [session.id, session]));
-  const memories = (await kv.list<Memory>(KV.memories)).filter(memory => memory.isLatest !== false
+  const memories = currentMemoryHeads(await kv.list<Memory>(KV.memories)).filter(memory => memory.isLatest !== false
     && (memory.project ?? sessionMap.get(memory.sessionIds?.[0])?.project) === project
     && (agentId === undefined || memory.agentId === agentId)
     && !archived({ kind: "memory", id: memory.id })

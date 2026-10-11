@@ -8,7 +8,7 @@ import type {
   Lesson,
 } from "../types.js";
 import { KV } from "../state/schema.js";
-import { memoryToObservation } from "../state/memory-utils.js";
+import { currentMemoryHeads, memoryToObservation } from "../state/memory-utils.js";
 import { createSearchCandidateSelection, type SearchCandidateSelection } from "./search-candidates.js";
 import { readArchiveVisibility } from "./archive.js";
 import { StateKV } from "../state/kv.js";
@@ -185,8 +185,7 @@ export function registerSmartSearchFunction(
         const projectScoped: Array<(typeof expanded)[number] & { project?: string }> = [];
         for (const entry of expanded) {
           const session = await kv
-            .get<Session>(KV.sessions, entry.sessionId)
-            .catch(() => null);
+            .get<Session>(KV.sessions, entry.sessionId);
           if (isExcludedCodexAmbientSession(session)) continue;
           const observation = sanitizeCodexAmbientObservation(
             entry.observation,
@@ -420,10 +419,11 @@ async function findObservations(
   );
   let unresolved: number[] = [];
   const fillMemories = async () => {
+    const heads = new Map(currentMemoryHeads(await kv.list<Memory>(KV.memories)).map(memory => [memory.id, memory]));
     for (const index of unresolved) {
       if (observations[index]) continue;
-      const memory = await kv.get<Memory>(KV.memories, items[index].obsId);
-      if (memory && memory.isLatest !== false) observations[index] = memoryToObservation(memory);
+      const memory = heads.get(items[index].obsId);
+      if (memory) observations[index] = memoryToObservation(memory);
     }
     return observations;
   };
@@ -432,8 +432,7 @@ async function findObservations(
     const { obsId, sessionId } = items[index];
     if (sessionId) {
       observations[index] = await kv
-        .get<CompressedObservation>(KV.observations(sessionId), obsId)
-        .catch(() => null);
+        .get<CompressedObservation>(KV.observations(sessionId), obsId);
     }
     if (!observations[index] && !sessionId && !exactExpansion) {
       const indexedSessionId = getIndexedSessionId?.(obsId) ?? await lookupObservationSession(kv, obsId);
@@ -465,8 +464,7 @@ async function findObservations(
 
     for (const session of sessions) {
       const sessionObservations = await kv
-        .list<CompressedObservation>(KV.observations(session.id))
-        .catch(() => []);
+        .list<CompressedObservation>(KV.observations(session.id));
       for (const observation of sessionObservations) {
         const indexes = indexesByObservationId.get(observation.id);
         if (!indexes) continue;

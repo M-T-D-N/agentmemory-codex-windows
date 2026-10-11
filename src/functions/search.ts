@@ -9,7 +9,7 @@ import { StateKV } from '../state/kv.js'
 import { SearchIndex } from '../state/search-index.js'
 import { VectorIndex } from '../state/vector-index.js'
 import type { EmbeddingProvider } from '../types.js'
-import { memoryToObservation } from '../state/memory-utils.js'
+import { currentMemoryHeads, memoryToObservation } from '../state/memory-utils.js'
 import { recordAccessBatch } from './access-tracker.js'
 import { logger } from "../logger.js";
 import { createSearchCandidateSelection, type SearchCandidateSelection } from "./search-candidates.js";
@@ -375,7 +375,7 @@ export function rebuildKeywordIndex(kv: StateKV, vectorBackfillSince?: string | 
       };
       try {
         const memories = await kv.list<Memory>(KV.memories);
-        for (const memory of memories) if (memory.isLatest !== false && memory.title && memory.content) {
+        for (const memory of currentMemoryHeads(memories)) if (memory.title && memory.content) {
           candidate.add(memoryToObservation(memory)); consider(memory, "memory");
         }
         const sessions = await kv.list<Session>(KV.sessions);
@@ -500,8 +500,7 @@ export async function indexRecords(
   }
 
   let count = 0
-  for (const memory of memories) {
-    if (memory.isLatest === false) continue
+  for (const memory of currentMemoryHeads(memories)) {
     if (!memory.title || !memory.content) continue
     idx.add(memoryToObservation(memory))
     await enqueue({

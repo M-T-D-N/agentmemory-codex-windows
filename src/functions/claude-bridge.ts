@@ -1,7 +1,7 @@
 import { readCurrentProfile } from "./profile.js";
 import { resolveReadAgentId } from "./read-agent-scope.js";
 import { sanitizeCodexAmbientObservation } from "./observation-visibility.js";
-import { memoryToObservation } from "../state/memory-utils.js";
+import { currentMemoryHeads, memoryToObservation } from "../state/memory-utils.js";
 import type { IIIClient } from "iii-sdk";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -57,7 +57,7 @@ function serializeToMemoryMd(
   lines.push("## Key Memories");
   lines.push("");
 
-  const sorted = [...memories]
+  const sorted = currentMemoryHeads(memories)
     .filter((m) => m.isLatest)
     .sort((a, b) => b.strength - a.strength);
 
@@ -127,7 +127,7 @@ export function registerClaudeBridgeFunction(
         const agentId = resolveReadAgentId(undefined, "mem::claude-bridge-sync");
         const memories = await kv.list<Memory>(KV.memories);
         const hidden = await readArchiveVisibility(kv);
-        const latestMemories = memories.flatMap((m) => {
+        const latestMemories = currentMemoryHeads(memories).flatMap((m) => {
           if (!m.isLatest || hidden({ kind: "memory", id: m.id }) || (agentId !== undefined && m.agentId !== agentId)) return [];
           const visible = sanitizeCodexAmbientObservation(memoryToObservation(m));
           return visible ? [{ ...m, content: visible.narrative }] : [];

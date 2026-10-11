@@ -425,7 +425,13 @@ describe("Diagnostics Functions", () => {
       expect(check!.fixable).toBe(true);
     });
 
-    it("active session older than 24h produces warn", async () => {
+    it('activity regression: metadata update does not hide stale actual activity',async()=>{
+      const session=makeSession({status:'active',updatedAt:new Date().toISOString(),lastActivityAt:new Date(Date.now()-30*60*60*1000).toISOString()});
+      await kv.set(KV.sessions,session.id,session);
+      const result=await sdk.trigger('mem::diagnose',{categories:['sessions']});
+      expect(result.checks.find((c:DiagnosticCheck)=>c.name==='abandoned-session:'+session.id)).toMatchObject({status:'warn'});
+    });
+    it("active session with no activity timestamp falls back to its start time", async () => {
       const session = makeSession({
         status: "active",
         startedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
@@ -442,6 +448,49 @@ describe("Diagnostics Functions", () => {
       expect(check).toBeDefined();
       expect(check!.status).toBe("warn");
       expect(check!.fixable).toBe(false);
+    });
+
+    it.each([
+      ["recently active", "active", 1, false],
+      ["idle", "active", 25, true],
+      ["completed", "completed", 25, false],
+      ["abandoned", "abandoned", 25, false],
+    ] as const)("classifies an old %s session by last activity", async (_, status, idleHours, warned) => {
+      const session = makeSession({
+        status,
+        startedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        updatedAt: new Date(Date.now() - idleHours * 60 * 60 * 1000).toISOString(),
+      });
+      await kv.set(KV.sessions, session.id, session);
+      const result = (await sdk.trigger("mem::diagnose", { categories: ["sessions"] })) as { checks: DiagnosticCheck[] };
+      const check = result.checks.find((c) => c.name === `abandoned-session:${session.id}`);
+      expect(Boolean(check)).toBe(warned);
+      if (warned) expect(check!.message).toContain("no recorded activity");
+      expect(await kv.get(KV.sessions, session.id)).toEqual(session);
+    });
+
+    it("uses the sweep's configured threshold and excludes its exact boundary", async () => {
+      vi.stubEnv("AGENTMEMORY_SESSION_SWEEP_STALE_HOURS", "48");
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      try {
+        for (const idleHours of [25, 48, 49]) {
+          const session = makeSession({
+            id: `idle-${idleHours}`,
+            status: "active",
+            startedAt: new Date(now - 60 * 24 * 60 * 60 * 1000).toISOString(),
+            updatedAt: new Date(now - idleHours * 60 * 60 * 1000).toISOString(),
+          });
+          await kv.set(KV.sessions, session.id, session);
+        }
+        const result = (await sdk.trigger("mem::diagnose", { categories: ["sessions"] })) as { checks: DiagnosticCheck[] };
+        const warnings = result.checks.filter((c) => c.name.startsWith("abandoned-session:"));
+        expect(warnings.map((c) => c.name)).toEqual(["abandoned-session:idle-49"]);
+        expect(warnings[0].message).toContain("48 hours");
+      } finally {
+        clock.mockRestore();
+        vi.unstubAllEnvs();
+      }
     });
 
     it("memory with stale isLatest produces fail (fixable)", async () => {

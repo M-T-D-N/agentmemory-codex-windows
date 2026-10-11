@@ -74,6 +74,7 @@ export interface Session {
   cwd: string;
   startedAt: string;
   updatedAt?: string;
+  lastActivityAt?: string;
   endedAt?: string;
   status: "active" | "completed" | "abandoned";
   observationCount: number;
@@ -441,6 +442,7 @@ export interface MemorySlot {
   pinned: boolean;
   readOnly: boolean;
   scope: "project" | "global";
+  project?: string;
   createdAt: string;
   updatedAt: string;
 }

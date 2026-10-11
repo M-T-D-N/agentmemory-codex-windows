@@ -1,12 +1,15 @@
 [CmdletBinding(DefaultParameterSetName = 'Release')]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Release')][string]$OutputDirectory,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Release')][string]$IiiEnginePath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Release')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Diagnostic')][string]$IiiEnginePath,
     [string]$NodePath = '',
     [string]$ScratchDirectory = '',
     [string]$ReleaseRevision = 'r32',
     [switch]$SkipTests,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Validation')][switch]$ValidationOnly
+    [Parameter(Mandatory = $true, ParameterSetName = 'Validation')][switch]$ValidationOnly,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Diagnostic')][switch]$DiagnosticOnly,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Diagnostic')][string]$QualificationScript
 )
 
 Set-StrictMode -Version Latest
@@ -66,8 +69,18 @@ $sourceCommit = (& git -C $sourceRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[a-f0-9]{40}$') { throw 'Build requires a Git source commit.' }
 $sourceDirty = @(& git -C $sourceRoot status --porcelain --untracked-files=normal)
 if ($LASTEXITCODE -ne 0) { throw 'Could not inspect source checkout.' }
-if (-not $ValidationOnly -and $sourceDirty.Count -gt 0) { throw 'Build requires a clean source checkout.' }
-if (-not $ValidationOnly) {
+if (-not $ValidationOnly -and -not $DiagnosticOnly -and $sourceDirty.Count -gt 0) { throw 'Build requires a clean source checkout.' }
+if ($DiagnosticOnly) {
+    $QualificationScript = [IO.Path]::GetFullPath($QualificationScript)
+    if (-not (Test-Path -LiteralPath $QualificationScript -PathType Leaf) -or [IO.Path]::GetExtension($QualificationScript) -ine '.ps1') {
+        throw 'Diagnostic qualification requires an existing PowerShell script.'
+    }
+    Assert-PhysicalDirectoryPath -Path ([IO.Path]::GetDirectoryName($QualificationScript))
+    if ((Get-Item -Force -LiteralPath $QualificationScript).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Diagnostic qualification script is a reparse point.'
+    }
+}
+if (-not $ValidationOnly -and -not $DiagnosticOnly) {
     $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
     if (Test-Path -LiteralPath $outputRoot) {
         throw "OutputDirectory already exists: $outputRoot"
@@ -122,7 +135,7 @@ if ($downstreamVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$')
 if ($ReleaseRevision -notmatch '^r[1-9][0-9]*$') {
     throw 'ReleaseRevision must use the form r1, r2, and so on.'
 }
-if (-not $ValidationOnly) {
+if (-not $ValidationOnly -and -not $DiagnosticOnly) {
     $runtimeRelease = "$version-codex-$ReleaseRevision"
     $releaseRoot = Join-Path $outputRoot "agentmemory-codex-windows-$downstreamVersion"
     $payloadRoot = Join-Path $releaseRoot 'payload'
@@ -146,6 +159,13 @@ foreach ($name in @('NODE_OPTIONS', 'CI', 'TEMP', 'TMP', 'TMPDIR', 'NODE_COMPILE
     $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 try {
+if ($DiagnosticOnly) {
+    $runtimeRelease = "$version-codex-$ReleaseRevision"
+    $releaseRoot = Join-Path $scratchRoot "agentmemory-codex-windows-$downstreamVersion"
+    $payloadRoot = Join-Path $releaseRoot 'payload'
+    $runtimePackageRoot = Join-Path $payloadRoot "runtime\$runtimeRelease\agentmemory"
+    [void][IO.Directory]::CreateDirectory($releaseRoot)
+}
 $priorNodeOptions = $priorEnvironment['NODE_OPTIONS']
 foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) { [Environment]::SetEnvironmentVariable($name, $scratchRoot, 'Process') }
 $env:NODE_COMPILE_CACHE = Join-Path $scratchRoot 'node-compile-cache'
@@ -177,7 +197,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "test suite failed with exit code $LASTEXITCODE" }
         & $node --test (Join-Path $PSScriptRoot 'tests\codex-turn.test.mjs') (Join-Path $PSScriptRoot 'tests\recall-first.test.mjs')
         if ($LASTEXITCODE -ne 0) { throw "Codex adapter tests failed with exit code $LASTEXITCODE" }
-        & $node --test (Join-Path $PSScriptRoot 'tests\npm-distribution.test.mjs') (Join-Path $PSScriptRoot 'tests\build-validation.test.mjs')
+        & $node --test (Join-Path $PSScriptRoot 'tests\npm-distribution.test.mjs') (Join-Path $PSScriptRoot 'tests\build-validation.test.mjs') (Join-Path $PSScriptRoot 'tests\backup-closeout.test.mjs') (Join-Path $PSScriptRoot 'tests\installer-backup-retention.test.mjs') (Join-Path $PSScriptRoot 'tests\qualification-state.test.mjs')
         if ($LASTEXITCODE -ne 0) { throw "npm distribution tests failed with exit code $LASTEXITCODE" }
     }
 
@@ -247,8 +267,10 @@ $cscCandidates = @(
 $csc = $cscCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 if (-not $csc) { throw 'A .NET Framework C# compiler was not found.' }
 $launcherOut = Join-Path $binOut 'agentmemory-hidden-launcher.exe'
-& $csc /nologo /target:winexe /optimize+ /r:System.Security.dll /r:System.Runtime.Serialization.dll "/out:$launcherOut" (Join-Path $PSScriptRoot 'launcher\AgentMemoryHiddenLauncher.cs')
+$compilerOut = if ($DiagnosticOnly) { Join-Path $scratchRoot 'launcher.exe' } else { $launcherOut }
+& $csc /nologo /target:winexe /optimize+ /r:System.Security.dll /r:System.Runtime.Serialization.dll "/out:$compilerOut" (Join-Path $PSScriptRoot 'launcher\AgentMemoryHiddenLauncher.cs')
 if ($LASTEXITCODE -ne 0) { throw "launcher compilation failed with exit code $LASTEXITCODE" }
+if ($DiagnosticOnly) { Copy-Item -LiteralPath $compilerOut -Destination $launcherOut }
 
 $unexpectedBackups = @(Get-ChildItem -Recurse -File -LiteralPath $payloadRoot | Where-Object { $_.Name -match '\.bak(?:-|$)' })
 if ($unexpectedBackups.Count -gt 0) {
@@ -325,6 +347,15 @@ $result = [ordered]@{
     payload_files = $files.Count
     version = $downstreamVersion
     agentmemory_version = $version
+}
+if ($DiagnosticOnly) {
+    # The trusted callback owns synchronous qualification and must finish its
+    # exact child consumers before returning. It may write only in this unit.
+    $LASTEXITCODE = 0
+    & $QualificationScript -ReleaseRoot $releaseRoot -ScratchRoot $scratchRoot | Out-Host
+    if (-not $?) { throw 'Diagnostic qualification failed.' }
+    if ($LASTEXITCODE -ne 0) { throw "Diagnostic qualification failed with exit code $LASTEXITCODE" }
+    $result = [ordered]@{ success = $true; diagnostic_only = $true; source_commit = $sourceCommit; source_dirty = ($sourceDirty.Count -gt 0); tests_skipped = [bool]$SkipTests; qualification_completed = $true; release_retained = $false }
 }
 }
 $buildSucceeded = $true

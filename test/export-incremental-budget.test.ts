@@ -57,6 +57,7 @@ function seedSessions(kv: ReturnType<typeof countingKV>, count: number, obsBytes
     kv.seed(KV.observations(id), `obs_${i}`, {
       id: `obs_${i}`,
       sessionId: id,
+      timestamp: "2026-09-01T00:00:00Z", type: "other", title: "Budget fixture", facts: [], concepts: [], files: [], importance: 5,
       narrative: "n".repeat(obsBytes),
     });
   }

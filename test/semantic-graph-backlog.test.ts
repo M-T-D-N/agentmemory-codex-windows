@@ -58,6 +58,19 @@ function session(id: string, project: string, extra: Partial<Session> = {}): Ses
 afterEach(() => vi.useRealTimers());
 
 describe("semantic graph backlog", () => {
+  it('lifecycle regression: backlog waits for source deletion under the canonical session lock',async()=>{
+    let current:Session|null=session('a','A',{semanticGraphStatus:'deferred'});
+    const handlers=new Map<string,(payload:unknown)=>Promise<any>>();const extract=vi.fn(async()=>({success:true}));handlers.set('mem::graph-extract',extract);
+    const sdk={registerFunction:(id:string,fn:(payload:unknown)=>Promise<any>)=>handlers.set(id,fn),trigger:async({function_id,payload}:{function_id:string;payload:unknown})=>handlers.get(function_id)!(payload)};
+    const update=vi.fn(async()=>{});
+    const kv={list:async(scope:string)=>scope==='mem:sessions'?(current?[current]:[]):observations('a',1),get:async(scope:string,id:string)=>scope==='mem:sessions'?current:(current?{id}:null),update};
+    registerSemanticGraphBacklogFunction(sdk as never,kv as never);
+    let release!:()=>void;const held=withKeyedLock('obs:a',()=>new Promise<void>(resolve=>{release=resolve;}));
+    const step=handlers.get('mem::graph-backlog-step')!({});
+    await new Promise(resolve=>setImmediate(resolve));
+    current=null;release();await held;
+    expect(await step).toMatchObject({skipped:'source_deleted'});expect(update).not.toHaveBeenCalled();expect(extract).not.toHaveBeenCalled();
+  });
   it("identifies missing automatic startup separately from an offline Qwen endpoint", async () => {
     const trigger = vi.fn();
     const scheduler = startSemanticGraphBacklogScheduler({ trigger } as never, {

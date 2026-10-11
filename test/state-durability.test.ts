@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { changeArchiveState, archiveTargetAddress } from "../src/functions/archive.js";
 import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
 import { applyGraphWritePlan, prepareGraphWritePlan, resumeGraphWritePlan } from "../src/state/graph-write-plan.js";
@@ -7,11 +8,12 @@ function fixture() {
   let rows = new Map<string, unknown>();
   const disk: Map<string, unknown>[] = [];
   let failFlush = 0;
+  let loseArchiveAck = false;
   const address = (scope: string, key: string) => JSON.stringify([scope, key]);
   const trigger = vi.fn(async ({ function_id: id, payload: p }: any) => {
     if (id === "state::list_groups") return { groups: [] };
     if (id === "state::get") return rows.get(address(p.scope, p.key));
-    if (id === "state::set") { rows.set(address(p.scope, p.key), structuredClone(p.value)); return p.value; }
+    if (id === "state::set") { rows.set(address(p.scope, p.key), structuredClone(p.value)); if (p.scope === KV.archiveStates && loseArchiveAck) { loseArchiveAck = false; throw Error("archive SET ACK lost"); } return p.value; }
     if (id === "state::delete") { rows.delete(address(p.scope, p.key)); return null; }
     if (id === "state::flush") {
       if (failFlush && disk.length + 1 === failFlush) throw Error("disk unavailable");
@@ -23,6 +25,7 @@ function fixture() {
   return {
     kv: () => new StateKV({ trigger } as never, { requireDurability: true }),
     trigger, disk, address,
+    loseArchiveAck() { loseArchiveAck = true; },
     failAt(n: number) { failFlush = n; },
     crash() { rows = structuredClone(disk.at(-1) ?? new Map()); failFlush = 0; },
     get(scope: string, key: string) { return rows.get(address(scope, key)); },
@@ -108,5 +111,29 @@ describe("StateModule durability boundaries", () => {
     const kv = new StateKV({ trigger: vi.fn().mockResolvedValue(response) } as never, { requireDurability: true });
     await expect(kv.flush()).rejects.toThrow("did not confirm");
     expect(kv.requiresWriteRecovery()).toBe(true);
+  });
+});
+
+
+describe("archive SET acknowledgement durability", () => {
+  it.each(["archive", "restore"] as const)("holds an uncertain %s retry until a fresh worker confirms disk", async action => {
+    const f = fixture(), kv = f.kv();
+    await kv.set(KV.memories, "mem_target", { id: "mem_target", project: "p", title: "target", content: "same original", concepts: [], files: [], sessionIds: [] });
+    const target = { kind: "memory" as const, id: "mem_target" };
+    const apply = async (worker: StateKV, action: "archive" | "restore") => {
+      const preview = await changeArchiveState(worker, { target, project: "p", action });
+      return { target, project: "p", action, dryRun: false, expectedRevision: preview.expectedRevision!, expectedDigest: preview.expectedDigest!, reason: "ACK test" };
+    };
+    if (action === "restore") await changeArchiveState(kv, await apply(kv, "archive"));
+    const request = await apply(kv, action), flushes = f.disk.length;
+    f.loseArchiveAck();
+    await expect(changeArchiveState(kv, request)).rejects.toThrow("ACK lost");
+    expect(kv.requiresWriteRecovery()).toBe(true);
+    await expect(changeArchiveState(kv, request)).rejects.toThrow(/uncertain/);
+    const restarted = f.kv();
+    expect(await changeArchiveState(restarted, request)).toMatchObject({ success: true, changed: 0 });
+    expect(f.disk.length).toBeGreaterThan(flushes);
+    f.crash();
+    expect(await f.kv().get(KV.archiveStates, archiveTargetAddress(target).key)).toMatchObject({ state: action === "archive" ? "archived" : "restored" });
   });
 });

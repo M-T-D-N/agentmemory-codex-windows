@@ -1,9 +1,12 @@
+import { currentMemoryHeads } from "../state/memory-utils.js";
 import { LESSON_SOURCE_IDS_MAX, normalizeLessonSourceIds } from "../functions/lessons.js";
 import type { IIIClient } from "iii-sdk";
 import type { HttpRequest as ApiRequest } from "@iii-dev/helpers/http";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { parseSessionQuery, selectSessionPage } from "../functions/session-query.js";
+import { readVisibleSessionSummary } from "../functions/summary-visibility.js";
+import { resolveReadAgentId } from "../functions/read-agent-scope.js";
 import { readArchiveVisibility } from "../functions/archive.js";
 import { archiveOperationError, parseArchiveToolInput } from "../functions/archive-tools.js";
 import type {
@@ -1515,7 +1518,7 @@ export function registerMcpEndpoints(
           }
 
           case "memory_slot_list": {
-            const result = await sdk.trigger({ function_id: "mem::slot-list", payload: {} });
+            const result = await sdk.trigger({ function_id: "mem::slot-list", payload: { project: args.project, scope: args.scope } });
             return {
               status_code: 200,
               body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
@@ -1525,7 +1528,7 @@ export function registerMcpEndpoints(
           case "memory_slot_get": {
             const label = asNonEmptyString(args.label);
             if (!label) return { status_code: 400, body: { error: "label required" } };
-            const result = await sdk.trigger({ function_id: "mem::slot-get", payload: { label } });
+            const result = await sdk.trigger({ function_id: "mem::slot-get", payload: { label, project: args.project, scope: args.scope } });
             return {
               status_code: 200,
               body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
@@ -1535,7 +1538,7 @@ export function registerMcpEndpoints(
           case "memory_slot_create": {
             const label = asNonEmptyString(args.label);
             if (!label) return { status_code: 400, body: { error: "label required" } };
-            const payload: Record<string, unknown> = { label };
+            const payload: Record<string, unknown> = { label, project: args.project };
             if (typeof args.content === "string") payload.content = args.content;
             if (typeof args.description === "string") payload.description = args.description;
             if (typeof args.sizeLimit === "number") payload.sizeLimit = args.sizeLimit;
@@ -1543,7 +1546,7 @@ export function registerMcpEndpoints(
             // depending on their JSON schema wrapper.
             if (args.pinned === false || args.pinned === "false") payload.pinned = false;
             else if (args.pinned === true || args.pinned === "true") payload.pinned = true;
-            if (args.scope === "global" || args.scope === "project") payload.scope = args.scope;
+            if (args.scope !== undefined) payload.scope = args.scope;
             const result = await sdk.trigger({ function_id: "mem::slot-create", payload });
             return {
               status_code: 200,
@@ -1555,7 +1558,7 @@ export function registerMcpEndpoints(
             const label = asNonEmptyString(args.label);
             const text = typeof args.text === "string" ? args.text : null;
             if (!label || !text) return { status_code: 400, body: { error: "label and text required" } };
-            const result = await sdk.trigger({ function_id: "mem::slot-append", payload: { label, text } });
+            const result = await sdk.trigger({ function_id: "mem::slot-append", payload: { label, text, project: args.project, scope: args.scope } });
             return {
               status_code: 200,
               body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
@@ -1567,7 +1570,7 @@ export function registerMcpEndpoints(
             if (!label || typeof args.content !== "string") {
               return { status_code: 400, body: { error: "label and content (string) required" } };
             }
-            const result = await sdk.trigger({ function_id: "mem::slot-replace", payload: { label, content: args.content } });
+            const result = await sdk.trigger({ function_id: "mem::slot-replace", payload: { label, content: args.content, project: args.project, scope: args.scope } });
             return {
               status_code: 200,
               body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
@@ -1577,7 +1580,7 @@ export function registerMcpEndpoints(
           case "memory_slot_delete": {
             const label = asNonEmptyString(args.label);
             if (!label) return { status_code: 400, body: { error: "label required" } };
-            const result = await sdk.trigger({ function_id: "mem::slot-delete", payload: { label } });
+            const result = await sdk.trigger({ function_id: "mem::slot-delete", payload: { label, project: args.project, scope: args.scope } });
             return {
               status_code: 200,
               body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
@@ -1728,7 +1731,7 @@ export function registerMcpEndpoints(
   });
 
   sdk.registerFunction("mcp::resources::read", 
-    async (req: ApiRequest<{ uri: string }>): Promise<McpResponse> => {
+    async (req: ApiRequest<{ uri: string; agentId?: string }>): Promise<McpResponse> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
 
@@ -1806,28 +1809,22 @@ export function registerMcpEndpoints(
               body: { error: "Invalid percent-encoding in URI" },
             };
           }
-          const summaries = await kv.list<SessionSummary>(KV.summaries);
-          const visibleSessionIds = new Set(
-            (await kv.list<Session>(KV.sessions))
-              .filter(
-                (session) =>
-                  session.project === projectName &&
-                  !isExcludedCodexAmbientSession(session),
-              )
-              .map((session) => session.id),
-          );
-          const filtered = summaries
-            .filter(
-              (summary) =>
-                summary.project === projectName &&
-                visibleSessionIds.has(summary.sessionId),
-            )
-            .sort(
-              (a, b) =>
-                new Date(b.createdAt).getTime() -
-                new Date(a.createdAt).getTime(),
-            )
-            .slice(0, 5);
+          const archived = await readArchiveVisibility(kv);
+          const agentId = resolveReadAgentId(req.body?.agentId, "project/recent");
+          const sessions = selectSessionPage(await kv.list<Session>(KV.sessions), {
+            project: projectName, agentId: req.body?.agentId, limit: Number.MAX_SAFE_INTEGER,
+            offset: 0, order: "desc",
+          }, archived).sessions;
+          const byId = new Map(sessions.map(session => [session.id, session]));
+          const candidates = (await kv.list<SessionSummary>(KV.summaries))
+            .filter(summary => byId.has(summary.sessionId))
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          const filtered: SessionSummary[] = [];
+          for (const candidate of candidates) {
+            const summary = await readVisibleSessionSummary(kv, byId.get(candidate.sessionId)!, archived, agentId, candidate);
+            if (summary) filtered.push(summary);
+            if (filtered.length === 5) break;
+          }
           return {
             status_code: 200,
             body: {
@@ -1843,9 +1840,12 @@ export function registerMcpEndpoints(
         }
 
         if (uri === "agentmemory://memories/latest") {
+          const archived = await readArchiveVisibility(kv);
+          const agentId = resolveReadAgentId(req.body?.agentId, "memories/latest");
           const memories = await kv.list<Memory>(KV.memories);
-          const latest = memories
-            .filter((m) => m.isLatest)
+          const latest = currentMemoryHeads(memories)
+            .filter((m) => m.isLatest && !archived({ kind: "memory", id: m.id })
+              && (agentId === undefined || m.agentId === agentId))
             .sort(
               (a, b) =>
                 new Date(b.updatedAt).getTime() -
@@ -2119,11 +2119,17 @@ export function registerMcpEndpoints(
               };
             }
             const session = await kv.get<Session>(KV.sessions, sessionId);
-            if (!session || isExcludedCodexAmbientSession(session)) {
+            const parsedAgent = parseAgentId(promptArgs.agentId);
+            if (!parsedAgent.valid) return parsedAgent.response;
+            const agentId = resolveReadAgentId(parsedAgent.value, "session_handoff");
+            const archived = await readArchiveVisibility(kv);
+            const visible = session && selectSessionPage([session], {
+              project: "*", sessionId, agentId: parsedAgent.value, limit: 1, offset: 0, order: "desc",
+            }, archived).sessions[0];
+            if (!visible) {
               return { status_code: 404, body: { error: "session not found" } };
             }
-            const summaries = await kv.list<SessionSummary>(KV.summaries);
-            const summary = summaries.find((s) => s.sessionId === sessionId);
+            const summary = await readVisibleSessionSummary(kv, visible, archived, agentId);
             return {
               status_code: 200,
               body: {
@@ -2132,7 +2138,7 @@ export function registerMcpEndpoints(
                     role: "user",
                     content: {
                       type: "text",
-                      text: `## Session Handoff\n\n### Session\n${JSON.stringify(session, null, 2)}\n\n### Summary\n${JSON.stringify(summary || "No summary available", null, 2)}`,
+                      text: `## Session Handoff\n\n### Session\n${JSON.stringify(visible, null, 2)}\n\n### Summary\n${JSON.stringify(summary || "No summary available", null, 2)}`,
                     },
                   },
                 ],

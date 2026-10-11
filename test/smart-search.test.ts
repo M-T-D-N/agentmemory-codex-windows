@@ -5,6 +5,7 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerSmartSearchFunction } from "../src/functions/smart-search.js";
+import { registerApiTriggers } from "../src/triggers/api.js";
 import { registerMcpEndpoints } from "../src/mcp/server.js";
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { SearchIndex } from "../src/state/search-index.js";
@@ -534,5 +535,39 @@ describe("Smart Search Function", () => {
       expect(result.results.length).toBe(2);
       expect(result.lessons).toEqual([]);
     });
+  });
+});
+
+
+describe('expansion read fault regressions', () => {
+  it.each(['observation', 'session', 'list'])('propagates %s storage faults', async (fault) => {
+    const kv = mockKV(); const sdk = mockSdk();
+    await kv.set('mem:sessions', 'ses_1', {id:'ses_1', project:'P'});
+    await kv.set('mem:obs:ses_1', 'obs_1', makeObs());
+    const get = kv.get; const list = kv.list;
+    kv.get = async (scope, key) => {
+      if ((fault === 'observation' && scope === 'mem:obs:ses_1') || (fault === 'session' && scope === 'mem:sessions')) throw Error('read storage fault');
+      return get(scope, key);
+    };
+    kv.list = async (scope) => { if (fault === 'list' && scope === 'mem:obs:ses_1') throw Error('read storage fault'); return list(scope); };
+    registerSmartSearchFunction(sdk as never, kv as never, async () => []);
+    const expandIds = fault === 'list' ? ['missing1','missing2'] : [{obsId:'obs_1',sessionId:'ses_1'}];
+    await expect(sdk.trigger('mem::smart-search', {project:'P', expandIds, exactExpansion: fault !== 'list', trackAccess:false})).rejects.toThrow('read storage fault');
+  });
+});
+
+
+describe('expansion transport failure contracts', () => {
+  it('preserves REST failure and MCP error response instead of empty success', async () => {
+    const kv=mockKV(); const sdk={...mockSdk(),on:()=>{}};
+    const get=kv.get;
+    kv.get=async(scope,key)=>{if(scope==='mem:obs:ses_1') throw Error('storage read failed'); return get(scope,key);};
+    registerSmartSearchFunction(sdk as never,kv as never,async()=>[]);
+    registerApiTriggers(sdk as never,kv as never,async()=>({context:'',blocks:0,tokens:0}));
+    registerMcpEndpoints(sdk as never,kv as never);
+    await expect(sdk.trigger('api::smart-search',{headers:{},body:{project:'P',expandIds:[{obsId:'obs_1',sessionId:'ses_1'}],exactExpansion:true,trackAccess:false}})).rejects.toThrow('storage read failed');
+    await kv.set('mem:sessions','ses_1',{id:'ses_1',project:'P'});
+    const mcp=await sdk.trigger('mcp::tools::call',{headers:{},body:{name:'memory_smart_search',arguments:{project:'P',expandIds:'obs_1',trackAccess:false}}});
+    expect(mcp.status_code).toBe(500); expect(mcp.body).toEqual({error:'Internal error'});
   });
 });

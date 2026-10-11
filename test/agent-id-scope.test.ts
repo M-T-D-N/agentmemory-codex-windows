@@ -36,10 +36,12 @@ describe("loadAgentScope", () => {
     expect(loadAgentScope()).toBeNull();
   });
 
-  it("caps length at 128 chars to keep KV writes well-formed", async () => {
+  it("preserves a long owner instead of merging equal 128-character prefixes", async () => {
     process.env["AGENT_ID"] = "x".repeat(500);
     const { getAgentId } = await import("../src/config.js");
-    expect(getAgentId()!.length).toBe(128);
+    expect(getAgentId()).toBe("x".repeat(500));
+    process.env["AGENT_ID"] = "x".repeat(499) + "y";
+    expect(getAgentId()).toBe("x".repeat(499) + "y");
   });
 });
 
@@ -163,7 +165,7 @@ describe("mem::remember stamps agentId on the Memory", () => {
     expect(result.memory.agentId).toBe("architect");
   });
 
-  it("body agentId longer than 128 chars is truncated to 128", async () => {
+  it("body owners sharing a long prefix remain independent", async () => {
     const { registerRememberFunction } = await import(
       "../src/functions/remember.js"
     );
@@ -178,8 +180,10 @@ describe("mem::remember stamps agentId on the Memory", () => {
     })) as { memory: { id: string; agentId?: string } };
 
     expect(result.memory.agentId).toBeDefined();
-    expect(result.memory.agentId!.length).toBe(128);
-    expect(result.memory.agentId).toBe("x".repeat(128));
+    expect(result.memory.agentId).toBe(long);
+    const other = await sdk.trigger("mem::remember", { content: "cap length", agentId: "x".repeat(499) + "y" }) as { memory: { id: string; agentId: string } };
+    expect(other.memory.agentId).toBe("x".repeat(499) + "y");
+    expect(other.memory.id).not.toBe(result.memory.id);
   });
 
   it("whitespace-only body agentId falls back to env AGENT_ID", async () => {

@@ -1,3 +1,4 @@
+import { summarySourceDigest, SUMMARY_VISIBILITY_REVISION } from "../src/functions/summary-visibility.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("../src/logger.js", () => ({
@@ -234,7 +235,15 @@ describe("MCP Resources", () => {
       },
     ];
     for (const s of summaries) {
-      await kv.set("mem:summaries", s.sessionId, s);
+      const observations = Array.from({ length: s.observationCount }, (_, i) => ({
+        id: `${s.sessionId}-o${i}`, sessionId: s.sessionId, timestamp: s.createdAt,
+        type: "other" as const, title: `Decision ${i}`, narrative: s.narrative,
+        concepts: [], files: [], facts: [], importance: 5,
+      }));
+      for (const row of observations) await kv.set(`mem:obs:${s.sessionId}`, row.id, row);
+      await kv.set("mem:summaries", s.sessionId, { ...s,
+        visibilityRevision: SUMMARY_VISIBILITY_REVISION, sourceDigest: summarySourceDigest(observations),
+      });
     }
     for (const summary of summaries) {
       await kv.set("mem:sessions", summary.sessionId, {

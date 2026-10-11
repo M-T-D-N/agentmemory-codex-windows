@@ -18,8 +18,8 @@ import {
 } from "./slots.js";
 import { resolveReadAgentId } from "./read-agent-scope.js";
 import { readCurrentProfile } from "./profile.js";
-import { summarySourceDigest, SUMMARY_VISIBILITY_REVISION } from "./summary-visibility.js";
-import { isCodexInternalAmbientText, isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation } from "./observation-visibility.js";
+import { isCurrentSessionSummary } from "./summary-visibility.js";
+import { isExcludedCodexAmbientSession, sanitizeCodexAmbientObservation } from "./observation-visibility.js";
 import { estimateTextTokens } from "../token-estimate.js";
 import { readArchiveVisibility } from "./archive.js";
 import { ensureProjectSessionIndex, getProjectSessionIndex } from "../state/session-index.js";
@@ -61,7 +61,7 @@ export function registerContextFunction(
 
       const [pinnedSlots, profile, lessons] = await Promise.all([
         isSlotsEnabled()
-          ? listPinnedSlots(kv).catch(() => [] as MemorySlot[])
+          ? listPinnedSlots(kv, data.project === "*" ? undefined : data.project).catch(() => [] as MemorySlot[])
           : Promise.resolve([] as MemorySlot[]),
         readCurrentProfile(kv, data.project, filterAgentId),
         kv.list<Lesson>(KV.lessons).catch(() => [] as Lesson[]),
@@ -181,8 +181,7 @@ export function registerContextFunction(
       for (let i = 0; i < sessions.length; i++) {
         const summary = sessionRows[i].summary;
         const observations = obsResults[i];
-        const summaryText = summary && [summary.keyDecisions, summary.filesModified, summary.concepts].every(Array.isArray) ? [summary.title, summary.narrative, ...summary.keyDecisions, ...summary.filesModified, ...summary.concepts] : null;
-        if (summary && summaryText && summary.sessionId === sessions[i].id && summary.project === data.project && summary.visibilityRevision === SUMMARY_VISIBILITY_REVISION && summary.sourceDigest === summarySourceDigest(observations) && summary.observationCount === observations.filter(o => !!o.title).length && !archived.hasArchivedObservations(sessions[i].id) && summaryText.every(text => typeof text === "string" && !isCodexInternalAmbientText(text))) {
+        if (isCurrentSessionSummary(summary, sessions[i], observations, archived)) {
           const content = `## ${summary.title}\n${summary.narrative}\nDecisions: ${summary.keyDecisions.join("; ")}\nFiles: ${summary.filesModified.join(", ")}`;
           blocks.push({ type: "summary", content, tokens: estimateTextTokens(content), recency: new Date(summary.createdAt).getTime() });
         } else sessionsNeedingObs.push(i);

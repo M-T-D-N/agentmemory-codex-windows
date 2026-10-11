@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mockKV } from "./helpers/mocks.js";
 import type { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
@@ -41,6 +41,18 @@ async function bundle(target: ArchiveTarget = { kind: "memory", id: "m" }) {
 }
 
 describe("archive transfer through the official export/import boundary", () => {
+  it("rejects an archived original that source budgeting would truncate before pending or data writes", async () => {
+    const source = fixture(); await seed(source.kv);
+    const raw = { ...observation, source: { hookType: "prompt_submit", originalBytes: 40000, truncated: false, userPrompt: "a".repeat(40000) } };
+    await source.kv.set(KV.observations("s"), "o", raw);
+    await change(source.kv, { kind: "observation", id: "o", sessionId: "s" });
+    const data = await captureExportData(source.kv);
+    const destination = fixture();
+    const set = vi.spyOn(destination.adapter, "set"), del = vi.spyOn(destination.adapter, "delete");
+    await expect(importExportData(destination.kv, { exportData: data })).rejects.toThrow(/archive.*original|original.*archive/i);
+    expect(set).not.toHaveBeenCalled(); expect(del).not.toHaveBeenCalled(); expect(destination.backing.store.size).toBe(0);
+  });
+
   it.each<ArchiveTarget>([
     { kind: "memory", id: "m" }, { kind: "session", id: "s" }, { kind: "observation", id: "o", sessionId: "s" },
     { kind: "semantic", id: "sem" }, { kind: "procedural", id: "proc" }, { kind: "lesson", id: "lesson" },

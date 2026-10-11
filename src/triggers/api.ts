@@ -1,3 +1,4 @@
+import { currentMemoryHeads } from "../state/memory-utils.js";
 import { randomBytes } from "node:crypto";
 import { DEDUP_WINDOW_MS, getDedupSkippedCount } from "../functions/dedup.js";
 import { AUDIT_MIGRATION_STATE_KEY } from "../functions/audit.js";
@@ -45,6 +46,8 @@ import {
   sessionLifecycleLockKey,
 } from "../functions/session-lifecycle.js";
 import type { ContextReader } from "../functions/context.js";
+import { readVisibleSessionSummary } from "../functions/summary-visibility.js";
+import { resolveReadAgentId } from "../functions/read-agent-scope.js";
 import { selectSessionPage } from "../functions/session-query.js";
 import { readArchiveVisibility } from "../functions/archive.js";
 import { legacyMeshArchiveError } from "../functions/archive-transfer.js";
@@ -1599,20 +1602,8 @@ export function registerApiTriggers(
       const facets = req.query_params?.["facets"] === "true" ? sessionFacets(eligible) : undefined;
       const filtered = eligible.filter(s => !listQuery.status || s.status === listQuery.status)
         .filter(s => matchesText(listQuery.q, typeof s.summary === "string" ? s.summary : undefined, s.firstPrompt, s.cwd, s.id));
-      const selected = selectSessionPage(filtered, {
-        project, sessionId: sessionId ?? undefined, includeExcluded, limit, offset,
-        order: req.query_params?.["order"] === "asc" ? "asc" : "desc",
-        agentId: typeof req.query_params?.["agentId"] === "string" ? req.query_params["agentId"] : undefined,
-      }, archived);
-      let page = selected.sessions;
-      let nextCursor: string | null = null;
-      if (listQuery.cursor) {
-        const paged = pageByOffset(filtered, listQuery.cursor, limit);
-        page = paged.page;
-        nextCursor = paged.nextCursor;
-      } else if (selected.nextOffset !== null) {
-        nextCursor = encodeCursor({ offset: selected.nextOffset });
-      }
+      const paged = pageByOffset(filtered, listQuery.cursor, limit, offset);
+      const page = paged.page;
       // Bounded fan-out: each kv.get is a full engine invocation, so
       // Promise.all over hundreds of sessions saturates the invocation
       // pool. Batch in chunks of 10 (parallel within a chunk, sequential
@@ -1623,7 +1614,7 @@ export function registerApiTriggers(
         const chunk = page.slice(batch, batch + 10);
         const results = await Promise.all(
           chunk.map((s) =>
-            archived.hasArchivedObservations(s.id) ? Promise.resolve(null) : kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
+            readVisibleSessionSummary(kv, s, archived, resolveReadAgentId(req.query_params?.["agentId"], "api::sessions")),
           ),
         );
         summaries.push(...results);
@@ -1635,11 +1626,11 @@ export function registerApiTriggers(
         status_code: 200,
         body: {
           sessions: withSummary,
-          total: selected.total,
+          total: filtered.length,
           limit,
-          offset,
-          nextOffset: selected.nextOffset,
-          nextCursor,
+          offset: paged.offset,
+          nextOffset: paged.nextOffset,
+          nextCursor: paged.nextCursor,
           ...(facets ? { facets } : {}),
         },
       };
@@ -1678,17 +1669,7 @@ export function registerApiTriggers(
       ) {
         return { status_code: 404, body: { error: "session not found in project" } };
       }
-      const normalizedAgentId =
-        typeof req.query_params?.["agentId"] === "string"
-          ? req.query_params["agentId"].trim()
-          : undefined;
-      const wildcardAgent = normalizedAgentId === "*";
-      const explicitAgentId =
-        normalizedAgentId && !wildcardAgent ? normalizedAgentId : undefined;
-      const filterAgentId = wildcardAgent
-        ? undefined
-        : explicitAgentId ??
-          (isAgentScopeIsolated() ? getAgentId() : undefined);
+      const filterAgentId = resolveReadAgentId(req.query_params?.["agentId"], "api::observations");
       const limit = Math.max(1, Math.min(500, parseOptionalInt(req.query_params?.["limit"]) ?? 100));
       const offset = Math.max(0, parseOptionalInt(req.query_params?.["offset"]) ?? 0);
       const listQuery = parseListQuery(req.query_params);
@@ -1704,10 +1685,10 @@ export function registerApiTriggers(
         .filter(o => matchesText(listQuery.q, o.title, o.narrative, o.id, ...(o.facts ?? [])))
         .filter(o => minImportance === undefined || (o.importance ?? 0) >= minImportance)
         .sort((a, b) => {
-          const comparison = String(a.timestamp ?? "").localeCompare(String(b.timestamp ?? ""));
+          const comparison = String(a.timestamp ?? "").localeCompare(String(b.timestamp ?? "")) || a.id.localeCompare(b.id);
           return req.query_params?.["order"] === "asc" ? comparison : -comparison;
         });
-      const paged = pageByOffset(filtered, listQuery.cursor ?? encodeCursor({ offset }), limit);
+      const paged = pageByOffset(filtered, listQuery.cursor, limit, offset);
       const page = paged.page;
       return {
         status_code: 200,
@@ -1716,8 +1697,8 @@ export function registerApiTriggers(
           nextCursor: paged.nextCursor,
           total: filtered.length,
           limit,
-          offset,
-          nextOffset: offset + page.length < filtered.length ? offset + page.length : null,
+          offset: paged.offset,
+          nextOffset: paged.nextOffset,
         },
       };
     },
@@ -1735,8 +1716,7 @@ export function registerApiTriggers(
       const project = normalizeReadProject(req.query_params?.["project"]);
       if (!project) return { status_code: 400, body: { error: "project is required; use '*' only for a deliberate cross-project read" } };
       const archived = await readArchiveVisibility(kv);
-      const agent = typeof req.query_params?.["agentId"] === "string" ? req.query_params["agentId"].trim() : undefined;
-      const filterAgent = agent === "*" ? undefined : agent || (isAgentScopeIsolated() ? getAgentId() : undefined);
+      const filterAgent = resolveReadAgentId(req.query_params?.["agentId"], "api::observations-locate");
       const raw = req.query_params?.["ids"];
       const ids = (Array.isArray(raw) ? raw.join(",") : String(raw ?? ""))
         .split(",")
@@ -3178,7 +3158,7 @@ export function registerApiTriggers(
       const filterAgentId = wildcardAgent
         ? undefined
         : explicitAgentId ?? (isAgentScopeIsolated() ? getAgentId() : undefined);
-      let filtered = latest ? memories.filter((m) => m.isLatest) : memories;
+      let filtered = latest ? currentMemoryHeads(memories) : memories;
       const archived = await readArchiveVisibility(kv);
       filtered = filtered.filter(memory => !archived({ kind: "memory", id: memory.id }));
       if (project !== "*") {
@@ -3238,7 +3218,7 @@ export function registerApiTriggers(
           status_code: 200,
           body: {
             total: filtered.length,
-            latestCount: filtered.filter((m) => m.isLatest).length,
+            latestCount: currentMemoryHeads(filtered).length,
           },
         };
       }
@@ -3453,7 +3433,7 @@ export function registerApiTriggers(
     const authErr = checkAuth(req, secret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
-    const result = await sdk.trigger({ function_id: "mem::slot-list", payload: {} });
+    const result = await sdk.trigger({ function_id: "mem::slot-list", payload: { project: req.query_params?.["project"], scope: req.query_params?.["scope"] } });
     return { status_code: 200, body: result };
   });
   sdk.registerTrigger({
@@ -3468,7 +3448,7 @@ export function registerApiTriggers(
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const label = asNonEmptyString(req.query_params?.["label"]);
     if (!label) return { status_code: 400, body: { error: "label query param required" } };
-    const result = await sdk.trigger({ function_id: "mem::slot-get", payload: { label } });
+    const result = await sdk.trigger({ function_id: "mem::slot-get", payload: { label, project: req.query_params?.["project"], scope: req.query_params?.["scope"] } });
     const resp = result as { success?: boolean; error?: string };
     if (resp?.success === false) {
       return { status_code: resp.error?.includes("not found") ? 404 : 400, body: resp };
@@ -3512,7 +3492,7 @@ export function registerApiTriggers(
     if (sizeLimit !== undefined && sizeLimit > 20000) {
       return { status_code: 400, body: { error: "sizeLimit must be <= 20000" } };
     }
-    const payload: Record<string, unknown> = { label };
+    const payload: Record<string, unknown> = { label, project: body["project"] };
     if (typeof body["content"] === "string") payload["content"] = body["content"];
     if (typeof body["description"] === "string") payload["description"] = body["description"];
     if (sizeLimit !== undefined) payload["sizeLimit"] = sizeLimit;
@@ -3539,7 +3519,7 @@ export function registerApiTriggers(
     const label = asNonEmptyString(body["label"]);
     const text = typeof body["text"] === "string" ? body["text"] : null;
     if (!label || !text) return { status_code: 400, body: { error: "label and text required" } };
-    const result = await sdk.trigger({ function_id: "mem::slot-append", payload: { label, text } });
+    const result = await sdk.trigger({ function_id: "mem::slot-append", payload: { label, text, project: body["project"], scope: body["scope"] } });
     const resp = result as { success?: boolean; error?: string };
     if (resp?.success === false) {
       const notFound = resp.error?.includes("not found");
@@ -3564,7 +3544,7 @@ export function registerApiTriggers(
     if (!label || typeof content !== "string") {
       return { status_code: 400, body: { error: "label and content (string) required" } };
     }
-    const result = await sdk.trigger({ function_id: "mem::slot-replace", payload: { label, content } });
+    const result = await sdk.trigger({ function_id: "mem::slot-replace", payload: { label, content, project: body["project"], scope: body["scope"] } });
     const resp = result as { success?: boolean; error?: string };
     if (resp?.success === false) {
       const notFound = resp.error?.includes("not found");
@@ -3585,7 +3565,7 @@ export function registerApiTriggers(
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const label = asNonEmptyString(req.query_params?.["label"]);
     if (!label) return { status_code: 400, body: { error: "label query param required" } };
-    const result = await sdk.trigger({ function_id: "mem::slot-delete", payload: { label } });
+    const result = await sdk.trigger({ function_id: "mem::slot-delete", payload: { label, project: req.query_params?.["project"], scope: req.query_params?.["scope"] } });
     const resp = result as { success?: boolean; error?: string };
     if (resp?.success === false) {
       return { status_code: resp.error?.includes("not found") ? 404 : 400, body: resp };
@@ -3608,7 +3588,7 @@ export function registerApiTriggers(
     if (!sessionId) return { status_code: 400, body: { error: "sessionId required" } };
     const maxObservations = parseOptionalPositiveInt(body["maxObservations"]);
     if (maxObservations === null) return { status_code: 400, body: { error: "maxObservations must be a positive integer" } };
-    const payload: Record<string, unknown> = { sessionId };
+    const payload: Record<string, unknown> = { sessionId, project: body["project"] };
     if (maxObservations !== undefined) payload["maxObservations"] = maxObservations;
     const result = await sdk.trigger({ function_id: "mem::slot-reflect", payload });
     return { status_code: 200, body: result };

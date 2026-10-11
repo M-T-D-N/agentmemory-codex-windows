@@ -24,6 +24,7 @@ Default: detect a new or managed installation and show its proposed operation.
 --upstream-runtime-dir / --upstream-home: its runtime and .agentmemory config directories.
 --port: REST port for a new install (defaults to 3111); adoption keeps source ports.
 --managed-requirements-path: exact managed Codex requirements destination.
+--maintenance-plan: explicit reviewed backup dispositions; recycle only, never empty the bin.
 Windows x64, Node.js 24 or newer, and Windows PowerShell 5.1 are required.
 Activation needs permission to create managed Codex requirements; run as the
 same Windows user who will use Codex. No npm lifecycle scripts are run.
@@ -32,7 +33,7 @@ same Windows user who will use Codex. No npm lifecycle scripts are run.
 export function parseArgs(args) {
   const result = {};
   const flags = new Set(['fresh', 'activate-prepared', 'execute', 'help']);
-  const values = new Set(['install-root', 'workspace-root', 'project-registry', 'archive', 'managed-requirements-path', 'upstream-package-root', 'upstream-data-dir', 'upstream-runtime-dir', 'upstream-home', 'port']);
+  const values = new Set(['install-root', 'workspace-root', 'project-registry', 'archive', 'managed-requirements-path', 'maintenance-plan', 'upstream-package-root', 'upstream-data-dir', 'upstream-runtime-dir', 'upstream-home', 'port']);
   for (let i = 0; i < args.length; i++) {
     const key = args[i].replace(/^--/, '');
     if (!args[i].startsWith('--') || (!flags.has(key) && !values.has(key))) throw Error(`Unknown option: ${args[i]}`);
@@ -142,6 +143,7 @@ export async function main(args = process.argv.slice(2)) {
     const named = { ReleaseRoot: release, InstallRoot: options['install-root'], WorkspaceRoot: options['workspace-root'],
       ProjectRegistry: options['project-registry'], NodePath: process.execPath };
     if (options['managed-requirements-path']) named.ManagedRequirementsPath = options['managed-requirements-path'];
+    if (options['maintenance-plan']) named.MaintenancePlanPath = options['maintenance-plan'];
     for (const [option, parameter] of Object.entries({ 'upstream-package-root': 'UpstreamPackageRoot', 'upstream-data-dir': 'UpstreamDataDir', 'upstream-runtime-dir': 'UpstreamRuntimeDir', 'upstream-home': 'UpstreamHome', port: 'RestPort' })) {
       if (options[option]) named[parameter] = options[option];
     }

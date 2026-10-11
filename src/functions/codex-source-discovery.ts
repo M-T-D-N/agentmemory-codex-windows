@@ -6,7 +6,7 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withObservationWrite } from "../state/observation-write.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { prepareSessionStart, sessionLifecycleLockKey } from "./session-lifecycle.js";
+import { prepareSessionStart, seedSourceSessionActivity, sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { canonicalCodexCwd } from "./codex-source-identity.js";
 import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
 import { recordAudit } from "./audit.js";
@@ -132,7 +132,8 @@ export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCa
     const prepared = prepareSessionStart(null, { sessionId: candidate.sessionId, project,
       cwd: first.source.cwd, agentId: managed.agentId }, first.source.createdAt);
     if (!prepared.success) throw Error(prepared.error);
-    const session: Session = { ...prepared.session, status: candidate.archived ? "completed" : "active", updatedAt: now,
+    const activitySession = seedSourceSessionActivity(prepared.session, first.messages.filter(message => !message.legacyExcludedReason).map(message => message.timestamp), first.source.createdAt, now);
+    const session: Session = { ...activitySession, status: candidate.archived ? "completed" : "active", updatedAt: now,
       semanticGraphCompletionVersion: 1, semanticGraphStatus: "pending", codexNativeCapture: {
         version: 1, source: first.source, initializedAt: now, status: "pending", snapshotBytes: first.snapshotBytes,
         cursor: { ...first.cursor, byteOffset: 0, ordinal: 0,
