@@ -8,6 +8,8 @@ The upstream AgentMemory release history remains in the
 
 ## 0.1.0-preview.16
 
+- Exclude pnpm installation metadata from the deployed runtime, removing build-machine patch paths while retaining the applied SDK patch and production dependency checks.
+
 - Keep replacement candidates within the exact project and agent owner, preserving long agent IDs without prefix truncation. Persist a successor before retiring its predecessor; share memory mutation locks and select effective heads consistently after a partial acknowledgement. Forget checks all supplied owners before deletion and does not revive superseded ancestors.
 - Validate import row identities, owner consistency and known source references before audit, lifecycle metadata or data writes. Reject source budgeting that would alter an archived original; keep existing lifecycle decision digests and historical missing-reference compatibility.
 - Apply project, agent, archive and pending-import visibility before recent/latest limits and session handoffs. Show session summaries only when their existing revision, source digest and count still match visible canonical observations; partial forget clears unproved session aggregates without activating LLM summaries.

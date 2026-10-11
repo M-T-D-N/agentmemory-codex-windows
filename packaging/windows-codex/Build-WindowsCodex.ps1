@@ -207,9 +207,11 @@ try {
     Get-ChildItem -Recurse -Directory -Filter '.bin' -LiteralPath (Join-Path $runtimePackageRoot 'node_modules') |
         Sort-Object { $_.FullName.Length } -Descending |
         Remove-Item -Recurse -Force
-    $modulesMetadata = Join-Path $runtimePackageRoot 'node_modules\.modules.yaml'
-    if (Test-Path -LiteralPath $modulesMetadata -PathType Leaf) {
-        Remove-Item -LiteralPath $modulesMetadata -Force
+    foreach ($metadataName in @('.modules.yaml', '.pnpm-workspace-state-v1.json')) {
+        $modulesMetadata = Join-Path $runtimePackageRoot ('node_modules\' + $metadataName)
+        if (Test-Path -LiteralPath $modulesMetadata -PathType Leaf) {
+            Remove-Item -LiteralPath $modulesMetadata -Force
+        }
     }
     & $node (Join-Path $PSScriptRoot 'tests\release-smoke.mjs') $runtimePackageRoot $sourceRoot
     if ($LASTEXITCODE -ne 0) { throw "release smoke failed with exit code $LASTEXITCODE" }

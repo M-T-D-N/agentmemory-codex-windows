@@ -18,6 +18,10 @@ for (const required of [cli, standalone, join(dist, "index.mjs"), join(dist, "in
 for (const developmentDependency of ["vitest", "tsdown", "typescript"]) {
   assert.equal(existsSync(join(packageRoot, "node_modules", developmentDependency)), false);
 }
+for (const metadata of [".modules.yaml", ".pnpm-workspace-state-v1.json"]) {
+  assert.equal(existsSync(join(packageRoot, "node_modules", metadata)), false,
+    `package manager installation metadata must not be shipped: ${metadata}`);
+}
 const sourcePackage = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8"));
 for (const dependency of Object.keys({ ...sourcePackage.dependencies, ...sourcePackage.optionalDependencies })) {
   const sourceManifest = join(sourceRoot, "node_modules", dependency, "package.json");
