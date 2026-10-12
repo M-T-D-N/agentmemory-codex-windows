@@ -26,7 +26,7 @@ The upstream AgentMemory release history remains in the
 
 ### Qualification and limits
 
-The final preview.16 candidate is undergoing fixed-source, actual-package isolated installation/upgrade/restart/recovery and bounded failure/load qualification. Final results, skips and exact binary identity belong in its release notes. Earlier preview.15 installation results retain their original r186 scope. The previous r194 30-second incident remains unattributed; current passes do not resolve its cause. Local Qwen is not started by this qualification. Unsigned binaries, power-loss and other-host limits remain.
+The final preview.16 candidate is undergoing fixed-source, actual-package isolated installation/upgrade/restart/recovery and bounded failure/load qualification. Final results, skips and exact binary identity belong in its release notes. Earlier preview.15 installation results retain their original r186 scope. Local Qwen is not started by this qualification. Unsigned binaries, power-loss and other-host limits remain.
 
 ## 0.1.0-preview.15
 
