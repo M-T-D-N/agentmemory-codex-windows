@@ -1,5 +1,5 @@
 # AgentMemory for Codex on Windows — preview.17 installer
-> Candidate status: preview.17 has not been published. The version-pinned tag and download URLs below are planned release paths and are not installation instructions for an available public asset yet. Use these commands only after the matching ZIP, TGZ, release descriptor and hashes have been published and verified. The existing public preview.16 has its own immutable guide; do not combine its launcher with preview.17 assets.
+> Preview.17 is a qualified Windows technical preview. Run the version-pinned commands only when the matching release page contains the ZIP, TGZ, descriptor and checksums, and CI succeeded for the exact published source. See the [current operating/validation guide](../../../docs/PREVIEW_17.md). Keep historical preview.16 assets together.
 
 The independent downstream bundles AgentMemory 0.9.30 and the patched iii
 engine/SDK 0.22.1. You do not need to install upstream first. This launcher

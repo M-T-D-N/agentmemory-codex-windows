@@ -1,5 +1,7 @@
 # AgentMemory for Codex on Windows
 
+Preview.17 qualification and release identities are summarized in [the operating and validation notes](../../docs/PREVIEW_17.md). The detailed lifecycle commands below remain the authority for installation, cutover, data preservation and recovery.
+
 [English](README.md) | [한국어 안내](../../READMEs/README.ko-KR.md) | [日本語案内](../../READMEs/README.ja-JP.md)
 
 > [!IMPORTANT]

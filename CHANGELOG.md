@@ -35,7 +35,13 @@ These source-status changes were included in the owner's r210/r211 operating ins
 - Replace obsolete no-auth and engine-pin advice with separate Windows managed and portable configuration guidance. Windows authentication remains random and CurrentUser-DPAPI protected.
 - Add optional installation-owned local_qwen settings for a loopback HTTP endpoint and the supported LocalAI lifecycle entry point. Preserve the default and update configuration; reject untrusted inherited values, unsupported APIs and mismatched endpoints before invoking a launcher.
 
-Preview.17 has not been published. The owner's r211 operating installation uses source 88f52497b273fb7cefdc6067a18b9745c15a32ac; subsequent release-readiness edits are not yet applied. Limited r211 operating verification passed, while the global E2E remains blocked by three native cursor reconciliation cases. Qualification results and remaining limits are retained with the exact reviewed candidate; the existing preview.16 assets remain immutable.
+### Qualification and limits
+
+The qualified Windows preview.17 payload was installed and exercised through fresh installation, managed update, restart and injected-failure recovery. Source tests: 4,253 passed / 35 existing skips; adapter: 93 passed / 3 existing skips; packaging: 224 passed / zero skips. These local suites total 4,570 passes and 38 explicit skips. Actual Codex capture, discovery, drain, search, status and provenance were verified with an operating Qwen graph extraction sample; 522 selected prior records and authentication were preserved. Three historical source reconciliation cases completed with preserved originals and zero duplicate inserts.
+
+Release-readiness fixes cover shared compressed-reader cache eviction, complete-correspondence checkpoint continuation, relocated plain/Zstandard source transitions, maintenance read-budget accounting, evidence-bound distribution qualification, a shared builder/Windows-CI test inventory, and first-boot cloud secret-output regression. Ordinary source identity and ownership checks remain strict.
+
+See [preview.17 operating and validation notes](docs/PREVIEW_17.md) for exact artifact identities, source mapping, installation/update/removal/recovery, existing skip scope and limits. GitHub CI status must be checked on the actual release commit; local test results do not establish remote CI success. This is an unsigned, AI-generated, user-tested technical preview, not a promise of complete graph coverage, new-machine compatibility, universal secret detection or supported cloud deployment.
 
 ## 0.1.0-preview.16
 

@@ -32,7 +32,7 @@ full disclosure](#ai-development-disclosure).
 
 The preview.17 source candidate packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
 
-Preview.17 is under qualification and has not been published. Its versioned tag and download commands below describe the intended release and become usable only after publication. For the existing public preview.16, use the guide shipped with that release; do not mix its launcher with preview.17 assets.
+Preview.17 is a qualified Windows technical preview. Use its versioned commands only when the [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17) contains all four matching assets and successful CI for the tagged source. Until then publication is pending. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.17 operating and validation notes](docs/PREVIEW_17.md).
 
 1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
 2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
@@ -78,6 +78,13 @@ only an explicit snapshot rebuild refreshes them.
 
 Release changes are recorded in [CHANGELOG.md](CHANGELOG.md). Source tags
 identify public releases; each build manifest records its own qualification.
+
+## Changes in preview.17
+
+- Verify source, actual test logs, immutable payload, Windows installation scenarios and confirmed operating evidence before producing a distribution.
+- Preserve bounded sequential decompression under cache pressure, continue fully matched native inventories at their verified checkpoint, and recover simultaneous archive relocation and compression changes after full correspondence checks.
+- Keep authentication, historical redaction, canonical source links and exact project ownership intact. Avoid printing LocalAI lifecycle responses or first-boot cloud secrets.
+- See [qualification, installation/update/removal/recovery and limitations](docs/PREVIEW_17.md). Cloud files are retained only for non-supported first-boot security regression, not as deployment instructions.
 
 ## Changes in preview.16
 
@@ -287,9 +294,10 @@ migrations removed from this preview. See [the agent runbook](INSTALL_FOR_AGENTS
 | `integrations/` | Compatibility integrations; not separately supported downstream products |
 | `upstream-source.json` | Exact upstream provenance |
 
-The upstream marketing website, cloud deployment examples, other upstream language copies,
-generated build output, and private monorepo history are intentionally outside
-the first public repository snapshot. Historical benchmark material is retained
+The upstream marketing website, cloud deployment configurations, other upstream language copies,
+generated build output, and private monorepo history remain outside this public
+snapshot. Four cloud entrypoint source files are retained only because the normal
+Windows packaging suite directly tests their secret-output behavior; they do not add cloud support. Historical benchmark material is retained
 only for reproducibility and is explicitly labelled as upstream reference; no
 benchmark number in those directories is a claim for this downstream preview.
 

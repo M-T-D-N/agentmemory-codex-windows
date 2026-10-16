@@ -1,5 +1,11 @@
 # Windows向け Codex AgentMemory
 
+## Preview.17: operating and validation notes
+
+See the [preview.17 guide](../docs/PREVIEW_17.md) for supported installation paths, update/removal/recovery, exact qualification scope, checksums and limitations. Local results are 4,570 passes with 38 explicit existing skips; actual Windows installation scenarios and a live Codex/Qwen provenance sample are recorded separately. Check CI for the exact published source and all four matching release assets.
+
+
+
 <p align="center">
   <img src="../assets/readme-banner.svg" alt="AgentMemory for Codex on Windows" width="1120" />
 </p>

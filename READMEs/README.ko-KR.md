@@ -60,6 +60,10 @@ port 3111의 143 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 공개판 변경은 [변경 기록](../CHANGELOG.md)에 정리합니다. 소스 tag는 공개판을,
 각 빌드 manifest는 해당 산출물의 검증 개정을 식별합니다.
 
+## preview.17 검증 및 운영 안내
+
+preview.17은 AgentMemory 0.9.30과 패치된 iii 0.22.1을 묶은 Windows 기술 프리뷰입니다. 신규 설치·기존 설치 갱신·재시작·실패 복구와 실제 Codex 수집→검색→원문 연결→Qwen 자동 그래프 표본을 검증했습니다. 전체 로컬 검사 4,570건 통과와 기존 조건부 생략 38건을 구분합니다. 공개 태그의 정확한 GitHub CI와 자산 4개·체크섬도 함께 확인하세요. [설치·갱신·제거·복구·호환성·검증 범위 및 제한](../docs/PREVIEW_17.md)에 상세히 정리했습니다.
+
 ## preview.16의 변경점
 
 메모리 교체·slot 갱신·import·삭제의 프로젝트와 agent 소유 경계를 강화하고,
