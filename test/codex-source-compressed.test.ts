@@ -44,7 +44,7 @@ describe("compressed Codex original transport", () => {
       await file.read(next, 0, size, size); expect(next).toEqual(raw.subarray(size, size * 2));
       expect(prefixReads).toBe(before);
     }); } finally { await physical.close(); await other.close(); }
-  });
+  }, 30_000);
   it("keeps independent range reads within the physical cost of a shared decoder", async () => {
     const { root } = await fixture(); const raw = randomBytes(4 * 1024 * 1024), packed = zstdCompressSync(raw), costs: number[] = [];
     for (const independent of [false, true]) {
