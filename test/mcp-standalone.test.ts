@@ -568,29 +568,29 @@ describe("handleToolCall", () => {
 
 describe("initialize protocol version negotiation", () => {
   type InitResult = { protocolVersion: string };
-  const handler = () =>
+  const handler =
     vi.mocked(createStdioTransport).mock.calls[0][0] as (
       method: string,
       params?: unknown,
     ) => Promise<InitResult>;
 
   it("echoes a supported requested version", async () => {
-    const res = await handler()("initialize", { protocolVersion: "2025-06-18" });
+    const res = await handler("initialize", { protocolVersion: "2025-06-18" });
     expect(res.protocolVersion).toBe("2025-06-18");
   });
 
   it("echoes the oldest supported version", async () => {
-    const res = await handler()("initialize", { protocolVersion: "2024-11-05" });
+    const res = await handler("initialize", { protocolVersion: "2024-11-05" });
     expect(res.protocolVersion).toBe("2024-11-05");
   });
 
   it("answers an unsupported requested version with the latest supported", async () => {
-    const res = await handler()("initialize", { protocolVersion: "1900-01-01" });
+    const res = await handler("initialize", { protocolVersion: "1900-01-01" });
     expect(res.protocolVersion).toBe("2025-11-25");
   });
 
   it("answers a missing requested version with the latest supported", async () => {
-    const res = await handler()("initialize", {});
+    const res = await handler("initialize", {});
     expect(res.protocolVersion).toBe("2025-11-25");
   });
 });
