@@ -55,7 +55,7 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $packageRoot 'package.json'), ($package | ConvertTo-Json -Depth 5), $utf8)
 Push-Location $packageRoot
 try {
-    $pnpm = [string](Get-Command pnpm.cmd -ErrorAction Stop).Source
+    $pnpm = [string](Get-Command pnpm -CommandType Application -ErrorAction Stop).Source
     & $pnpm --config.ignore-scripts=true pack --json --pack-destination $output
     if ($LASTEXITCODE -ne 0) { throw 'pnpm pack failed.' }
 } finally { Pop-Location }
