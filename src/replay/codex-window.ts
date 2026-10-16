@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { CodexSourceHold } from "../types.js";
 import { parseCodexRecordWithHolds, validateCodexSourceHolds } from "./codex-source-hold.js";
+import type { CodexSourceIdentity } from "../functions/codex-source-identity.js";
+import type { CodexSourceFile } from "../functions/codex-source-segments.js";
 import { canonicalCodexCwd, withReadOnlyCodexSource } from "../functions/codex-source-identity.js";
 import { initialCodexParseState, pendingCodexMirrors, type CodexNativeMessage, type CodexParseState } from "./codex-record.js";
 
@@ -17,6 +19,20 @@ export interface CodexSourceCursor {
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const maximumRecordBytes = 64 * 1024 * 1024;
 
+export interface CodexCursorDiagnostic {
+  reason: "version" | "hold_mode" | "file_identity" | "source_identity" | "byte_offset" | "ordinal" | "anchor" | "parser";
+  expectedDigest: string;
+  observedDigest: string;
+  snapshotBytes: number;
+}
+
+export class CodexCursorValidationError extends Error {
+  constructor(readonly diagnostic: CodexCursorDiagnostic) {
+    super("Codex source cursor is invalid, replaced or truncated; reconciliation is required");
+    this.name = "CodexCursorValidationError";
+  }
+}
+
 /** Reads a bounded snapshot only. The caller commits the returned cursor after
  * all accepted records have a canonical outcome, never merely after this read. */
 export async function readCodexWindow(input: {
@@ -25,15 +41,22 @@ export async function readCodexWindow(input: {
   cursor?: CodexSourceCursor; maxBytes?: number; maxMessages?: number; includeExcludedMessages?: boolean;
 }) {
   if (input.discoverSourceHolds !== undefined && typeof input.discoverSourceHolds !== "boolean") throw Error("Invalid source hold review option");
-  const approvedHolds = validateCodexSourceHolds(input.sourceHolds, input.sessionId);
-  const holdMode = input.discoverSourceHolds === true || approvedHolds.length > 0;
-  const sourceHolds: CodexSourceHold[] = [];
+  validateCodexSourceHolds(input.sourceHolds, input.sessionId);
   const maxBytes = input.maxBytes ?? 4 * 1024 * 1024;
   const maxMessages = input.maxMessages ?? 200;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024 * 1024 ||
       !Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 500 ||
       (input.includeExcludedMessages !== undefined && typeof input.includeExcludedMessages !== "boolean")) throw Error("Invalid Codex read bounds");
-  return withReadOnlyCodexSource(input.sourceRoot, input.sourcePath, input.sessionId, async (source, file) => {
+  return withReadOnlyCodexSource(input.sourceRoot, input.sourcePath, input.sessionId,
+    (source, file) => readCodexWindowFromFile(input, source, file));
+}
+
+export async function readCodexWindowFromFile(input: Parameters<typeof readCodexWindow>[0], source: CodexSourceIdentity, file: CodexSourceFile) {
+  const approvedHolds = validateCodexSourceHolds(input.sourceHolds, input.sessionId);
+  const holdMode = input.discoverSourceHolds === true || approvedHolds.length > 0;
+  const sourceHolds: CodexSourceHold[] = [];
+  const maxBytes = input.maxBytes ?? 4 * 1024 * 1024;
+  const maxMessages = input.maxMessages ?? 200;
     const snapshot = await file.stat();
     const fileIdentity = snapshot.identity ?? `${snapshot.dev}:${snapshot.ino}`;
     const sourceIdentity = hash(JSON.stringify([source.sessionId, source.cwd, source.createdAt, source.source,
@@ -45,12 +68,27 @@ export async function readCodexWindow(input: {
       return hash(bytes);
     };
     const previous = input.cursor;
-    if (previous && ((previous.version !== 1 && previous.version !== 2) || (previous.version === 2 && !holdMode) || previous.fileIdentity !== fileIdentity || previous.sourceIdentity !== sourceIdentity ||
-        !Number.isSafeInteger(previous.byteOffset) || previous.byteOffset < 0 || previous.byteOffset > snapshot.size ||
-        !Number.isSafeInteger(previous.ordinal) || previous.ordinal < 0 ||
-        previous.anchor !== await anchorAt(previous.byteOffset) || !previous.parser ||
+    const rejectCursor = (reason: CodexCursorDiagnostic["reason"], expected: unknown, observed: unknown): never => {
+      throw new CodexCursorValidationError({ reason, expectedDigest: hash(JSON.stringify(expected) ?? "undefined"),
+        observedDigest: hash(JSON.stringify(observed) ?? "undefined"), snapshotBytes: snapshot.size });
+    };
+    const validParserCwd = (value: string) => {
+      try { return canonicalCodexCwd(value) === value; } catch { return false; }
+    };
+    if (previous) {
+      if (previous.version !== 1 && previous.version !== 2) rejectCursor("version", [1, 2], previous.version);
+      if (previous.version === 2 && !holdMode) rejectCursor("hold_mode", true, holdMode);
+      if (previous.fileIdentity !== fileIdentity) rejectCursor("file_identity", previous.fileIdentity, fileIdentity);
+      if (previous.sourceIdentity !== sourceIdentity) rejectCursor("source_identity", previous.sourceIdentity, sourceIdentity);
+      if (!Number.isSafeInteger(previous.byteOffset) || previous.byteOffset < 0 || previous.byteOffset > snapshot.size)
+        rejectCursor("byte_offset", { minimum: 0, maximum: snapshot.size, safeInteger: true }, previous.byteOffset);
+      if (!Number.isSafeInteger(previous.ordinal) || previous.ordinal < 0) rejectCursor("ordinal", { minimum: 0, safeInteger: true }, previous.ordinal);
+      const observedAnchor = await anchorAt(previous.byteOffset);
+      if (previous.anchor !== observedAnchor) rejectCursor("anchor", previous.anchor, observedAnchor);
+    }
+    if (previous && (!previous.parser ||
         (previous.parser.cwd !== undefined && (typeof previous.parser.cwd !== "string" ||
-          canonicalCodexCwd(previous.parser.cwd) !== previous.parser.cwd)) ||
+          !validParserCwd(previous.parser.cwd))) ||
         !Array.isArray(previous.parser.finalDigests) || previous.parser.finalDigests.length > 128 ||
         previous.parser.finalDigests.some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) ||
         !Array.isArray(previous.parser.userMessages) || !Array.isArray(previous.parser.userMirrors) ||
@@ -71,7 +109,7 @@ export async function readCodexWindow(input: {
         typeof previous.parser.normalUserSeen !== "boolean" ||
         typeof previous.parser.normalSessionSeen !== "boolean" || typeof previous.parser.internalTurn !== "boolean" ||
         (previous.parser.turnId !== null && (typeof previous.parser.turnId !== "string" || !previous.parser.turnId.trim())))) {
-      throw Error("Codex source cursor is invalid, replaced or truncated; reconciliation is required");
+      rejectCursor("parser", "valid bounded Codex parse state", previous.parser);
     }
     let offset = previous?.byteOffset ?? 0;
     let ordinal = previous?.ordinal ?? 0;
@@ -153,5 +191,4 @@ export async function readCodexWindow(input: {
     const waitingForPrimary = pendingCodexMirrors(parser);
     return { source, messages, excluded, ...(holdMode ? { sourceHolds } : {}), ...(input.includeExcludedMessages ? { legacyMessages, legacyUserItems } : {}), issue, incompleteTail, waitingForPrimary, snapshotBytes: snapshot.size,
       caughtUp: issue === null && !incompleteTail && !waitingForPrimary && offset === snapshot.size, cursor };
-  });
 }

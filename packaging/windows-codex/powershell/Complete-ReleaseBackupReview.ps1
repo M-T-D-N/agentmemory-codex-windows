@@ -40,7 +40,7 @@ function Complete-ReleaseBackupReview {
         Assert-PhysicalBackupPath $root
         Assert-PhysicalBackupPath $DecisionPath
         if ((Get-Item -LiteralPath $DecisionPath).Length -gt 1MB) { throw 'Backup decisions exceed size limit.' }
-        $plan = Get-Content -Raw -LiteralPath $DecisionPath | ConvertFrom-Json
+        $plan = Get-Content -Encoding UTF8 -Raw -LiteralPath $DecisionPath | ConvertFrom-Json
         if ($plan.schema_version -ne 1 -or -not $Review.predecessor_known -or
             -not (Test-ReleaseIdentity $plan.current_release $Review.current_release) -or
             -not (Test-ReleaseIdentity $plan.immediate_predecessor $Review.immediate_predecessor)) {
@@ -90,7 +90,7 @@ function Complete-ReleaseBackupReview {
         Assert-PhysicalBackupPath (Join-Path $root 'config\install-manifest.json')
         if (Test-Path -LiteralPath $lockPath) { Assert-PhysicalBackupPath $lockPath }
         $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
-        $live = Get-Content -Raw -LiteralPath (Join-Path $root 'config\install-manifest.json') | ConvertFrom-Json
+        $live = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $root 'config\install-manifest.json') | ConvertFrom-Json
         $liveIdentity = [pscustomobject]@{ release_revision = $live.release_revision; data_contract_version = $live.data_contract_version; source_package = $live.package_relative_path }
         if (-not (Test-ReleaseIdentity $liveIdentity $Review.current_release)) { throw 'Installation changed after retention review.' }
         foreach ($decision in $decisions) {

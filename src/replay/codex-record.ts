@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isCodexApprovalReviewText, isCodexInternalAmbientText, isIncidentalCodexHostEvent, stripCodexAmbientUiBlocks } from "../functions/observation-visibility.js";
 import { stripPrivateData } from "../functions/privacy.js";
+import { historicalPrivacyDigest, type HistoricalPrivacyDigest } from "./codex-historical-privacy.js";
 import { canonicalCodexCwd } from "../functions/codex-source-identity.js";
 
 export interface CodexParseState {
@@ -27,6 +28,7 @@ export interface CodexNativeMessage {
   ordinal: number;
   byteOffset: number;
   text: string;
+  historicalPrivacy?: HistoricalPrivacyDigest;
   imageReadFailureDisplay?: { digest: string; path: string };
   legacyImageWrappedDigest?: string;
   legacyRecovery?: { observationId: string; textDigest: string };
@@ -113,11 +115,15 @@ export function pendingCodexMirrors(state: CodexParseState): boolean {
   });
 }
 
-export function codexUserText(value: string): string | null {
+function codexUserContent(value: string): string | null {
   if (isCodexInternalAmbientText(value) || isCodexApprovalReviewText(value)) return null;
   const text = stripCodexAmbientUiBlocks(value);
   if (!text.trim() || isCodexInternalAmbientText(text) || isCodexApprovalReviewText(text)) return null;
-  return stripPrivateData(text);
+  return text;
+}
+export function codexUserText(value: string): string | null {
+  const text = codexUserContent(value);
+  return text === null ? null : stripPrivateData(text);
 }
 
 export function parseCodexRecord(
@@ -250,6 +256,7 @@ export function parseCodexRecord(
   if (!Array.isArray(payload.content)) return unknown("invalid_message_content");
   const parts: string[] = [];
   const legacyParts: string[] = [];
+  const historicalParts: string[] = [];
   let hasImageWrapper = false;
   for (let index = 0; index < payload.content.length; index++) {
     const part = asRecord(payload.content[index]);
@@ -266,8 +273,9 @@ export function parseCodexRecord(
     if (["input_image", "image", "image_url"].includes(String(part.type))) continue;
     if (!["input_text", "output_text", "text"].includes(String(part.type)) || typeof part.text !== "string") return unknown("unsupported_content_part");
     if (payload.role === "user" && isInternalTurnInstruction(part.text)) state.internalTurn = true;
-    const text = payload.role === "user" ? codexUserText(part.text) : stripPrivateData(part.text);
-    if (text !== null && text.trim()) { parts.push(text); legacyParts.push(text); }
+    const content = payload.role === "user" ? codexUserContent(part.text) : part.text;
+    const text = content === null ? null : stripPrivateData(content);
+    if (text !== null && text.trim()) { parts.push(text); legacyParts.push(text); historicalParts.push(content!); }
   }
   if (parts.length === 0) return excluded("no_eligible_text");
   if (typeof row.timestamp !== "string" || !Number.isFinite(Date.parse(row.timestamp))) return unknown("invalid_message_timestamp");
@@ -280,6 +288,7 @@ export function parseCodexRecord(
   const key = digest(JSON.stringify(["codex-native-v1", context.sessionId, kind,
     nativeMessageId ?? ["legacy-position", row.timestamp, context.ordinal, context.byteOffset]]));
   const text = parts.join("\n");
+  const historicalPrivacy = historicalPrivacyDigest(historicalParts, text);
   const display = kind === "user" ? imageReadFailureDisplay(payload.content) : undefined;
   const recoveryText = kind === "user" ? codexUserText(payload.content
     .map(part => typeof part.text === "string" ? part.text : "")
@@ -290,6 +299,7 @@ export function parseCodexRecord(
   } : undefined;
   const message: CodexNativeMessage = { key, sessionId: context.sessionId, nativeMessageId,
     turnId: state.turnId, kind, timestamp: row.timestamp, ordinal: context.ordinal, byteOffset: context.byteOffset, text,
+    ...(historicalPrivacy ? { historicalPrivacy } : {}),
     ...(display ? { imageReadFailureDisplay: display } : {}),
     ...(hasImageWrapper ? { legacyImageWrappedDigest: digest(legacyParts.join("\n")) } : {}),
     ...(legacyRecovery ? { legacyRecovery } : {}) };

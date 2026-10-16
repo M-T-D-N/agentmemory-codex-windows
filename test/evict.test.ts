@@ -1,3 +1,4 @@
+import { deleteImage } from "../src/utils/image-store.js";
 import { describe, expect, it, vi } from "vitest";
 import type {
   CompressedObservation,
@@ -22,6 +23,8 @@ vi.mock("../src/config.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/config.js")>()),
   isConsolidationEnabled: () => true,
 }));
+
+vi.mock("../src/utils/image-store.js", () => ({ deleteImage: vi.fn(async () => ({ deletedBytes: 0 })), touchImage: vi.fn(async () => {}) }));
 
 type Store = Map<string, Map<string, unknown>>;
 type Handler = (payload: unknown) => unknown | Promise<unknown>;
@@ -335,4 +338,31 @@ describe("mem::evict stale sessions", () => {
       "event::session::stopped",
     );
   });
+});
+
+
+describe("dot F2 eviction overlap", () => {
+ it.each([false,true])("plans one deletion for shared image, dryRun=%s",async(dryRun)=>{
+  vi.mocked(deleteImage).mockClear();const sessionId="overlap";
+  const old={...makeObservation(sessionId),id:"low",timestamp:daysAgo(120),importance:1,imageRef:"shared-image"};
+  const kept={...makeObservation(sessionId),id:"kept",timestamp:daysAgo(1),importance:8,imageRef:"shared-image"};
+  const store=storeForObservations(sessionId,[old,kept]);store.get(KV.sessions)!.set(sessionId,{...makeSession(sessionId),startedAt:daysAgo(1),observationCount:2});
+  store.get(KV.config)!.set("eviction",{maxObservationsPerProject:1});store.set(KV.imageRefs,new Map([["shared-image",2]]));
+  const kv=mockKV(store),{sdk}=mockSdk();registerEvictFunction(sdk as never,kv as never);
+  const result=await sdk.trigger({function_id:"mem::evict",payload:{dryRun}}) as {lowImportanceObs:number,capEvictions:number};
+  console.info("F2 observed",JSON.stringify({dryRun,lowImportanceObs:result.lowImportanceObs,capEvictions:result.capEvictions,imageRefs:await kv.get(KV.imageRefs,"shared-image"),imageDeleteCalls:vi.mocked(deleteImage).mock.calls.length}));
+  expect(result).toMatchObject({lowImportanceObs:1,capEvictions:0});
+  expect(await kv.get(KV.observations(sessionId),"kept")).toEqual(kept);
+  expect(await kv.get(KV.imageRefs,"shared-image")).toBe(dryRun?2:1);
+  expect(deleteImage).not.toHaveBeenCalled();
+  if(!dryRun){const retry=await sdk.trigger({function_id:"mem::evict",payload:{}});expect(retry).toMatchObject({lowImportanceObs:0,capEvictions:0});expect(await kv.get(KV.imageRefs,"shared-image")).toBe(1);}
+ });
+});
+
+
+describe("dot F2 concurrent and interrupted eviction",()=>{
+ const fixture=()=>{const sessionId="guarded-eviction",old={...makeObservation(sessionId),id:"guarded-low",timestamp:daysAgo(120),importance:1,imageRef:"guarded-image"},kept={...makeObservation(sessionId),id:"guarded-kept",timestamp:daysAgo(1),importance:8,imageRef:"guarded-image"};const store=storeForObservations(sessionId,[old,kept]);store.get(KV.sessions)!.set(sessionId,{...makeSession(sessionId),startedAt:daysAgo(1)});store.get(KV.config)!.set("eviction",{maxObservationsPerProject:1});store.set(KV.imageRefs,new Map([["guarded-image",2]]));const kv=mockKV(store),{sdk}=mockSdk();registerEvictFunction(sdk as never,kv as never);return{kv,sdk,sessionId,old,kept};};
+ it("two sweeps release the same observation reference only once",async()=>{const f=fixture();const results=await Promise.all([f.sdk.trigger({function_id:"mem::evict",payload:{}}),f.sdk.trigger({function_id:"mem::evict",payload:{}})]) as Array<{lowImportanceObs:number,capEvictions:number}>;expect(results.reduce((n,r)=>n+r.lowImportanceObs+r.capEvictions,0)).toBe(1);expect(await f.kv.get(KV.imageRefs,"guarded-image")).toBe(1);expect(await f.kv.get(KV.observations(f.sessionId),f.kept.id)).toEqual(f.kept);});
+ it("changed canonical evidence invalidates the stale deletion selection",async()=>{const f=fixture(),get=f.kv.get.bind(f.kv);let changed=false;vi.spyOn(f.kv,"get").mockImplementation(async(scope,key)=>{if(!changed&&scope===KV.observations(f.sessionId)&&key===f.old.id){changed=true;await f.kv.set(scope,key,{...f.old,importance:10});}return get(scope,key);});expect(await f.sdk.trigger({function_id:"mem::evict",payload:{}})).toMatchObject({lowImportanceObs:0,capEvictions:0});expect(await f.kv.get(KV.imageRefs,"guarded-image")).toBe(2);expect(await f.kv.get(KV.observations(f.sessionId),f.old.id)).toMatchObject({importance:10});});
+ it("canonical delete failure rejects and retry releases exactly one reference",async()=>{const f=fixture(),remove=f.kv.delete.bind(f.kv);let fail=true;vi.spyOn(f.kv,"delete").mockImplementation(async(scope,key)=>{if(fail&&scope===KV.observations(f.sessionId)&&key===f.old.id){fail=false;throw Error("injected delete failure");}return remove(scope,key);});await expect(f.sdk.trigger({function_id:"mem::evict",payload:{}})).rejects.toThrow("injected delete failure");expect(await f.kv.get(KV.imageRefs,"guarded-image")).toBe(2);expect(await f.sdk.trigger({function_id:"mem::evict",payload:{}})).toMatchObject({lowImportanceObs:1,capEvictions:0});expect(await f.kv.get(KV.imageRefs,"guarded-image")).toBe(1);});
 });

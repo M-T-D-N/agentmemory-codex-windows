@@ -428,27 +428,31 @@ async function proxyToRestApi(
   }
 
   const controller = new AbortController();
+  const callerDisconnected = () => controller.abort();
+  req.once("aborted", callerDisconnected);
+  res.once("close", callerDisconnected);
   const fetchTimeout = setTimeout(() => controller.abort(), 10000);
   let upstream: Response;
+  let responseBody: string;
   try {
     upstream = await fetch(upstreamUrl, {
-      method,
-      headers,
-      body: body || undefined,
-      signal: controller.signal,
+      method, headers, body: body || undefined, signal: controller.signal,
     });
-    clearTimeout(fetchTimeout);
+    responseBody = await upstream.text();
   } catch (err) {
-    clearTimeout(fetchTimeout);
-    if (err instanceof Error && err.name === "AbortError") {
+    if (res.destroyed) return;
+    if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
       json(res, 504, { error: "upstream timeout" }, req);
       return;
     }
     throw err;
+  } finally {
+    clearTimeout(fetchTimeout);
+    req.off("aborted", callerDisconnected);
+    res.off("close", callerDisconnected);
   }
 
   const cors = corsHeaders(req);
-  const responseBody = await upstream.text();
   const responseHeaders: Record<string, string> = {
     ...cors,
   };

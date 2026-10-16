@@ -97,7 +97,9 @@ export function isExcludedCodexAmbientSession(session) {
   if (typeof preview !== "string" || preview.trim().toLowerCase() === "# response annotations:") return false;
   const evaluatorPreview = isLegacyCodexEffortEvaluatorPreview(preview);
   const openAmbientPreview = CODEX_AMBIENT_UI_PREFIX.test(preview) && stripCodexAmbientUiBlocks(preview) === preview;
-  if (session?.codexNativeCapture?.cursor?.parser?.normalUserSeen === true && (evaluatorPreview || openAmbientPreview)) return false;
+  const parser = session?.codexNativeCapture?.cursor?.parser;
+  const provedNormalApprovalPreview = isCodexApprovalReviewText(preview) && parser?.normalSessionSeen === true && parser?.internalTurn === false;
+  if (parser?.normalUserSeen === true && (evaluatorPreview || openAmbientPreview || provedNormalApprovalPreview)) return false;
   return evaluatorPreview || (isCodexInternalAmbientText(preview) && !isIncidentalCodexHostEvent(preview));
 }
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appendFile, copyFile, mkdir, mkdtemp, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { readFile, appendFile, copyFile, mkdir, mkdtemp, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { zstdCompressSync } from "node:zlib";
 import { join, resolve, sep } from "node:path";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { discoverCodexSession } from "../src/functions/codex-source-discovery.js";
@@ -8,6 +9,8 @@ import { captureCodexSourceWindow } from "../src/functions/codex-source-capture.
 import { registerCodexSourceBacklog } from "../src/functions/codex-source-backlog.js";
 import { canonicalCodexCwd } from "../src/functions/codex-source-identity.js";
 import { readCodexThreadIndex, type CodexThreadCandidate } from "../src/functions/codex-source-index.js";
+import { changeArchiveState, readArchiveVisibility } from "../src/functions/archive.js";
+import { readCodexSourceStatus } from "../src/functions/codex-source-status.js";
 import { KV } from "../src/state/schema.js";
 import type { Session } from "../src/types.js";
 
@@ -42,6 +45,48 @@ describe("source discovery without a prior Codex hook", () => {
     await rm(actual, { recursive: true, force: true });
   });
 
+  it("keeps an indexed archived absent source closed until the same physical source actually returns", async () => {
+    await discoverCodexSession(kv as never, candidate, managed());
+    const scope = { sessionId: candidate.sessionId, project: "registered-project" };
+    await captureCodexSourceWindow(kv as never, scope, managed());
+    const original = await readFile(join(root, candidate.sourcePath));
+    const heldSource = join(root, "held-original.jsonl");
+    await rename(join(root, candidate.sourcePath), heldSource);
+    await expect(captureCodexSourceWindow(kv as never, scope, managed())).rejects.toThrow();
+    const request = { project: scope.project, target: { kind: "session" as const, id: scope.sessionId }, action: "archive" as const };
+    const preview = await changeArchiveState(kv as never, request);
+    await changeArchiveState(kv as never, { ...request, dryRun: false, expectedDigest: preview.expectedDigest,
+      expectedRevision: preview.expectedRevision, reason: "Reviewed unavailable historical source" });
+    const before = structuredClone(kv.store);
+    expect(await discoverCodexSession(kv as never, candidate, managed())).toEqual({ status: "managed" });
+    expect(kv.store).toEqual(before);
+    expect((await readCodexSourceStatus(kv as never, "codex-main")).issueCount).toBe(0);
+    await rename(heldSource, join(root, candidate.sourcePath));
+    expect(await readFile(join(root, candidate.sourcePath))).toEqual(original);
+    expect(await discoverCodexSession(kv as never, candidate, managed())).toMatchObject({ status: "relocated" });
+    expect((await kv.get<Session>(KV.sessions, scope.sessionId))!.codexNativeCapture).toMatchObject({ status: "pending" });
+    expect((await readArchiveVisibility(kv as never))({ kind: "session", id: scope.sessionId })).toBe(true);
+    expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations(scope.sessionId))).toHaveLength(2);
+  });
+  it("surfaces an actually changed returned source while preserving the archived original", async () => {
+    await discoverCodexSession(kv as never, candidate, managed());
+    const scope = { sessionId: candidate.sessionId, project: "registered-project" };
+    await captureCodexSourceWindow(kv as never, scope, managed());
+    await rm(join(root, candidate.sourcePath));
+    await expect(captureCodexSourceWindow(kv as never, scope, managed())).rejects.toThrow();
+    const request = { project: scope.project, target: { kind: "session" as const, id: scope.sessionId }, action: "archive" as const };
+    const preview = await changeArchiveState(kv as never, request);
+    await changeArchiveState(kv as never, { ...request, dryRun: false, expectedDigest: preview.expectedDigest,
+      expectedRevision: preview.expectedRevision, reason: "Reviewed historical source" });
+    const originals = await kv.list(KV.observations(scope.sessionId));
+    await writeSource([header({ timestamp: "2026-09-14T00:00:00Z" }), user, assistant]);
+    const result = await discoverCodexSession(kv as never, candidate, managed());
+    expect(result).toMatchObject({ status: "reconcile_required", reason: "returned_source_requires_reconciliation" });
+    expect((await readCodexSourceStatus(kv as never, "codex-main")).status).toBe("attention");
+    expect(await kv.list(KV.observations(scope.sessionId))).toEqual(originals);
+    expect((await readArchiveVisibility(kv as never))({ kind: "session", id: scope.sessionId })).toBe(true);
+  });
   it("creates one canonical session at the source timestamp and lets native capture ingest each message once", async () => {
     expect(await discoverCodexSession(kv as never, candidate, managed())).toEqual({ status: "created", project: "registered-project" });
     const session = await kv.get<Session>(KV.sessions, candidate.sessionId);
@@ -295,6 +340,30 @@ describe("source discovery without a prior Codex hook", () => {
     expect(await kv.list(KV.observations(candidate.sessionId))).toEqual(rows);
     expect(await kv.get(KV.sessions, candidate.sessionId)).toMatchObject({ project: scope.project, cwd,
       codexNativeCapture: { source: { cwd: originalCwd, relativePath: sourcePath }, captureCwd: candidate.cwd } });
+  });
+  it.each([false, true])("recovers a relocated source with simultaneous compression transition (compressed=%s)", async compressed => {
+    const original = await readFile(join(root, candidate.sourcePath));
+    await mkdir(join(root, "archived_sessions"));
+    if (compressed) {
+      await rm(join(root, candidate.sourcePath));
+      candidate = { ...candidate, sourcePath: "archived_sessions/rollout-new.jsonl", archived: true };
+      await writeFile(join(root, candidate.sourcePath + ".zst"), zstdCompressSync(original));
+    }
+    const scope = { sessionId: candidate.sessionId, project: "registered-project" };
+    await discoverCodexSession(kv as never, candidate, managed());
+    await captureCodexSourceWindow(kv as never, scope, managed());
+    const rows = await kv.list(KV.observations(candidate.sessionId));
+    expect(rows).toHaveLength(2);
+    await rm(join(root, candidate.sourcePath + (compressed ? ".zst" : "")));
+    const moved = { ...candidate, sourcePath: compressed ? "sessions/rollout-returned.jsonl" : "archived_sessions/rollout-moved.jsonl", archived: !compressed };
+    const newUser = { ...user, timestamp: "2026-09-13T00:00:03.000Z", payload: { ...user.payload, id: "user-2", content: [{ type: "input_text", text: "Verify the restored conversation after reopening it" }] } };
+    const continued = Buffer.concat([original, Buffer.from(JSON.stringify(newUser) + "\n")]);
+    await writeFile(join(root, moved.sourcePath + (compressed ? "" : ".zst")), compressed ? continued : zstdCompressSync(continued));
+    await expect(captureCodexSourceWindow(kv as never, scope, managed())).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await discoverCodexSession(kv as never, moved, managed())).toMatchObject({ status: "initialized" });
+    expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 1, status: "caught_up" });
+    expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 0, status: "caught_up" });
+    for (const row of rows) expect(await kv.get(KV.observations(candidate.sessionId), row.id)).toEqual(row);
   });
   it("transitions an already captured hook message only after exact correspondence, preserving its ID and content", async () => {
     await kv.set(KV.sessions, candidate.sessionId, { id: candidate.sessionId, project: "registered-project", cwd,

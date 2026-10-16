@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { readdir, type FileHandle } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Stats } from "node:fs";
 import type { CodexSourceIdentity } from "./codex-source-identity.js";
+import type { CodexReadBudget } from "../replay/codex-read-budget.js";
 
 export interface CodexSourceFile {
   read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number; buffer: Buffer }>;
@@ -10,33 +11,35 @@ export interface CodexSourceFile {
 }
 
 export type CodexPhysicalReader = <T>(root: string, path: string, sessionId: string,
-  read: (source: CodexSourceIdentity, file: FileHandle, headerBytes: number) => Promise<T>) => Promise<T>;
+  read: (source: CodexSourceIdentity, file: CodexSourceFile, headerBytes: number) => Promise<T>) => Promise<T>;
 
 const verifiedPrefixes = new Map<string, boolean>();
 const fingerprint = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export async function codexSourceCandidatePaths(root: string, sessionId: string) {
+export async function codexSourceCandidatePaths(root: string, sessionId: string, budget?: CodexReadBudget) {
   const paths: string[] = [];
   const pending = ["sessions", "archived_sessions"];
   let count = 0;
   while (pending.length) {
+    budget?.check();
     const directory = pending.pop()!;
     const entries = await readdir(join(root, directory), { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT" && ["sessions", "archived_sessions"].includes(directory)) return [];
       throw error;
     });
     for (const entry of entries) {
+      budget?.check();
       if (++count > 100_000) throw Error("Native segment discovery exceeded its supported directory bound");
       if (entry.isSymbolicLink()) throw Error("Linked native history directories are not supported");
       const path = directory + "/" + entry.name;
       if (entry.isDirectory()) pending.push(path);
-      else if (entry.isFile() && /^rollout-.*\.jsonl$/i.test(entry.name) && entry.name.toLowerCase().includes(sessionId.toLowerCase())) paths.push(path);
+      else if (entry.isFile() && /^rollout-.*\.jsonl(?:\.zst)?$/i.test(entry.name) && entry.name.toLowerCase().includes(sessionId.toLowerCase())) paths.push(path.replace(/\.zst$/i, ""));
     }
   }
-  return paths;
+  return [...new Set(paths)];
 }
 
-async function matchesPrefix(file: FileHandle, path: string, endByteOffset: number, endOrdinalExclusive: number) {
+async function matchesPrefix(file: CodexSourceFile, path: string, endByteOffset: number, endOrdinalExclusive: number) {
   const before = await file.stat();
   if (before.size < endByteOffset) return false;
   const key = fingerprint([path, before.dev, before.ino, before.size, before.mtimeMs, endByteOffset, endOrdinalExclusive]);
@@ -59,12 +62,13 @@ async function matchesPrefix(file: FileHandle, path: string, endByteOffset: numb
 
 export async function withCodexSourceSegments<T>(root: string, path: string, sessionId: string,
   physicalRead: CodexPhysicalReader, read: (source: CodexSourceIdentity, file: CodexSourceFile) => Promise<T>,
+  budget?: CodexReadBudget,
 ): Promise<T> {
   return physicalRead(root, path, sessionId, async (source, current, headerBytes) => {
     const continuation = source.continuation;
     if (!continuation) return read(source, current);
     const candidates: string[] = [];
-    for (const candidate of await codexSourceCandidatePaths(root, sessionId)) {
+    for (const candidate of await codexSourceCandidatePaths(root, sessionId, budget)) {
       if (candidate.toLowerCase() === source.relativePath.toLowerCase()) continue;
       let matches: boolean;
       try {

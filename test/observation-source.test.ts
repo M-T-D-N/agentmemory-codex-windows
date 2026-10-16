@@ -93,6 +93,32 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("retained observation source", () => {
+  it("indexes custom payload through observe and searches its sanitized narrative", async () => {
+    const { observe, call } = rig();
+    const fakeKey = "sk-1234567890abcdefghijklmnopqrstuv";
+    const saved = await observe("notification", { event: "deployment", message: "UNIQUE_PAYLOAD_NEEDLE", value: fakeKey });
+    expect(saved.source?.payload).toEqual({ event: "deployment", message: "UNIQUE_PAYLOAD_NEEDLE", value: "[REDACTED_SECRET]" });
+    expect(saved.narrative).toContain("UNIQUE_PAYLOAD_NEEDLE");
+    expect(saved.narrative).not.toContain(fakeKey);
+    const found = await call("mem::search", { query: "UNIQUE_PAYLOAD_NEEDLE", project: "source-test", agentId: "*", trackAccess: false });
+    expect(found.results.map((row: any) => row.observation.id)).toContain(saved.id);
+    expect(JSON.stringify(found)).not.toContain(fakeKey);
+  });
+
+  it.each([null, {}, [], "", "CUSTOM_STRING_PAYLOAD", ["CUSTOM_ARRAY_PAYLOAD"]])("handles custom payload %j", payload => {
+    const saved = buildSyntheticCompression(raw({ hookType: "notification", raw: payload }));
+    expect(saved.source).toEqual(createObservationSource(raw({ hookType: "notification", raw: payload })));
+    if (payload === "CUSTOM_STRING_PAYLOAD") expect(saved.narrative).toContain(payload);
+    else if (Array.isArray(payload) && payload.length) expect(saved.narrative).toContain("CUSTOM_ARRAY_PAYLOAD");
+    else expect(saved.narrative).toBe("");
+  });
+
+  it("keeps valid Unicode at the custom payload narrative boundary", () => {
+    const saved = buildSyntheticCompression(raw({ hookType: "notification", raw: "x".repeat(398) + "😀tail" }));
+    expect(saved.narrative).toBe("x".repeat(398) + "…");
+    expect(Buffer.from(saved.narrative).toString("utf8")).toBe(saved.narrative);
+  });
+
   it("preserves sanitized long prompts, tool results and responses through export/import and replay", async () => {
     const { observe, call } = rig();
     const tail = "deployment-port-19091";

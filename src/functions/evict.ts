@@ -218,92 +218,52 @@ export function registerEvictFunction(sdk: IIIClient, kv: StateKV): void {
       }
 
       const projectObs = new Map<string, CompressedObservation[]>();
+      const plannedLow = new Set<string>();
+      const keyOf = (o: CompressedObservation) => JSON.stringify([o.sessionId, o.id]);
+      const removeSelected = (selected: CompressedObservation, expectedProject: string, reason: string) =>
+        withKeyedLock(sessionLifecycleLockKey(selected.sessionId), async () => {
+          const [current, session] = await Promise.all([
+            kv.get<CompressedObservation>(KV.observations(selected.sessionId), selected.id),
+            kv.get<Session>(KV.sessions, selected.sessionId),
+          ]);
+          const protection = await readArchiveCleanupProtection(kv);
+          if (!current || !session || (session.project || "unknown") !== expectedProject
+            || !isCompressedObservation(current) || JSON.stringify(current) !== JSON.stringify(selected)
+            || kv.hasObservationRecovery(selected.sessionId)
+            || protection({ kind: "session", id: selected.sessionId })
+            || protection({ kind: "observation", id: selected.id, sessionId: selected.sessionId })) return false;
+          if (dryRun) return true;
+          await markCaptureEventDeleted(kv, current);
+          await kv.delete(KV.observations(current.sessionId), current.id);
+          await unindexObservationSession(kv, current.id).catch(() => {});
+          if (current.imageData) await decrementImageRef(kv, sdk, current.imageData);
+          if (current.imageRef && current.imageRef !== current.imageData) await decrementImageRef(kv, sdk, current.imageRef);
+          await recordAudit(kv, "delete", "mem::evict", [current.id], {
+            resource: "observation", reason, sessionId: current.sessionId, dryRun,
+          });
+          return true;
+        });
       for (const session of sessions) {
-        const obs = await kv
-          .list<CompressedObservation>(KV.observations(session.id))
-          .catch(() => []);
-        const compressed = obs.filter((o) => o.title);
-
+        const obs = await kv.list<CompressedObservation>(KV.observations(session.id)).catch(() => []);
+        const compressed = obs.filter(isCompressedObservation);
+        const project = session.project || "unknown";
         for (const o of compressed) {
           if (!o.timestamp) continue;
           const age = now - new Date(o.timestamp).getTime();
-          const maxAge = cfg.lowImportanceMaxDays * MS_PER_DAY;
-          if (
-            age > maxAge &&
-            (o.importance ?? 5) < cfg.lowImportanceThreshold
-          ) {
-            if (dryRun) {
-              stats.lowImportanceObs++;
-            } else {
-              try {
-                await markCaptureEventDeleted(kv, o);
-                await kv.delete(KV.observations(session.id), o.id);
-                stats.lowImportanceObs++;
-              } catch (err) {
-                logger.warn("Eviction delete failed", {
-                  resource: "observation",
-                  id: o.id,
-                  sessionId: session.id,
-                  error: err instanceof Error ? err.message : String(err),
-                });
-                continue;
-              }
-              await unindexObservationSession(kv, o.id).catch(() => {});
-              if (o.imageData) await decrementImageRef(kv, sdk, o.imageData);
-              if (o.imageRef && o.imageRef !== o.imageData) await decrementImageRef(kv, sdk, o.imageRef);
-              await recordAudit(kv, "delete", "mem::evict", [o.id], {
-                resource: "observation",
-                reason: "low_importance_old_observation",
-                sessionId: session.id,
-                dryRun,
-              });
-            }
+          if (age > cfg.lowImportanceMaxDays * MS_PER_DAY && (o.importance ?? 5) < cfg.lowImportanceThreshold) {
+            plannedLow.add(keyOf(o));
+            if (await removeSelected(o, project, "low_importance_old_observation")) stats.lowImportanceObs++;
           }
         }
-
-        const project = session.project || "unknown";
         const existing = projectObs.get(project) || [];
-        existing.push(...compressed);
+        existing.push(...compressed.filter(o => !plannedLow.has(keyOf(o))));
         projectObs.set(project, existing);
       }
-
-      for (const [, obs] of projectObs) {
-        if (obs.length > cfg.maxObservationsPerProject) {
-          const sorted = obs.sort(
-            (a, b) => (a.importance ?? 5) - (b.importance ?? 5),
-          );
-          const toEvict = sorted.slice(
-            0,
-            obs.length - cfg.maxObservationsPerProject,
-          );
-          if (dryRun) {
-            stats.capEvictions += toEvict.length;
-          } else {
-            for (const o of toEvict) {
-              try {
-                await markCaptureEventDeleted(kv, o);
-                await kv.delete(KV.observations(o.sessionId), o.id);
-                stats.capEvictions++;
-              } catch (err) {
-                logger.warn("Eviction delete failed", {
-                  resource: "observation",
-                  id: o.id,
-                  sessionId: o.sessionId,
-                  error: err instanceof Error ? err.message : String(err),
-                });
-                continue;
-              }
-              await unindexObservationSession(kv, o.id).catch(() => {});
-              if (o.imageData) await decrementImageRef(kv, sdk, o.imageData);
-              if (o.imageRef && o.imageRef !== o.imageData) await decrementImageRef(kv, sdk, o.imageRef);
-              await recordAudit(kv, "delete", "mem::evict", [o.id], {
-                resource: "observation",
-                reason: "project_observation_cap",
-                sessionId: o.sessionId,
-                dryRun,
-              });
-            }
-          }
+      for (const [project, obs] of projectObs) {
+        if (obs.length <= cfg.maxObservationsPerProject) continue;
+        const sorted = obs.sort((a, b) => (a.importance ?? 5) - (b.importance ?? 5));
+        for (const o of sorted.slice(0, obs.length - cfg.maxObservationsPerProject)) {
+          if (await removeSelected(o, project, "project_observation_cap")) stats.capEvictions++;
         }
       }
 

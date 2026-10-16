@@ -15,7 +15,7 @@ export function graphObservationDigest(observation: CompressedObservation): stri
 export function graphObservationComplete(session: Session, observation: CompressedObservation, context?: GraphCompletionContext): boolean {
   const row = context?.results.get(observation.id);
   return Boolean(row && row.version === 1 && row.importedGraphVerified !== false && row.sessionId === session.id && row.project === session.project && row.graphEpoch === context!.epoch &&
-    row.inputDigest === graphObservationDigest(observation));
+    row.inputDigest === graphObservationDigest(observation) && (!row.coverage || row.coverage.nextOffset === row.coverage.totalLength && row.coverage.totalLength === JSON.stringify(toGraphExtractionObservation(observation)).length));
 }
 export function validateGraphObservationResult(row: GraphObservationResult, session: Session): GraphObservationResult {
   if (!row || row.version !== 1 || row.sessionId !== session.id || row.project !== session.project ||
@@ -24,7 +24,10 @@ export function validateGraphObservationResult(row: GraphObservationResult, sess
       typeof row.graphEpoch !== "string" || row.graphEpoch && !Number.isFinite(Date.parse(row.graphEpoch)) ||
       typeof row.completedAt !== "string" || !Number.isFinite(Date.parse(row.completedAt)) ||
       typeof row.analyzer !== "string" || !row.analyzer || !["extracted", "excluded"].includes(row.outcome) ||
-      row.importedGraphVerified !== undefined && typeof row.importedGraphVerified !== "boolean") throw Error("Invalid graph observation completion record");
+      row.importedGraphVerified !== undefined && typeof row.importedGraphVerified !== "boolean" ||
+      row.coverage !== undefined && (!row.coverage || row.coverage.version !== 1 ||
+        !Number.isSafeInteger(row.coverage.nextOffset) || !Number.isSafeInteger(row.coverage.totalLength) ||
+        row.coverage.nextOffset <= 0 || row.coverage.totalLength <= 0 || row.coverage.nextOffset > row.coverage.totalLength)) throw Error("Invalid graph observation completion record");
   return row;
 }
 export async function readGraphCompletionEpoch(kv: StateKV): Promise<string> {

@@ -76,12 +76,64 @@ interface MeshSyncPayload {
   graphEdges?: GraphEdge[];
 }
 
+const PROJECT_MESH_SCOPES = new Set(["memories", "actions"]);
+const MESH_COLLECTIONS: Record<keyof MeshSyncPayload, string> = {
+  memories: "memories", actions: "actions", semantic: "semantic", procedural: "procedural",
+  relations: "relations", graphNodes: "graph:nodes", graphEdges: "graph:edges",
+};
+function meshProject(peer: MeshPeer): string | undefined {
+  const project = peer.syncFilter?.project;
+  if (project === undefined) return undefined;
+  if (typeof project !== "string" || !project.trim() || project !== project.trim() || project === "*") {
+    throw Error("Mesh project filter must be one exact project");
+  }
+  return project;
+}
+function exactProjectRows<T extends { project?: string }>(rows: T[], project?: string): T[] {
+  return project ? rows.filter(row => row.project === project) : rows;
+}
+function scopedMeshScopes(peer: MeshPeer, requested: string[] | undefined, project?: string): string[] {
+  const scopes = requested ?? peer.sharedScopes;
+  if (!project) return scopes;
+  if (!Array.isArray(scopes) || scopes.some(scope => typeof scope !== "string")) throw Error("Invalid mesh scopes");
+  if (requested?.some(scope => !peer.sharedScopes.includes(scope) || !PROJECT_MESH_SCOPES.has(scope))) {
+    throw Error("Mesh scopes override exceeds this peer's exact-project boundary");
+  }
+  const effective = scopes.filter(scope => PROJECT_MESH_SCOPES.has(scope));
+  if (!effective.length) throw Error("Project-scoped mesh requires memories or actions");
+  return effective;
+}
+function validateScopedPayload(data: unknown, scopes: string[], project: string): asserts data is MeshSyncPayload {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw Error("Invalid scoped mesh payload");
+  const payload = data as Record<string, unknown>;
+  if (payload.success === false || payload.error || payload.partial === true || payload.complete === false || Array.isArray(payload.errors) && payload.errors.length > 0) throw Error("Incomplete scoped mesh response");
+  if (scopes.some(scope => !Object.entries(MESH_COLLECTIONS).some(([key, value]) => value === scope && Object.hasOwn(payload, key)))) {
+    throw Error("Scoped mesh response omitted a requested collection");
+  }
+  for (const [key, scope] of Object.entries(MESH_COLLECTIONS)) {
+    if (!Object.hasOwn(payload, key)) continue;
+    const rows = payload[key];
+    if (!Array.isArray(rows)) throw Error(`Invalid scoped mesh collection: ${key}`);
+    if (!PROJECT_MESH_SCOPES.has(scope)) {
+      if (rows.length) throw Error(`Global mesh collection cannot be verified for project ${project}: ${key}`);
+      continue;
+    }
+    for (const row of rows) {
+      if (!row || typeof row !== "object" || Array.isArray(row) || row.project !== project) throw Error(`Mesh project mismatch in ${key}`);
+      if (scopes.includes(scope) && (typeof row.id !== "string" || !row.id.trim() || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)))) {
+        throw Error(`Invalid scoped mesh row in ${key}`);
+      }
+    }
+  }
+}
+
 async function lwwMergeList<T extends { id: string }>(
   kv: StateKV,
   scope: string,
   items: T[] | undefined,
   lockPrefix: string,
   tsField: "updatedAt" | "createdAt",
+  project?: string,
 ): Promise<number> {
   if (!items || !Array.isArray(items)) return 0;
   let count = 0;
@@ -89,8 +141,11 @@ async function lwwMergeList<T extends { id: string }>(
     if (!item.id || typeof item.id !== "string") continue;
     const ts = (item as Record<string, unknown>)[tsField];
     if (typeof ts !== "string" || Number.isNaN(new Date(ts).getTime())) continue;
-    const wrote = await withKeyedLock(`${lockPrefix}:${item.id}`, async () => {
+    const merge = () => withKeyedLock(`${lockPrefix}:${item.id}`, async () => {
       const existing = await kv.get<T>(scope, item.id);
+      if (project && ((item as { project?: string }).project !== project || existing && (existing as { project?: string }).project !== project)) {
+        throw Error("Mesh row ownership changed before write");
+      }
       if (!existing) {
         await kv.set(scope, item.id, item);
         return true;
@@ -102,6 +157,7 @@ async function lwwMergeList<T extends { id: string }>(
       }
       return false;
     });
+    const wrote = project && scope === KV.memories ? await withKeyedLock("mem:remember", merge) : await merge();
     if (wrote) count++;
   }
   return count;
@@ -253,6 +309,8 @@ export function registerMeshFunction(
         pushed: number;
         pulled: number;
         errors: string[];
+        retryable?: boolean;
+        partial?: boolean;
       }> = [];
 
       for (const peer of peers) {
@@ -272,9 +330,13 @@ export function registerMeshFunction(
           scopes: data.scopes || peer.sharedScopes,
         });
 
-        const scopes = data.scopes || peer.sharedScopes;
-
+        let scopes = data.scopes || peer.sharedScopes;
+        let project: string | undefined;
+        let subset = false;
         try {
+          project = meshProject(peer);
+          scopes = scopedMeshScopes(peer, data.scopes, project);
+          subset = Boolean(project && peer.sharedScopes.filter(scope => PROJECT_MESH_SCOPES.has(scope)).some(scope => !scopes.includes(scope)));
           if (!(await isAllowedUrl(peer.url))) {
             result.errors.push("peer URL blocked: private/local address not allowed");
             peer.status = "error";
@@ -288,7 +350,8 @@ export function registerMeshFunction(
           }
 
           if (direction === "push" || direction === "both") {
-            const pushData = await collectSyncData(kv, scopes, peer.lastSyncAt, peer.syncFilter);
+            const pushData = await collectSyncData(kv, scopes, peer.lastSyncAt, project ? { project } : undefined);
+            if (project) validateScopedPayload(pushData, scopes, project);
             try {
               const response = await fetch(`${peer.url}/agentmemory/mesh/receive`, {
                 method: "POST",
@@ -301,8 +364,9 @@ export function registerMeshFunction(
                 redirect: "error",
               });
               if (response.ok) {
-                const body = (await response.json()) as { accepted: number; success?: boolean; error?: string };
+                const body = (await response.json()) as { accepted: number; success?: boolean; error?: string; errors?: unknown[]; partial?: boolean; complete?: boolean };
                 if (body.success === false) result.errors.push(`push rejected: ${body.error || "peer refused the payload"}`);
+                else if (project && (!Number.isInteger(body.accepted) || body.accepted < 0 || body.partial === true || body.complete === false || Boolean(body.error) || Array.isArray(body.errors) && body.errors.length > 0)) result.errors.push("push returned an incomplete acknowledgement");
                 else result.pushed = body.accepted || 0;
               } else {
                 result.errors.push(`push failed: HTTP ${response.status}`);
@@ -314,8 +378,11 @@ export function registerMeshFunction(
 
           if (direction === "pull" || direction === "both") {
             try {
+              const url = new URL(`${peer.url}/agentmemory/mesh/export`);
+              url.searchParams.set("since", peer.lastSyncAt || "");
+              if (project) url.searchParams.set("project", project);
               const response = await fetch(
-                `${peer.url}/agentmemory/mesh/export?since=${peer.lastSyncAt || ""}`,
+                url.toString(),
                 {
                   headers: {
                     Authorization: `Bearer ${meshAuthToken}`,
@@ -329,7 +396,7 @@ export function registerMeshFunction(
                   memories?: Memory[];
                   actions?: Action[];
                 };
-                result.pulled = await applySyncData(kv, pullData, scopes);
+                result.pulled = await applySyncData(kv, pullData, scopes, project);
               } else {
                 result.errors.push(`pull failed: HTTP ${response.status}`);
               }
@@ -339,7 +406,7 @@ export function registerMeshFunction(
           }
 
           peer.status = result.errors.length > 0 ? "error" : "connected";
-          if (result.errors.length === 0) {
+          if (result.errors.length === 0 && !subset) {
             peer.lastSyncAt = new Date().toISOString();
           }
         } catch (err) {
@@ -357,7 +424,7 @@ export function registerMeshFunction(
           errors: result.errors,
           lastSyncAt: peer.lastSyncAt,
         });
-        results.push(result);
+        results.push({ ...result, ...(project ? { retryable: result.errors.length > 0, ...(subset ? { partial: true } : {}) } : {}) });
       }
 
       return { success: true, results };
@@ -446,14 +513,11 @@ async function collectSyncData(
 
   if (scopes.includes("memories")) {
     const all = await kv.list<Memory>(KV.memories);
-    result.memories = deltaFilter(all, sinceTime, "updatedAt");
+    result.memories = deltaFilter(exactProjectRows(all, syncFilter?.project), sinceTime, "updatedAt");
   }
 
   if (scopes.includes("actions")) {
-    let all = await kv.list<Action>(KV.actions);
-    if (syncFilter?.project) {
-      all = all.filter((a) => a.project === syncFilter.project);
-    }
+    const all = exactProjectRows(await kv.list<Action>(KV.actions), syncFilter?.project);
     result.actions = deltaFilter(all, sinceTime, "updatedAt");
   }
 
@@ -495,17 +559,28 @@ async function applySyncData(
   kv: StateKV,
   data: MeshSyncPayload,
   scopes: string[],
+  project?: string,
 ): Promise<number> {
+  if (project) {
+    validateScopedPayload(data, scopes, project);
+    for (const [key, scope] of Object.entries(MESH_COLLECTIONS)) {
+      if (!scopes.includes(scope) || !PROJECT_MESH_SCOPES.has(scope)) continue;
+      for (const row of (data as Record<string, Array<{ id: string }>>)[key] ?? []) {
+        const existing = await kv.get<{ project?: string }>(scope === "memories" ? KV.memories : KV.actions, row.id);
+        if (existing && existing.project !== project) throw Error("Mesh incoming ID belongs to another or unknown project");
+      }
+    }
+  }
   const archiveError = await legacyMeshArchiveError(kv, data);
   if (archiveError) throw new Error(archiveError);
   kv.assertRecoveryImportAllowed(data);
   let applied = 0;
 
   if (scopes.includes("memories")) {
-    applied += await lwwMergeList(kv, KV.memories, data.memories, "mem:memory", "updatedAt");
+    applied += await lwwMergeList(kv, KV.memories, data.memories, "mem:memory", "updatedAt", project);
   }
   if (scopes.includes("actions")) {
-    applied += await lwwMergeList(kv, KV.actions, data.actions, "mem:action", "updatedAt");
+    applied += await lwwMergeList(kv, KV.actions, data.actions, "mem:action", "updatedAt", project);
   }
   if (scopes.includes("semantic")) {
     applied += await lwwMergeList(kv, KV.semantic, data.semantic, "mem:semantic", "updatedAt");

@@ -43,7 +43,7 @@ function Invoke-FreshInstallation {
     foreach ($path in @($root, $workspace, $registry, $node)) { Assert-LocalInstallPath $path }
     $nodeVersion = (& $node --version).Trim()
     if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v(\d+)\.' -or [int]$Matches[1] -lt 24) { throw 'Node.js 24 or newer is required.' }
-    $registryDocument = Get-Content -Raw -LiteralPath $registry | ConvertFrom-Json
+    $registryDocument = Get-Content -Encoding UTF8 -Raw -LiteralPath $registry | ConvertFrom-Json
     if ($null -eq $registryDocument.PSObject.Properties['projects'] -or $registryDocument.projects -isnot [Array]) { throw 'ProjectRegistry must contain a projects array.' }
     if (-not (Test-Path -LiteralPath $workspace -PathType Container) -or
         -not (Test-Path -LiteralPath $registry -PathType Leaf) -or
@@ -58,8 +58,8 @@ function Invoke-FreshInstallation {
     if ($sid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')) { throw 'Run installation as the Windows user who will use Codex.' }
     $nonce = [Guid]::NewGuid().ToString('N')
     if ($Activate) {
-        $owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
-        $installed = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+        $owner = Get-Content -Encoding UTF8 -Raw -LiteralPath $ownerPath | ConvertFrom-Json
+        $installed = Get-Content -Encoding UTF8 -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
         if ((Get-ManagedDataContractVersion -Manifest $installed) -ne $targetDataContract) {
             throw 'Prepared installation data contract does not match the activation release.'
         }
@@ -69,7 +69,7 @@ function Invoke-FreshInstallation {
             throw 'Activation requires this user''s prepared installation of this exact release.'
         }
         $nonce = [string]$installed.install_nonce
-        $workspaceConfig = Get-Content -Raw -LiteralPath (Join-Path $root 'config\codex-workspace.json') | ConvertFrom-Json
+        $workspaceConfig = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $root 'config\codex-workspace.json') | ConvertFrom-Json
         if ($workspaceConfig.PSObject.Properties['service_ports']) { $servicePorts = $workspaceConfig.service_ports }
         if ([string]$workspaceConfig.workspace_root -ne $workspace -or [string]$workspaceConfig.project_registry -ne $registry -or
             [string]$installed.node_path -ne $node) { throw 'Prepared installation inputs have changed.' }
@@ -90,7 +90,7 @@ function Invoke-FreshInstallation {
     }
     $daemon = New-InstallTaskRegistration -Root $root -Sid $sid -Nonce $nonce
     $watchdog = New-InstallTaskRegistration -Root $root -Sid $sid -Nonce $nonce -Watchdog
-    $hookSpec = Get-Content -Raw -LiteralPath (Join-Path $payload 'config\hook-spec.json') | ConvertFrom-Json
+    $hookSpec = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $payload 'config\hook-spec.json') | ConvertFrom-Json
     $hooks = New-HookArtifacts -Root $root -Spec $hookSpec
     if ($Activate) {
         Assert-LocalInstallPath $managedRequirements

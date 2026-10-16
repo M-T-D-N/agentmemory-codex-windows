@@ -486,12 +486,12 @@ async function main() {
 
   let nativeSourceScheduler: ReturnType<typeof startCodexSourceScheduler> | null = null;
   registerApiTriggers(sdk, kv, readContext, secret, metricsStore, provider, () => semanticGraphBacklogScheduler?.wake(),
-    process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? () => nativeSourceScheduler?.status() ?? { status: "starting" } : undefined);
+    process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? page => nativeSourceScheduler?.status(page) ?? { status: "starting" } : undefined);
   registerEventTriggers(sdk, kv, readContext);
   markKeywordRebuildPending();
   registerViewerStreamTriggers(sdk, kv, { secret, metricsStore,
     provider: "circuitState" in provider ? provider : undefined });
-  registerMcpEndpoints(sdk, kv, secret);
+  registerMcpEndpoints(sdk, kv, secret, process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? page => nativeSourceScheduler?.status(page) : undefined);
 
   const healthMonitor = registerHealthMonitor(sdk, kv, {
     maintainGraphQueryIndex: true,

@@ -36,8 +36,21 @@ async function fixture() {
 function run(f, args, env = f.env, explicitScratch = true) {
   const scratchArg = explicitScratch ? `-ScratchDirectory ${quote(f.scratch)}` : '';
   const command = `$env:CI='before'; $env:NODE_OPTIONS='--no-warnings'; $before=@{}; $names=@('CI','NODE_OPTIONS','TEMP','TMP','TMPDIR','NODE_COMPILE_CACHE'); foreach($name in $names){$before[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}; try { & ${quote(f.script)} ${args} ${scratchArg} -NodePath ${quote(process.execPath)} } finally { foreach($name in $names){if([Environment]::GetEnvironmentVariable($name,'Process') -cne $before[$name]){throw "Environment leaked: $name"}} }`;
-  return spawnSync(path.join(env.SYSTEMROOT, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',command], { env, encoding:'utf8', timeout:30000, windowsHide:true });
+  const result = spawnSync(path.join(env.SYSTEMROOT, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',command], { env, encoding:'utf8', timeout:30000, windowsHide:true });
+  if (result.error) f.failedSpawn = true;
+  if (result.error) process.stderr.write(JSON.stringify({fixtureRoot:f.root,pid:result.pid,error:String(result.error),stdout:result.stdout,stderr:result.stderr}) + '\n');
+  return result;
 }
+test('release candidate refuses skipped tests before creating output', { skip:!windows }, async () => {
+  const f = await fixture();
+  try {
+    const output = path.join(f.root, 'release');
+    const r = run(f, `-OutputDirectory ${quote(output)} -IiiEnginePath ${quote(process.execPath)} -SkipTests`);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /Release candidates cannot skip tests/);
+    await assert.rejects(readdir(output), { code:'ENOENT' });
+  } finally { if (!f.failedSpawn) await rm(f.root, { recursive:true, force:true }); }
+});
 test('validation can repeat on dirty source without output arguments or deploy', { skip:!windows }, async () => {
   const f=await fixture();
   try {
@@ -51,7 +64,7 @@ test('validation can repeat on dirty source without output arguments or deploy',
     assert.equal(units.length,2);
     for (const unit of units) assert.equal(path.dirname(unit),f.scratch);
     assert.deepEqual((await readdir(f.root)).sort(),['bin','scratch','source','trace.txt']);
-  } finally { await rm(f.root,{recursive:true,force:true}); }
+  } finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 test('validation failure remains a failure and restores environment', { skip:!windows }, async () => {
   const f=await fixture();
@@ -67,7 +80,7 @@ test('validation failure remains a failure and restores environment', { skip:!wi
     assert.match(await readFile(path.join(retained,'fixture.tmp'),'utf8'),/synthetic fixture/);
     assert.match(await readFile(path.join(retained,'node-compile-cache/cache.tmp'),'utf8'),/synthetic cache/);
   }
-  finally { await rm(f.root,{recursive:true,force:true}); }
+  finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 test('workspace task root is preferred over inherited temporary directory', { skip:!windows }, async () => {
@@ -80,7 +93,7 @@ test('workspace task root is preferred over inherited temporary directory', { sk
     const unit=trace.match(/^SCRATCH=(.+)\r?$/m)[1].trim();
     assert.equal(path.dirname(unit),f.scratch);
     assert.deepEqual(await readdir(f.scratch),['caller.txt']);
-  } finally { await rm(f.root,{recursive:true,force:true}); }
+  } finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 test('portable invocation uses inherited temporary parent when no task root is provided', { skip:!windows }, async () => {
@@ -92,7 +105,7 @@ test('portable invocation uses inherited temporary parent when no task root is p
     const unit=(await readFile(f.env.AM_VALIDATION_TRACE,'utf8')).match(/^SCRATCH=(.+)\r?$/m)[1].trim();
     assert.equal(path.dirname(unit),f.scratch);
     assert.deepEqual(await readdir(f.scratch),['caller.txt']);
-  } finally { await rm(f.root,{recursive:true,force:true}); }
+  } finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 test('cleanup refuses an introduced junction and preserves its target', { skip:!windows }, async () => {
@@ -108,7 +121,7 @@ test('cleanup refuses an introduced junction and preserves its target', { skip:!
     assert.ok(r.stderr.includes(path.dirname(link)));
     assert.equal(JSON.parse(await readFile(path.join(f.source,'package.json'),'utf8')).version,'0.9.30');
     await rm(link); link=undefined;
-  } finally { if(link) await rm(link); await rm(f.root,{recursive:true,force:true}); }
+  } finally { if(link) await rm(link); if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 test('scratch parent junction is rejected before subprocess work', { skip:!windows }, async () => {
@@ -122,12 +135,12 @@ test('scratch parent junction is rejected before subprocess work', { skip:!windo
     await assert.rejects(readFile(f.env.AM_VALIDATION_TRACE),{code:'ENOENT'});
     assert.deepEqual(await readdir(f.scratch),['caller.txt']);
     await rm(link);
-  } finally { await rm(link,{force:true}); await rm(f.root,{recursive:true,force:true}); }
+  } finally { await rm(link,{force:true}); if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 test('release mode still rejects dirty source before producing output', { skip:!windows }, async () => {
   const f=await fixture();
   try { const out=path.join(f.root,'release');const r=run(f,`-OutputDirectory ${quote(out)} -IiiEnginePath ${quote(process.execPath)}`);assert.notEqual(r.status,0);assert.match(r.stderr,/clean source checkout/);await assert.rejects(readdir(out),{code:'ENOENT'}); }
-  finally { await rm(f.root,{recursive:true,force:true}); }
+  finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 // Synthetic package commands exercise diagnostic materialization and lifecycle;
@@ -203,7 +216,7 @@ if(-not(Test-Path (Join-Path $ReleaseRoot 'release-manifest.json'))){throw 'Mani
     for (const directory of ['node_modules', 'dist', 'source-cache']) {
       assert.equal(await readFile(path.join(f.source,directory,'caller.txt'),'utf8'),'source-owned');
     }
-  } finally { await rm(f.root,{recursive:true,force:true}); }
+  } finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 for (const callback of ["throw 'qualification fixture failure'", 'exit 23']) {
@@ -218,7 +231,7 @@ for (const callback of ["throw 'qualification fixture failure'", 'exit 23']) {
       const release=path.join(f.scratch,units[0],'agentmemory-codex-windows-0.1.0-preview.15');
       assert.equal(JSON.parse(await readFile(path.join(release,'release-manifest.json'),'utf8')).release_revision,'r32');
       assert.ok(r.stderr.includes(path.dirname(release)));
-    } finally { await rm(f.root,{recursive:true,force:true}); }
+    } finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
   });
 }
 
@@ -230,7 +243,7 @@ test('diagnostic build failure preserves the unit without calling qualification'
     assert.doesNotMatch(r.stderr,/qualification must not run/);
     assert.doesNotMatch(r.stdout,/"success"\s*:\s*true/);
     assert.equal((await readdir(f.scratch)).filter(name=>name.startsWith('agentmemory-build-')).length,1);
-  } finally { await rm(f.root,{recursive:true,force:true}); }
+  } finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 test('diagnostic does not accept a persistent output directory', { skip:!windows }, async () => {
@@ -240,7 +253,7 @@ test('diagnostic does not accept a persistent output directory', { skip:!windows
     const r=run(f,`-DiagnosticOnly -QualificationScript ${quote(f.script)} -IiiEnginePath ${quote(process.execPath)} -OutputDirectory ${quote(out)}`);
     assert.notEqual(r.status,0); await assert.rejects(readdir(out),{code:'ENOENT'});
     await assert.rejects(readFile(f.env.AM_VALIDATION_TRACE),{code:'ENOENT'});
-  } finally { await rm(f.root,{recursive:true,force:true}); }
+  } finally { if (!f.failedSpawn) await rm(f.root,{recursive:true,force:true}); }
 });
 
 for (const host of ['powershell.exe', 'pwsh.exe']) {

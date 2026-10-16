@@ -20,8 +20,6 @@ import { KV, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import {
   GRAPH_EXTRACTION_SYSTEM,
-  buildGraphExtractionPrompt,
-  toGraphExtractionObservation,
 } from "../prompts/graph-extraction.js";
 import { isGraphExtractionEnabled } from "../config.js";
 import { recordAudit, safeAudit } from "./audit.js";
@@ -29,7 +27,8 @@ import { withKeyedLock, tryWithKeyedLock } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
 import { scrubRecord } from "./privacy.js";
 import { isCodexInternalAmbientText, isCodexApprovalReviewText } from "./observation-visibility.js";
-import { semanticGraphCursorsAtEnd } from "./semantic-graph-backlog.js";
+import { boundedGraphInput, graphPromptInputTokens } from "./graph-input-coverage.js";
+import { semanticGraphCatchupLimits, semanticGraphCursorsAtEnd } from "./semantic-graph-backlog.js";
 import { graphObservationComplete, graphObservationDigest, readGraphCompletionContext, type GraphCompletionContext } from "./graph-observation-result.js";
 import { applyGraphWritePlan, prepareGraphWritePlan } from "../state/graph-write-plan.js";
 import {
@@ -66,6 +65,8 @@ import {
   queryIndexShardKey,
   readAllGraphQueryDocuments,
   readGraphQueryEdgeRefs,
+  readGraphReviewRetiredEdgeRefs,
+  retiredGraphAdjacencyKey,
   resolvePagination,
   type GraphQueryEdgeRef,
   type GraphQueryIndexDocument,
@@ -212,6 +213,24 @@ async function readGraphQueryProvenanceCandidates(
   return { nodeIds: [...nodeIds].sort(), edgeIds: [...edgeIds].sort() };
 }
 
+async function retiredEndpointId(id: string, read: (id: string) => Promise<GraphNode | null>): Promise<string> {
+  const seen = new Set<string>();
+  while (true) {
+    if (seen.has(id)) throw new Error("review-retired endpoint redirect cycle");
+    seen.add(id);
+    const node = await read(id);
+    const nextId = node?.stale ? node.properties?.supersededBy : undefined;
+    if (!node || typeof nextId !== "string" || !nextId) return id;
+    const next = await read(nextId);
+    const project = graphNodeProject(node);
+    if (!project || !next || graphNodeProject(next) !== project ||
+        scopedNodeIdentity(project, node.type, node.name) !== scopedNodeIdentity(project, next.type, next.name)) {
+      throw new Error("review-retired endpoint redirect changes identity");
+    }
+    id = next.id;
+  }
+}
+
 async function buildGraphQueryIndex(
   kv: StateKV,
   nodes: GraphNode[],
@@ -234,6 +253,9 @@ async function buildGraphQueryIndex(
     { length: GRAPH_QUERY_INDEX_SHARDS },
     () => ({} as Record<string, GraphQueryEdgeRef[]>),
   );
+  const retiredAdjacencyShards = Array.from(
+    { length: GRAPH_QUERY_INDEX_SHARDS }, () => ({} as Record<string, GraphQueryEdgeRef[]>),
+  );
   const provenanceShards = Array.from(
     { length: GRAPH_QUERY_INDEX_SHARDS },
     () => ({} as GraphQueryProvenanceShard),
@@ -250,6 +272,16 @@ async function buildGraphQueryIndex(
     }
     addGraphQueryProvenance(provenanceShards, "edgeIds", edge.id, edge);
   }
+  const allNodes = new Map(nodes.map(node => [node.id, node]));
+  for (const edge of edges) {
+    if (!edge.reviewRetirement?.active || !isVisibleAfterReset({ ...edge, stale: false }, snapshot.resetAt)) continue;
+    const read = async (id: string) => allNodes.get(id) ?? null;
+    const endpoints = new Set([await retiredEndpointId(edge.sourceNodeId, read), await retiredEndpointId(edge.targetNodeId, read)]);
+    for (const nodeId of endpoints) {
+      const shard = retiredAdjacencyShards[queryIndexShardFor(nodeId)]!;
+      (shard[nodeId] ??= []).push(graphQueryEdgeRef(edge));
+    }
+  }
   const writes: Array<() => Promise<unknown>> = [];
   for (let shard = 0; shard < GRAPH_QUERY_INDEX_SHARDS; shard++) {
     const key = queryIndexShardKey(shard);
@@ -258,6 +290,7 @@ async function buildGraphQueryIndex(
     writes.push(
       () => kv.set(KV.graphQueryDocuments, key, documents),
       () => kv.set(KV.graphQueryAdjacency, key, adjacency),
+      () => kv.set(KV.graphQueryAdjacency, retiredGraphAdjacencyKey(shard), retiredAdjacencyShards[shard]!),
       () =>
         kv.set(
           KV.graphQueryDocuments,
@@ -271,6 +304,7 @@ async function buildGraphQueryIndex(
     version: GRAPH_QUERY_INDEX_VERSION,
     revision: 1,
     provenanceVersion: 1,
+    reviewRetirementVersion: 1,
     shardCount: GRAPH_QUERY_INDEX_SHARDS,
     totalNodes: liveNodes.length,
     totalEdges: liveEdges.length,
@@ -879,10 +913,17 @@ async function updateGraphQueryIndexDelta(
       documentShards.set(shardId, shard);
     }
 
+    const retiredEndpoints = new Map<string, string[]>();
+    for (const edge of [...previousEdges, ...changedEdges]) {
+      if (!edge.reviewRetirement?.active) continue;
+      const read = (id: string) => kv.get<GraphNode>(KV.graphNodes, id);
+      retiredEndpoints.set(edge.id, [await retiredEndpointId(edge.sourceNodeId, read), await retiredEndpointId(edge.targetNodeId, read)]);
+    }
     const adjacencyShardIds = new Set<number>();
     for (const edge of [...previousEdges, ...changedEdges]) {
       adjacencyShardIds.add(queryIndexShardFor(edge.sourceNodeId));
       adjacencyShardIds.add(queryIndexShardFor(edge.targetNodeId));
+      for (const id of retiredEndpoints.get(edge.id) ?? []) adjacencyShardIds.add(queryIndexShardFor(id));
     }
     const adjacencyShards = new Map<
       number,
@@ -899,6 +940,15 @@ async function updateGraphQueryIndexDelta(
         );
       }),
     );
+    const retiredShardIds = new Set<number>();
+    for (const edge of [...previousEdges, ...changedEdges]) {
+      if (!retiredEndpoints.has(edge.id)) continue;
+      for (const id of [edge.sourceNodeId, edge.targetNodeId, ...retiredEndpoints.get(edge.id)!]) retiredShardIds.add(queryIndexShardFor(id));
+    }
+    const retiredAdjacencyShards = new Map<number, Record<string, GraphQueryEdgeRef[]>>();
+    await Promise.all([...retiredShardIds].map(async shard => {
+      retiredAdjacencyShards.set(shard, (await kv.get<Record<string, GraphQueryEdgeRef[]>>(KV.graphQueryAdjacency, retiredGraphAdjacencyKey(shard))) ?? {});
+    }));
     const previousEdgeRefs = new Map<string, GraphQueryEdgeRef>();
     const changedEdgeIds = new Set(
       [...previousEdges, ...changedEdges].map((edge) => edge.id),
@@ -911,25 +961,31 @@ async function updateGraphQueryIndexDelta(
       }
     }
     const removeEdgeRef = (edge: GraphEdge): void => {
-      for (const nodeId of new Set([edge.sourceNodeId, edge.targetNodeId])) {
+      const ids = new Set([edge.sourceNodeId, edge.targetNodeId, ...(retiredEndpoints.get(edge.id) ?? [])]);
+      for (const nodeId of ids) {
         const shardId = queryIndexShardFor(nodeId);
-        const shard = adjacencyShards.get(shardId) ?? {};
-        const refs = (shard[nodeId] ?? []).filter((ref) => ref.id !== edge.id);
-        if (refs.length > 0) shard[nodeId] = refs;
-        else delete shard[nodeId];
-        adjacencyShards.set(shardId, shard);
+        for (const shards of [adjacencyShards, retiredAdjacencyShards]) {
+          if (!shards.has(shardId)) continue;
+          const shard = shards.get(shardId)!;
+          const refs = (shard[nodeId] ?? []).filter(ref => ref.id !== edge.id);
+          if (refs.length) shard[nodeId] = refs;
+          else delete shard[nodeId];
+        }
       }
     };
     for (const edge of [...previousEdges, ...changedEdges]) removeEdgeRef(edge);
     const finalEdges = new Map(changedEdges.map((edge) => [edge.id, edge]));
     for (const edge of finalEdges.values()) {
-      if (!isVisibleAfterReset(edge, snapshot.resetAt)) continue;
+      const retired = edge.reviewRetirement?.active && isVisibleAfterReset({ ...edge, stale: false }, snapshot.resetAt);
+      if (!retired && !isVisibleAfterReset(edge, snapshot.resetAt)) continue;
       const ref = graphQueryEdgeRef(edge);
-      for (const nodeId of new Set([edge.sourceNodeId, edge.targetNodeId])) {
+      const ids = retired ? retiredEndpoints.get(edge.id)! : [edge.sourceNodeId, edge.targetNodeId];
+      const shards = retired ? retiredAdjacencyShards : adjacencyShards;
+      for (const nodeId of new Set(ids)) {
         const shardId = queryIndexShardFor(nodeId);
-        const shard = adjacencyShards.get(shardId) ?? {};
+        const shard = shards.get(shardId) ?? {};
         (shard[nodeId] ??= []).push(ref);
-        adjacencyShards.set(shardId, shard);
+        shards.set(shardId, shard);
       }
     }
 
@@ -999,6 +1055,9 @@ async function updateGraphQueryIndexDelta(
         kv.set(KV.graphQueryAdjacency, queryIndexShardKey(shard), adjacency),
       );
     }
+    for (const [shard, adjacency] of retiredAdjacencyShards) {
+      writes.push(() => kv.set(KV.graphQueryAdjacency, retiredGraphAdjacencyKey(shard), adjacency));
+    }
     for (const [shard, provenance] of provenanceShards) {
       writes.push(() =>
         kv.set(
@@ -1013,6 +1072,7 @@ async function updateGraphQueryIndexDelta(
       version: GRAPH_QUERY_INDEX_VERSION,
       revision: (priorManifest.revision ?? 0) + 1,
       ...(priorManifest.provenanceVersion === 1 ? { provenanceVersion: 1 as const } : {}),
+      ...(priorManifest.reviewRetirementVersion === 1 ? { reviewRetirementVersion: 1 as const } : {}),
       shardCount: GRAPH_QUERY_INDEX_SHARDS,
       totalNodes: snapshot.stats.totalNodes,
       totalEdges: snapshot.stats.totalEdges,
@@ -2382,44 +2442,10 @@ async function upsertManualGraph(
       }
       if (exactTargets.has(input.existingNodeId)) throw new Error("existingNodeId must be unique within the request");
       exactTargets.add(input.existingNodeId);
-      if (normalizedNodes.some((other) => other !== input && !other.existingNodeId && other.type === input.type && other.name === input.name)) {
+      if (normalizedNodes.some((other) => other !== input && !other.existingNodeId && scopedNodeIdentity(project, other.type, other.name) === scopedNodeIdentity(project, input.type, input.name))) {
         throw new Error("exact and name-based targets cannot share an identity in one request");
       }
     }
-    const canonicalByKey = new Map<string, string>();
-    const identitiesBeingMerged = new Set<string>();
-    for (const input of normalizedNodes) {
-      const candidates = storedNodes.filter((node) =>
-        graphNodeProject(node) === project && node.type === input.type &&
-        node.name === input.name && isVisibleAfterReset(node, snap.resetAt) &&
-        (!input.existingNodeId || node.id === input.existingNodeId),
-      ).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-      if (candidates[0]) canonicalByKey.set(input.key, candidates[0].id);
-      if (candidates.length > 1) for (const node of candidates) identitiesBeingMerged.add(node.id);
-    }
-    for (const input of normalizedEdges) {
-      const source = canonicalByKey.get(input.source);
-      const target = canonicalByKey.get(input.target);
-      if (!source || !target) continue;
-      const existingId = await kv.get<string>(KV.graphEdgeKey, edgeIndexKey(source, target, input.type));
-      const edge = existingId ? await kv.get<GraphEdge>(KV.graphEdges, existingId) : null;
-      if (edge?.reviewRetirement?.active &&
-          isVisibleAfterReset({ ...edge, stale: false }, snap.resetAt)) {
-        throw new Error("edge is review-retired; use explicit restore first: " + edge.id);
-      }
-    }
-    if (identitiesBeingMerged.size) {
-      for (const edge of await kv.list<GraphEdge>(KV.graphEdges)) {
-        if (edge.reviewRetirement?.active &&
-            (identitiesBeingMerged.has(edge.sourceNodeId) || identitiesBeingMerged.has(edge.targetNodeId)) &&
-            isVisibleAfterReset({ ...edge, stale: false }, snap.resetAt)) {
-          throw new Error("node deduplication would change a review-retired edge: " + edge.id);
-        }
-      }
-    }
-    await prepareGraphQueryIndexUpdate(kv, snap);
-    snap.dirty = true;
-    await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
     const candidatesByIdentity = new Map<string, GraphNode[]>();
     for (const node of storedNodes) {
       const nodeProject = graphNodeProject(node);
@@ -2430,6 +2456,63 @@ async function upsertManualGraph(
       candidates.push(node);
       candidatesByIdentity.set(identity, candidates);
     }
+    const candidatesFor = (input: (typeof normalizedNodes)[number]) =>
+      [...(candidatesByIdentity.get(scopedNodeIdentity(project, input.type, input.name)) ?? [])]
+        .filter(node => !input.existingNodeId || node.id === input.existingNodeId)
+        .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")) || a.id.localeCompare(b.id));
+    const retirementRows: Array<GraphEdge | null> = [];
+    if (queryIndexManifest?.reviewRetirementVersion === 1) {
+      const refs = (await readGraphReviewRetiredEdgeRefs(kv, storedNodes.map(node => node.id))).refs;
+      for (let offset = 0; offset < refs.length; offset += 100) {
+        retirementRows.push(...await Promise.all(refs.slice(offset, offset + 100).map(ref => kv.get<GraphEdge>(KV.graphEdges, ref.id))));
+      }
+    } else retirementRows.push(...await kv.list<GraphEdge>(KV.graphEdges));
+    const retiredEdges = retirementRows.filter((edge): edge is GraphEdge => Boolean(edge && edge.reviewRetirement?.active &&
+      (edge.project ?? edge.properties?.project) === project && isVisibleAfterReset({ ...edge, stale: false }, snap.resetAt)));
+    const redirectNodes = new Map(storedNodes.map(node => [node.id, node]));
+    const resolveRetiredEndpoint = (id: string) => retiredEndpointId(id, async id => {
+      const node = redirectNodes.get(id) ?? await kv.get<GraphNode>(KV.graphNodes, id);
+      if (node) redirectNodes.set(id, node);
+      return node;
+    });
+    const retiredPairs = new Map<string, string>();
+    for (const edge of retiredEdges) {
+      const source = await resolveRetiredEndpoint(edge.sourceNodeId);
+      const target = await resolveRetiredEndpoint(edge.targetNodeId);
+      retiredPairs.set(edgeIndexKey(source, target, edge.type), edge.id);
+    }
+    const canonicalByKey = new Map<string, string>();
+    const identitiesBeingMerged = new Set<string>();
+    for (const input of normalizedNodes) {
+      const candidates = candidatesFor(input);
+      if (candidates[0]) canonicalByKey.set(input.key, candidates[0].id);
+      if (candidates.length > 1) for (const node of candidates) identitiesBeingMerged.add(node.id);
+    }
+    for (const input of normalizedEdges) {
+      const source = canonicalByKey.get(input.source);
+      const target = canonicalByKey.get(input.target);
+      if (!source || !target) continue;
+      const retiredId = retiredPairs.get(edgeIndexKey(source, target, input.type));
+      if (retiredId) throw new Error("edge is review-retired; use explicit restore first: " + retiredId);
+      const existingId = await kv.get<string>(KV.graphEdgeKey, edgeIndexKey(source, target, input.type));
+      const edge = existingId ? await kv.get<GraphEdge>(KV.graphEdges, existingId) : null;
+      if (edge?.reviewRetirement?.active &&
+          isVisibleAfterReset({ ...edge, stale: false }, snap.resetAt)) {
+        throw new Error("edge is review-retired; use explicit restore first: " + edge.id);
+      }
+    }
+    if (identitiesBeingMerged.size) {
+      for (const edge of retiredEdges) {
+        if (edge.reviewRetirement?.active &&
+            (identitiesBeingMerged.has(edge.sourceNodeId) || identitiesBeingMerged.has(edge.targetNodeId)) &&
+            isVisibleAfterReset({ ...edge, stale: false }, snap.resetAt)) {
+          throw new Error("node deduplication would change a review-retired edge: " + edge.id);
+        }
+      }
+    }
+    await prepareGraphQueryIndexUpdate(kv, snap);
+    snap.dirty = true;
+    await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
     const nodeIds: Record<string, string> = {};
     const nodeRedirects = new Map<string, string>();
     let newNodeCount = 0;
@@ -2444,13 +2527,7 @@ async function upsertManualGraph(
     for (const input of normalizedNodes) {
       const indexKey = scopedNameIndexKey(project, input.type, input.name);
       const identity = scopedNodeIdentity(project, input.type, input.name);
-      const candidates = [...(candidatesByIdentity.get(identity) ?? [])]
-        .filter((node) => !input.existingNodeId || node.id === input.existingNodeId)
-        .sort(
-          (a, b) =>
-            String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")) ||
-            a.id.localeCompare(b.id),
-        );
+      const candidates = candidatesFor(input);
       let existing = candidates[0] ?? null;
       const incoming: GraphNode = {
         id: generateId("gn"),
@@ -2540,6 +2617,9 @@ async function upsertManualGraph(
       let existing = existingId
         ? await kv.get<GraphEdge>(KV.graphEdges, existingId)
         : null;
+      if (retiredPairs.has(indexKey) || (existing?.reviewRetirement?.active && isVisibleAfterReset({ ...existing, stale: false }, snap.resetAt))) {
+        throw new Error("edge is review-retired; use explicit restore first: " + (retiredPairs.get(indexKey) ?? existing?.id));
+      }
       if (existing && !isVisibleAfterReset(existing, snap.resetAt)) {
         existing = null;
       }
@@ -3281,6 +3361,7 @@ export function registerGraphFunction(
       cursorMode?: "forward" | "bootstrap_backfill";
       semanticHasMore?: boolean;
       semanticBootstrapDone?: boolean;
+      inputTokenBudget?: number;
     }) =>
       withGraphWriterLock(data.deferIfBusy === true, async () => {
       if (!data.observations || data.observations.length === 0) {
@@ -3366,6 +3447,34 @@ export function registerGraphFunction(
         if (preparationResult) return preparationResult;
       }
 
+      if (provider.name === "local-qwen" && project && sessionId && isGraphExtractionEnabled()
+          && observations.some(observation => !isCodexInternalAmbientText(observation.narrative))
+          && !provider.getRuntimeInfo?.() && provider.probe) {
+        try { await provider.probe(); }
+        catch (error) { return { success: false, semanticError: error instanceof Error ? error.message : String(error) }; }
+      }
+      const runtimeBudget = semanticGraphCatchupLimits(provider).inputTokenBudget;
+      const requestedBudget = Number.isSafeInteger(data.inputTokenBudget) && data.inputTokenBudget! > 0 ? data.inputTokenBudget : undefined;
+      const inputBudget = runtimeBudget && requestedBudget ? Math.min(runtimeBudget, requestedBudget) : runtimeBudget ?? requestedBudget;
+      let bounded: ReturnType<typeof boundedGraphInput>;
+      try {
+        const excluded = observations.filter(observation => isCodexInternalAmbientText(observation.narrative));
+        const eligible = observations.filter(observation => !isCodexInternalAmbientText(observation.narrative));
+        bounded = boundedGraphInput(eligible.length ? eligible : excluded, eligible.length ? inputBudget : undefined, completion?.results, completion?.epoch);
+        observations = eligible.length ? [...excluded, ...bounded.observations] : excluded;
+        if (bounded.coverage && !completion) {
+          if (!sessionId || !project) throw Error("Resumable graph input requires official session provenance");
+          await withKeyedLock(sessionLifecycleLockKey(sessionId), async () => {
+            const current = await kv.get<Session>(KV.sessions, sessionId);
+            if (!current || current.project !== project) throw Error("Graph coverage session changed");
+            await kv.update(KV.sessions, sessionId, [{ type: "set", path: "semanticGraphCompletionVersion", value: 1 }]);
+            completion = await readGraphCompletionContext(kv, { ...current, semanticGraphCompletionVersion: 1 });
+          });
+        }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      const chunkIncomplete = Boolean(bounded.coverage && bounded.coverage.nextOffset < bounded.coverage.totalLength);
       const processedObservationIds = observations.map((observation) => observation.id);
       const processingObservations = observations;
       const excludedObservationIds = observations
@@ -3409,11 +3518,10 @@ export function registerGraphFunction(
         (provider.name !== "local-qwen" || Boolean(project && sessionId));
       let llmError: string | undefined;
       let semanticCompleted = false;
+      let semanticChunkCompleted = false;
       let semanticRepairAttempted = false;
       if (llmEnabled && !onlyExcludedObservations) {
-        const prompt = buildGraphExtractionPrompt(
-          observations.map(toGraphExtractionObservation),
-        );
+        const prompt = bounded.prompt;
         try {
           const response = await provider.compress(
             GRAPH_EXTRACTION_SYSTEM,
@@ -3427,13 +3535,12 @@ export function registerGraphFunction(
             if (provider.name !== "local-qwen" || (!regenerateFromSource && !repairableGraphXmlError(parseError))) {
               throw parseError;
             }
+            const repairPrompt = regenerateFromSource
+              ? graphSourceRegenerationPrompt(prompt, obsIds[0]!)
+              : graphXmlRepairPrompt(response, parseError, obsIds);
+            if (inputBudget && graphPromptInputTokens(repairPrompt) > inputBudget) throw parseError;
             semanticRepairAttempted = true;
-            const repaired = await provider.compress(
-              GRAPH_EXTRACTION_SYSTEM,
-              regenerateFromSource
-                ? graphSourceRegenerationPrompt(prompt, obsIds[0]!)
-                : graphXmlRepairPrompt(response, parseError, obsIds),
-            );
+            const repaired = await provider.compress(GRAPH_EXTRACTION_SYSTEM, repairPrompt);
             parsed = parseGraphXml(repaired, obsIds, true);
           }
           nodes = nodes.concat(parsed.nodes.map((node) => ({
@@ -3453,7 +3560,8 @@ export function registerGraphFunction(
               curation_claim: false,
             },
           })));
-          semanticCompleted = true;
+          semanticChunkCompleted = true;
+          semanticCompleted = !chunkIncomplete;
         } catch (err) {
           llmError = err instanceof Error ? err.message : String(err);
           if (llmError.startsWith("local_qwen_deferred:")) logger.info("Semantic graph extraction deferred", { reason: llmError });
@@ -3484,10 +3592,11 @@ export function registerGraphFunction(
           const epoch = completion.epoch;
           const prepared = await prepareGraphWritePlan(kv, async store => {
             const result = await persist(store as StateKV);
-            if (processingCompleted) for (const observation of processingObservations) {
+            if (processingCompleted || semanticChunkCompleted) for (const observation of processingObservations) {
               const row: GraphObservationResult = { version: 1, id: observation.id, sessionId, project,
                 inputDigest: graphObservationDigest(observation), graphEpoch: epoch, completedAt, analyzer,
-                outcome: excludedObservationIds.includes(observation.id) ? "excluded" : "extracted" };
+                outcome: excludedObservationIds.includes(observation.id) ? "excluded" : "extracted",
+                ...(bounded.coverage && !excludedObservationIds.includes(observation.id) ? { coverage: bounded.coverage } : {}) };
               await store.set(KV.graphObservationResults(sessionId), observation.id, row);
             }
             return result;
@@ -3565,6 +3674,12 @@ export function registerGraphFunction(
                 value: semanticGraphCursorsAtEnd(projectedSession, currentObservations, completion) ? "complete" : "pending",
               });
               await kv.update(KV.sessions, sessionId, updates);
+            } else if (semanticChunkCompleted) {
+              await kv.update(KV.sessions, sessionId, [
+                { type: "set", path: "semanticGraphStatus", value: "pending" },
+                { type: "set", path: "semanticGraphLastError", value: "" },
+                { type: "set", path: "semanticGraphDeferredReason", value: "" },
+              ]);
             } else {
               await kv.update(KV.sessions, sessionId, [
                 { type: "set", path: "semanticGraphDeferredReason", value: llmError?.startsWith("local_qwen_deferred:") ? llmError : "" },
@@ -3604,7 +3719,7 @@ export function registerGraphFunction(
           llm: llmEnabled && !onlyExcludedObservations && !llmError,
         });
         return {
-          success: processingCompleted || !llmEnabled || nodes.length > 0 || edges.length > 0,
+          success: processingCompleted || semanticChunkCompleted || !llmEnabled || nodes.length > 0 || edges.length > 0,
           processingCompleted,
           ...(excludedObservationIds.length ? { excludedObservationIds, exclusionReason } : {}),
           nodesAdded: nodes.length,

@@ -3238,3 +3238,59 @@ it("preserves historical faults separately when direct extraction yields to a cu
   expect(await kv.get("mem:sessions","ses_1")).toMatchObject({semanticGraphStatus:"deferred",semanticGraphThroughObservationId:"old",
     semanticGraphLastError:"local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000",semanticGraphDeferredReason:"local_qwen_deferred:background_held"});
 });
+
+
+describe("dot F6 canonical retirement boundaries",()=>{
+ async function fixture(sourceName="Alpha"){
+  const kv=mockKV(),sdk=mockSdk();registerGraphFunction(sdk as never,kv as never,mockProvider as never);
+  for(const [sessionId,id]of [["original","original-obs"],["review","review-obs"]]){await kv.set("mem:sessions",sessionId,{id:sessionId,project:"/app",status:"completed"});await kv.set("mem:obs:"+sessionId,id,{...testObs,id,sessionId});}
+  const sources=[{sessionId:"original",observationIds:["original-obs"]}];
+  const input={project:"/app",sources,sharedSources:true,nodes:[{key:"a",type:"concept",name:sourceName},{key:"b",type:"concept",name:"Beta"}],edges:[{source:"a",target:"b",type:"related_to"}]};
+  const created=await sdk.trigger("mem::graph-upsert",input);expect(created.success).toBe(true);
+  const edge=(await kv.list<GraphEdge>("mem:graph:edges"))[0]!;
+  const retirement=await sdk.trigger("mem::graph-provenance-reconcile",{action:"retire",project:"/app",reason:"relation rejected",targets:[{kind:"edge",id:edge.id,expectedUpdatedAt:edge.updatedAt??edge.createdAt,sources:[{sessionId:"review",observationIds:["review-obs"]}]}]});expect(retirement.success).toBe(true);
+  return{kv,sdk,input,created,edge};
+ }
+ it.each(["exact","lowercase","nfkc","whitespace","alias","duplicate","redirect","mixed-exact"])("rejects %s retired relation before node writes",async kind=>{
+  const f=await fixture(kind==="whitespace"?"Alpha Beta":"Alpha");
+  if(kind==="redirect"){const prior=await f.kv.get<GraphNode>("mem:graph:nodes",f.created.nodeIds.a);await f.kv.set("mem:graph:nodes","duplicate-alpha",{...prior,id:"duplicate-alpha",name:"alpha"});await f.sdk.trigger("mem::graph-snapshot-rebuild",{force:true});}
+  const name=kind==="exact"?"Alpha":kind==="nfkc"?"Ａｌｐｈａ":kind==="whitespace"?"alpha   beta":"alpha";
+  const nodes=[{key:"alias-source",type:"concept",name,properties:{mustNotPersist:"yes"}},{key:"alias-target",type:"concept",name:"Beta"}];
+  if(kind==="duplicate")nodes.unshift({key:"a",type:"concept",name:"Alpha",properties:{mustNotPersist:"yes"}});
+  const request={...f.input,nodes,edges:[{source:"alias-source",target:"alias-target",type:"related_to"}]};
+  if(kind==="mixed-exact")request.nodes.unshift({key:"exact",type:"concept",name:"Alpha",existingNodeId:f.created.nodeIds.a} as never);
+  const beforeNodes=structuredClone(await f.kv.list("mem:graph:nodes")),beforeEdges=structuredClone(await f.kv.list("mem:graph:edges"));
+  const set=vi.spyOn(f.kv,"set");expect(await f.sdk.trigger("mem::graph-upsert",request)).toMatchObject({success:false,error:expect.stringMatching(/review-retired|cannot share/)});expect(set).not.toHaveBeenCalled();expect(await f.kv.list("mem:graph:nodes")).toEqual(beforeNodes);expect(await f.kv.list("mem:graph:edges")).toEqual(beforeEdges);
+ });
+ it("explicit restore still permits canonical alias updates on the same edge",async()=>{
+  const f=await fixture();const retired=(await f.kv.get<GraphEdge>("mem:graph:edges",f.edge.id))!;
+  expect(await f.sdk.trigger("mem::graph-provenance-reconcile",{action:"restore",project:"/app",reason:"relation restored",targets:[{kind:"edge",id:retired.id,expectedUpdatedAt:retired.updatedAt??retired.createdAt,sources:[{sessionId:"review",observationIds:["review-obs"]}]}]})).toMatchObject({success:true});
+  const result=await f.sdk.trigger("mem::graph-upsert",{...f.input,nodes:f.input.nodes.map(n=>({...n,name:n.name.toLowerCase()}))});expect(result.success).toBe(true);expect(await f.kv.list("mem:graph:edges")).toHaveLength(1);expect((await f.kv.list<GraphEdge>("mem:graph:edges"))[0]?.id).toBe(f.edge.id);
+ });
+ it.each(["shadowed-key","old-redirect","legacy-index","retirement-index-failure"])("preserves retirement for %s without any node writes",async mode=>{
+  const f=await fixture();
+  if(mode==="shadowed-key"){
+   await f.kv.set("mem:graph:edges","prior-live-copy",{...f.edge,id:"prior-live-copy",stale:false,reviewRetirement:undefined});
+   await f.kv.set("mem:graph:edge-key",`${f.edge.sourceNodeId}|${f.edge.targetNodeId}|${f.edge.type}`,"prior-live-copy");
+   await f.sdk.trigger("mem::graph-snapshot-rebuild",{force:true});
+  }
+  if(mode==="old-redirect"){
+   const original=(await f.kv.get<GraphNode>("mem:graph:nodes",f.created.nodeIds.a))!;
+   await f.kv.set("mem:graph:nodes",original.id,{...original,stale:true,properties:{...original.properties,supersededBy:"current-alpha"}});
+   await f.kv.set("mem:graph:nodes","current-alpha",{...original,id:"current-alpha",stale:false});
+   await f.sdk.trigger("mem::graph-snapshot-rebuild",{force:true});
+  }
+  if(mode==="legacy-index"){
+   const manifest=await f.kv.get<Record<string,unknown>>("mem:graph:query-manifest","current");
+   await f.kv.set("mem:graph:query-manifest","current",{...manifest,reviewRetirementVersion:undefined});
+  }
+  if(mode==="retirement-index-failure"){
+   const get=f.kv.get.bind(f.kv);vi.spyOn(f.kv,"get").mockImplementation(async(scope,key)=>{if(scope==="mem:graph:query-adjacency"&&key.startsWith("review-retired:"))throw Error("injected retirement index failure");return get(scope,key);});
+  }
+  const nodesBefore=structuredClone(await f.kv.list("mem:graph:nodes")),edgesBefore=structuredClone(await f.kv.list("mem:graph:edges"));const set=vi.spyOn(f.kv,"set");
+  const request={...f.input,nodes:f.input.nodes.map(n=>({...n,name:n.name.toLowerCase(),properties:{mustNotPersist:"yes"}}))};
+  expect(await f.sdk.trigger("mem::graph-upsert",request)).toMatchObject({success:false,error:expect.stringMatching(/review-retired|injected retirement index failure/)});
+  expect(set).not.toHaveBeenCalled();expect(await f.kv.list("mem:graph:nodes")).toEqual(nodesBefore);expect(await f.kv.list("mem:graph:edges")).toEqual(edgesBefore);
+ });
+
+});

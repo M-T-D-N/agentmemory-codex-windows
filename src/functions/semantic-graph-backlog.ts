@@ -606,6 +606,7 @@ export function registerSemanticGraphBacklogFunction(
         cursorMode: candidate.batch.cursorMode,
         semanticHasMore: candidate.batch.semanticHasMore,
         semanticBootstrapDone: candidate.batch.semanticBootstrapDone,
+        inputTokenBudget: candidate.batch.inputTokenBudget,
       },
     }) as {
       success?: boolean;

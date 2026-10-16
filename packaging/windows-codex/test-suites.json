@@ -1,0 +1,20 @@
+{
+  "adapter": [
+    "packaging/windows-codex/tests/codex-turn.test.mjs",
+    "packaging/windows-codex/tests/recall-first.test.mjs"
+  ],
+  "packaging": [
+    "packaging/windows-codex/tests/npm-distribution.test.mjs",
+    "packaging/windows-codex/tests/build-validation.test.mjs",
+    "packaging/windows-codex/tests/backup-closeout.test.mjs",
+    "packaging/windows-codex/tests/installer-backup-retention.test.mjs",
+    "packaging/windows-codex/tests/installer-junction-ps51.test.mjs",
+    "packaging/windows-codex/tests/qualification-state.test.mjs",
+    "packaging/windows-codex/tests/native-capture-e2e.test.mjs",
+    "packaging/windows-codex/tests/native-evidence-store.test.mjs",
+    "packaging/windows-codex/tests/native-evidence-process.test.mjs",
+    "packaging/windows-codex/tests/cloud-secret-output.test.mjs",
+    "packaging/windows-codex/tests/distribution-qualification.test.mjs",
+    "packaging/windows-codex/tests/distribution-qualification-process.test.mjs"
+  ]
+}

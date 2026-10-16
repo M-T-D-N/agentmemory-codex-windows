@@ -406,7 +406,7 @@ describe("GraphRetrieval", () => {
     const read = vi.spyOn(kv, "get");
     expect(await new GraphRetrieval(kv as never).searchByEntities(["Entry"], 2, 20, "own")).toEqual([]);
     expect(list.mock.calls.some(([scope]) => scope === "mem:graph:edges")).toBe(false);
-    expect(read).not.toHaveBeenCalled();
+    expect(read.mock.calls.filter(([scope]) => scope === "mem:sessions")).toEqual([]);
   });
 
   it.each(["entities", "chunks"])("keeps ambient and missing-session provenance semantics with an optional session reader (%s)", async kind => {
@@ -439,7 +439,7 @@ describe("GraphRetrieval", () => {
       ? await retrieval.searchByEntities(["Entry"], 2, 20, undefined, readSession as never)
       : await retrieval.expandFromChunks(["seed"], 1, 10, undefined, readSession as never);
     expect(reused).toEqual(baseline);
-    expect(read).not.toHaveBeenCalled();
+    expect(read.mock.calls.filter(([scope]) => scope === "mem:sessions")).toEqual([]);
     expect(readSession).toHaveBeenCalledTimes(3);
   });
 

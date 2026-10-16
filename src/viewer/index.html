@@ -1513,7 +1513,7 @@
     <span class="footer-sep">·</span>
     <a href="https://github.com/rohitg00/agentmemory#readme" target="_blank" rel="noopener">docs</a>
     <span class="footer-sep">·</span>
-    <a id="footer-feedback" href="https://github.com/rohitg00/agentmemory/issues/new" target="_blank" rel="noopener">report issue &rarr;</a>
+    <a id="footer-feedback" href="https://github.com/M-T-D-N/agentmemory-codex-windows/issues/new" title="Open an editable issue draft; review its contents before submitting" target="_blank" rel="noopener">report issue &rarr;</a>
     <span class="footer-keys"><kbd>/</kbd> search · <kbd>g</kbd> then a letter to jump · <kbd>?</kbd> glossary</span>
   </footer>
 
@@ -8220,6 +8220,11 @@
       panel.hidden = false;
     }
 
+    function feedbackIssueUrl(version) {
+      var safeVersion = typeof version === 'string' && /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(version) ? version : 'unknown';
+      var body = '**Version:** ' + safeVersion + '\n\n### What went wrong\n\n(describe the issue)\n\n### Steps to reproduce\n\n1. \n2. \n3. \n';
+      return 'https://github.com/M-T-D-N/agentmemory-codex-windows/issues/new?title=' + encodeURIComponent('[viewer] ') + '&body=' + encodeURIComponent(body);
+    }
     function updateFooter() {
       var vEl = document.getElementById('footer-version');
       if (vEl && store.version) vEl.textContent = 'v' + store.version;
@@ -8231,20 +8236,7 @@
       }
       var fbEl = document.getElementById('footer-feedback');
       if (fbEl) {
-        var flagSummary = (store.flags || []).map(function(f) { return f.key + '=' + (f.enabled ? 'on' : 'off'); }).join(', ');
-        var body = encodeURIComponent(
-          '**Version:** ' + (store.version || '?') + '\n' +
-          '**Provider:** ' + (store.provider || '?') + '\n' +
-          '**Embedding:** ' + (store.embeddingProvider || '?') + '\n' +
-          '**Flags:** ' + flagSummary + '\n' +
-          '**User agent:** ' + navigator.userAgent + '\n\n' +
-          '### What went wrong\n\n' +
-          '(describe the issue)\n\n' +
-          '### Steps to reproduce\n\n' +
-          '1. \n2. \n3. \n'
-        );
-        fbEl.href = 'https://github.com/rohitg00/agentmemory/issues/new?title=' +
-          encodeURIComponent('[viewer] ') + '&body=' + body;
+        fbEl.href = feedbackIssueUrl(store.version);
       }
     }
     // Keyboard activation for role="button" cards (session items). Click

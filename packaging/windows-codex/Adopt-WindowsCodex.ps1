@@ -34,7 +34,7 @@ function Get-UpstreamInstallation {
     }
     $packageFile = Join-Path $package 'package.json'
     Assert-LocalInstallPath $packageFile
-    $metadata = Get-Content -Raw -LiteralPath $packageFile | ConvertFrom-Json
+    $metadata = Get-Content -Encoding UTF8 -Raw -LiteralPath $packageFile | ConvertFrom-Json
     if ([string]$metadata.name -ne '@agentmemory/agentmemory' -or [string]$metadata.version -notmatch '^\d+\.\d+\.\d+$') { throw 'UpstreamPackageRoot must identify a released AgentMemory package.' }
     $version = [version]$metadata.version
     if ($version -gt [version]$releaseManifest.agentmemory_version) { throw 'This upstream version is newer than the supported release; no downgrade was performed.' }
@@ -49,7 +49,7 @@ function Get-UpstreamInstallation {
         }
     }
     $stateFile = Join-Path $runtime 'engine-state.json'
-    $engineState = if (Test-Path -LiteralPath $stateFile) { Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json } else { $null }
+    $engineState = if (Test-Path -LiteralPath $stateFile) { Get-Content -Encoding UTF8 -Raw -LiteralPath $stateFile | ConvertFrom-Json } else { $null }
     if ($engineState -and [string]$engineState.kind -ne 'native') { throw 'Docker-backed installations require their own export/import migration.' }
     $environment = Read-UpstreamEnvironment -Paths @((Join-Path $sourceHome '.env'), (Join-Path $runtime 'runtime.env'))
     $configPath = if ($engineState) { [string]$engineState.configPath } else {
@@ -235,10 +235,10 @@ function Invoke-UpstreamAdoption {
     foreach ($key in @('AGENTMEMORY_VECTOR_BUCKET_SIZE', 'AGENTMEMORY_INDEX_SAVE_INTERVAL_MS', 'AGENTMEMORY_VECTOR_BACKFILL_MAX', 'AGENTMEMORY_VECTOR_BACKFILL', 'SESSION_TIMEOUT_MS', 'SESSION_TTL_DAYS', 'OBSERVATION_TTL_DAYS', 'AGENTMEMORY_AUDIT_RETENTION_DAYS', 'AGENTMEMORY_BM25_LIMIT', 'AGENTMEMORY_GRAPH_WEIGHT')) {
         if ($source.Environment.ContainsKey($key)) { $settings[$key] = [string]$source.Environment[$key] }
     }
-    $workspaceDocument = Get-Content -Raw -LiteralPath (Join-Path $root 'config\codex-workspace.json') | ConvertFrom-Json
+    $workspaceDocument = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $root 'config\codex-workspace.json') | ConvertFrom-Json
     $workspaceDocument | Add-Member -NotePropertyName upstream_settings -NotePropertyValue $settings
     Write-Utf8NoBom (Join-Path $root 'config\codex-workspace.json') ($workspaceDocument | ConvertTo-Json -Depth 6)
-    $manifest = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+    $manifest = Get-Content -Encoding UTF8 -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
     $manifest | Add-Member -NotePropertyName upstream_adoption -NotePropertyValue ([ordered]@{ source_version = $source.Version; source_package = $source.Package; source_data = $source.Data; original_preserved = $true })
     Write-Utf8NoBom $installManifestPath ($manifest | ConvertTo-Json -Depth 12)
     Invoke-FreshInstallation -Activate -Execute
@@ -266,7 +266,7 @@ function Invoke-UpstreamAdoption {
                     Remove-Item -LiteralPath $managedRequirements
                 }
                 if (Test-Path -LiteralPath $installManifestPath) {
-                    $failedInstall = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+                    $failedInstall = Get-Content -Encoding UTF8 -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
                     Set-ObjectProperty -Object $failedInstall -Name 'status' -Value 'adoption_failed'
                     Set-ObjectProperty -Object $failedInstall -Name 'installation_status' -Value 'adoption_failed'
                     Write-Utf8NoBom $installManifestPath ($failedInstall | ConvertTo-Json -Depth 12)

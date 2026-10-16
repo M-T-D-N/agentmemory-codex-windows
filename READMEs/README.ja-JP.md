@@ -13,7 +13,7 @@ AgentMemory ダウンストリームです。
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> `0.1.0-preview.16` です。
+> `0.1.0-preview.17` のソース候補です。まだ公開されていません。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -130,7 +130,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| 公開ダウンストリーム版 | `0.1.0-preview.16` | 公開リポジトリ版とソース tag |
+| ダウンストリーム候補版 | `0.1.0-preview.17` | 未公開の候補と予定ソース tag |
 | AgentMemory 互換版 | `0.9.30` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.22.1` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -147,7 +147,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、ダウンストリーム修正済み iii engine `0.22.1` Windows 実行ファイル
 
-preview.16 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
+preview.17 の公開後は、同じ GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。現在の tag とダウンロード URL は予定経路です。既存の公開 preview.16 は、その版に付属するガイドを使い、異なる版のランチャーと ZIP を混在させないでください。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
 npm 12 はリモート TGZ を既定で拒否します。インストールコマンドの
 `--allow-remote=root` は指定したランチャーをその呼び出しで許可し、
@@ -155,11 +155,11 @@ npm 12 はリモート TGZ を既定で拒否します。インストールコ�
 
 ## ソースからビルドする
 
-Windows PowerShell で次を実行します。出力ディレクトリは事前に存在していては
+レビュー済み候補の作業コピーで実行します。次の tag の clone は preview.17 公開後のみ使用できます。出力ディレクトリは事前に存在していては
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.16 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.17 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

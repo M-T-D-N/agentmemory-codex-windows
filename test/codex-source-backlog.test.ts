@@ -14,6 +14,41 @@ const drain = (overrides: object = {}) => ({ unknown: 0, captureUnknown: 0, requ
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("bounded native source backlog", () => {
+  it("preserves a completed cycle timestamp while the next batch becomes incomplete", async () => {
+    vi.useFakeTimers(); const sdk = { trigger: vi.fn().mockResolvedValue(drain({ captureCycleComplete: true })) };
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    try {
+      await vi.advanceTimersByTimeAsync(0); const first = scheduler.status().captureSnapshot;
+      expect(first.lastCycleCompletedAt).not.toBeNull();
+      sdk.trigger.mockResolvedValue(drain({ captureCycleComplete: false })); await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().captureSnapshot).toMatchObject({ cycleComplete: false, lastCycleCompletedAt: first.lastCycleCompletedAt, workerStartedAt: first.workerStartedAt });
+    } finally { await scheduler.stop(); }
+  });
+  it("keeps discovery records through unrelated successful batches and clears only a completed healthy cycle", async () => {
+    vi.useFakeTimers();
+    const sdk = { trigger: vi.fn().mockResolvedValue(drain({ graphFailures: 1,
+      discovery: { unknown: 1, reconcileRequired: 0, cycleComplete: false,
+        failures: [{ sessionId: "new-source", error: "unsupported_source" }] } })) };
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler.status().pipeline).toMatchObject({ discoveryIssues: 1, graphFailures: 1,
+        discoveryTargetCount: 1, discoveryRecords: [{ sessionId: "new-source", reason: "unsupported_source" }] });
+      sdk.trigger.mockResolvedValue(drain());
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().pipeline.discoveryRecords).toHaveLength(1);
+      sdk.trigger.mockRejectedValue(Error("private transport path"));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().pipeline.schedulerFailures).toBe(1);
+      sdk.trigger.mockResolvedValue(drain({ discovery: { unknown: 0, reconcileRequired: 0, cycleComplete: true } }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().pipeline.discoveryRecords).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().pipeline).toMatchObject({ discoveryIssues: 0, schedulerFailures: 0,
+        graphFailures: 0, discoveryIssueCount: 0, discoveryRecords: [] });
+    } finally { await scheduler.stop(); }
+  });
+
   it("reads the owner once per drain and applies owner changes on the next invocation", async () => {
     vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
     const sdk = mockSdk(), kv = mockKV();
@@ -137,6 +172,52 @@ describe("bounded native source backlog", () => {
     sdk.registerFunction("mem::codex-source-capture", async () => ({ status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 }));
     expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 0, sourceUnavailable: 0, failures: [] });
   });
+  it("retains an RPC failure across unrelated batches and scheduler restart until canonical success", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV();
+    for (let i = 0; i < 10; i++) await kv.set(KV.sessions, `s${i}`, session(`s${i}`));
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    const capture = vi.fn(async input => {
+      const id = (input as { sessionId: string }).sessionId;
+      if (id === "s0") throw Error("private path and transport details");
+      return { status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 };
+    });
+    sdk.registerFunction("mem::codex-source-capture", capture);
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 1 });
+    const failed = await kv.get<Session>(KV.sessions, "s0");
+    expect(failed?.codexNativeCapture).toMatchObject({ status: "unknown", issue: "native_capture_rpc_failed" });
+    expect(JSON.stringify(failed)).not.toContain("private path");
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 1, failures: [] });
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 1 });
+    sdk.registerFunction("mem::codex-source-capture", async input => {
+      const id = (input as { sessionId: string }).sessionId;
+      const current = (await kv.get<Session>(KV.sessions, id))!;
+      await kv.set(KV.sessions, id, { ...current, codexNativeCapture: {
+        ...current.codexNativeCapture!, status: "caught_up", issue: undefined, lastFailure: undefined, checkedAt: new Date().toISOString() } });
+      return { status: "caught_up", inserted: 0, bytesReadThrough: 100, snapshotBytes: 100 };
+    });
+    await sdk.trigger("mem::codex-source-drain", {});
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 0, failures: [] });
+  });
+  it("does not replace a concurrent proven capture success or resurrect a removed session after RPC failure", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV();
+    await kv.set(KV.sessions, "new-success", session("new-success"));
+    await kv.set(KV.sessions, "removed", session("removed"));
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    sdk.registerFunction("mem::codex-source-capture", async input => {
+      const id = (input as { sessionId: string }).sessionId;
+      if (id === "removed") await kv.delete(KV.sessions, id);
+      else await kv.set(KV.sessions, id, { ...session(id), observationCount: 99,
+        codexNativeCapture: { ...session(id).codexNativeCapture, status: "caught_up", checkedAt: new Date().toISOString() } });
+      throw Error("acknowledgement failed");
+    });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 0 });
+    expect(await kv.get(KV.sessions, "removed")).toBeNull();
+    expect(await kv.get(KV.sessions, "new-success")).toMatchObject({ observationCount: 99,
+      codexNativeCapture: { status: "caught_up" } });
+  });
   it("retains absent source counts outside the current batch and does not classify other unknowns as absent", async () => {
     vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
     const sdk = mockSdk(), kv = mockKV();
@@ -160,6 +241,36 @@ describe("bounded native source backlog", () => {
       sdk.trigger.mockResolvedValue(drain());
       await vi.advanceTimersByTimeAsync(60_000);
       expect(scheduler.status()).toMatchObject({ status: "checking", sourceUnavailable: 0, captureIssues: 0 });
+    } finally { await scheduler.stop(); }
+  });
+  it("separates non-unique components and marks the retained snapshot stale after a failed refresh", async () => {
+    vi.useFakeTimers();
+    const sdk = { trigger: vi.fn().mockResolvedValue(drain({ captureUnknown: 2, requiresReconciliation: 1,
+      failures: [{ sessionId: "same-as-unknown" }], captureCycleComplete: false,
+      unresolvedCaptures: 9, sourceHolds: 1, archivedSourceUnavailable: 5 })) };
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    try {
+      expect(scheduler.status().captureSnapshot).toMatchObject({ freshness: "unobserved", observedAt: null });
+      await vi.advanceTimersByTimeAsync(0);
+      const first = scheduler.status();
+      expect(first).toMatchObject({ status: "attention", captureIssues: 4, captureSnapshot: {
+        counting: "non_unique_component_sum", uniqueSessionCount: null, scope: "latest_drain",
+        cycleComplete: false, freshness: "current", components: {
+          unknownSessions: 2, reconciliationSessions: 1, batchFailureEvents: 1,
+        },
+      } });
+      first.captureSnapshot.components.unknownSessions = 999;
+      expect(scheduler.status().captureSnapshot.components.unknownSessions).toBe(2);
+      sdk.trigger.mockRejectedValue(Error("transport unavailable"));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().captureSnapshot).toMatchObject({ observedAt: first.captureSnapshot.observedAt,
+        freshness: "stale", components: { unknownSessions: 2, reconciliationSessions: 1, batchFailureEvents: 1 } });
+      sdk.trigger.mockResolvedValue(drain({ unresolvedCaptures: 9, sourceHolds: 1, archivedSourceUnavailable: 5,
+        captureCycleComplete: true }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status()).toMatchObject({ status: "checking", captureIssues: 0,
+        captureSnapshot: { freshness: "current", cycleComplete: true,
+          components: { unknownSessions: 0, reconciliationSessions: 0, batchFailureEvents: 0 } } });
     } finally { await scheduler.stop(); }
   });
   it("finishes a large native sweep without waiting one minute per batch or being reordered by hooks", async () => {

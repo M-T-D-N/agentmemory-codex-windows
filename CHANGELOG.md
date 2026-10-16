@@ -6,6 +6,37 @@ The upstream AgentMemory release history remains in the
 
 ## Unreleased
 
+- Separate development/diagnostic builds from release candidates. Reject release `SkipTests`; bind distribution to matching source inputs, manifest/payload, suite logs, Windows matrix results and confirmed native operating evidence. These release-readiness edits are still undergoing qualification.
+- Share the Windows packaging test inventory between CI and the builder, including the native capture/evidence and PowerShell 5.1 junction regressions.
+- Preserve a structured cursor rejection reason and comparison digests. Account for physical reads and decompression before window parsing, with cooperative time checks and an explicit decoder window bound. Existing cursor/data recovery still requires a proved correspondence plan.
+- Remove generated-secret values from the four unsupported cloud example entrypoints; synthetic first-boot/restart checks do not expand the supported Windows platform matrix.
+- Align current installer instructions with the unpublished preview.17 candidate and distinguish planned asset URLs from the existing public release.
+
+- Resolve legacy server-hook project-mismatch jobs only after matching their exact native turn/content/source and an already stored canonical observation. Keep original project identities and preserve prior error, attempt count and native source linkage in the existing completed-event history; unavailable, missing or conflicting originals stay unresolved.
+- Keep a native session with proved normal user history visible when its retained first-prompt preview is an approval-review delta. Full source initialization repairs that stale preview from the first actual user request and audits the old preview digest/source key; explicit capture exclusions remain authoritative.
+- Avoid individual index-health reads for zero-count sessions whose observation scope is absent from the authoritative StateModule group list. Existing scopes with stale zero counts remain checked, and unsupported group-list adapters retain the existing scan.
+
+- Recover proved source cwd relocations and explicitly referenced prior segments without removing originals; preserve pure host Page context while excluding it from correspondence blockers, and classify invalid native cursors as reconciliation requirements.
+
+### Source-status reporting — local review candidate
+
+- Report current native source collection independently of service, hook inbox and graph health. Preserve the existing technical counters; expose current component counts, unique sessions/events, bounded exact-target reason details and latest-batch observation/cycle freshness.
+- Keep an exact archived, retained legacy original out of ordinary reporting only while its existing correspondence fingerprint still matches. Normal importance/facts/concepts/files enrichment does not reopen it. Explicit history includes archive audit/revision evidence; changed correspondence, restored targets and new errors remain visible.
+- Retain failed native calls in the existing session capture state under the existing observation writer/session locks. Unrelated successful batches and restart do not clear a failure. A proven capture success clears the marker, including the unchanged-checkpoint path, without overwriting concurrent success or recreating a deleted session.
+- Treat failed archive/state verification as unverified, never as zero problems. Reads do not start discovery, capture, repair or Local Qwen; general failure logs omit raw exception strings.
+
+These source-status changes were included in the owner's r210/r211 operating installations. The historical aggregate `captureIssues` is a non-unique component sum, not a count of distinct incidents. Current source-state checks and historical batch identity are separate evidence.
+
+### 0.1.0-preview.17 candidate
+
+- Stop logging complete LocalAI startup responses, including Qwen owner tokens and model paths. Exact ownership tokens remain private lifecycle state and are still supplied on release; borrowed instances are not stopped.
+- Remap Rust and native C/C++ compilation paths to neutral prefixes in the qualified iii 0.22.1 engine. Preserve file-flush-v1, assertions and data contract 5. Include the exact qualified Cargo lock alongside the existing patch and record the actual compiler provenance. A new engine requires fresh crash/flush/recovery qualification.
+- Route viewer issue drafts to this downstream repository. Include only a validated numeric application version; omit provider, embedding, flags and browser diagnostics. Users can inspect and edit the draft before submitting.
+- Replace obsolete no-auth and engine-pin advice with separate Windows managed and portable configuration guidance. Windows authentication remains random and CurrentUser-DPAPI protected.
+- Add optional installation-owned local_qwen settings for a loopback HTTP endpoint and the supported LocalAI lifecycle entry point. Preserve the default and update configuration; reject untrusted inherited values, unsupported APIs and mismatched endpoints before invoking a launcher.
+
+Preview.17 has not been published. The owner's r211 operating installation uses source 88f52497b273fb7cefdc6067a18b9745c15a32ac; subsequent release-readiness edits are not yet applied. Limited r211 operating verification passed, while the global E2E remains blocked by three native cursor reconciliation cases. Qualification results and remaining limits are retained with the exact reviewed candidate; the existing preview.16 assets remain immutable.
+
 ## 0.1.0-preview.16
 
 - Exclude pnpm installation metadata from the deployed runtime, removing build-machine patch paths while retaining the applied SDK patch and production dependency checks.

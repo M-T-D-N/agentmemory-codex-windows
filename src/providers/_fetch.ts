@@ -15,8 +15,14 @@ const HARD_BUDGET_CAP_MS = 170000;
 const MIN_ATTEMPT_FLOOR_MS = 100;
 const RETRY_STATUS = new Set([429, 503]);
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal | null): Promise<void> => {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const aborted = () => { clearTimeout(timer); signal?.removeEventListener("abort", aborted); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", aborted); resolve(); }, ms);
+    signal?.addEventListener("abort", aborted, { once: true });
+  });
+};
 
 /**
  * Parse a Retry-After header into a delay in milliseconds. Supports both the
@@ -52,7 +58,16 @@ async function fetchOnce(
     ? AbortSignal.any([init.signal, ctl.signal])
     : ctl.signal;
   const t = setTimeout(() => ctl.abort(), ms);
-  return fetch(url, { ...init, signal }).finally(() => clearTimeout(t));
+  try {
+    const response = await fetch(url, { ...init, signal });
+    if (response.body) await response.clone().arrayBuffer();
+    return response;
+  } catch (error) {
+    if (signal.aborted) throw signal.reason;
+    throw error;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 export async function fetchWithTimeout(
@@ -92,14 +107,12 @@ export async function fetchWithTimeout(
     // This response is being discarded for a retry; release its body so the
     // underlying connection is returned to the pool instead of leaking.
     await response.body?.cancel().catch(() => {});
-    await sleep(delay);
+    await sleep(delay, init.signal);
 
     // Cap the per-attempt timeout to whatever budget is left so a late attempt
     // can't push total elapsed past the deadline.
-    const attemptMs = Math.max(
-      MIN_ATTEMPT_FLOOR_MS,
-      Math.min(ms, budgetMs - (Date.now() - start)),
-    );
+    const attemptMs = budgetMs - (Date.now() - start);
+    if (attemptMs <= 0) throw new DOMException("Request deadline exceeded", "AbortError");
     response = await fetchOnce(url, init, attemptMs);
   }
   return response;

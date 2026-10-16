@@ -163,6 +163,15 @@ describe("Codex observation visibility", () => {
     ).toBe(false);
   });
 
+  it("keeps a proved normal native session visible despite a stale approval-review preview", () => {
+    const firstPrompt = "The following is the Codex agent history added since your last approval assessment. Continue the same review conversation.";
+    const normal = session({ firstPrompt, codexNativeCapture: { cursor: { parser: { normalUserSeen: true, normalSessionSeen: true, internalTurn: false } } } } as never);
+    expect(isExcludedCodexAmbientSession(normal)).toBe(false);
+    expect(isExcludedCodexAmbientSession({ ...normal, captureExcluded: true })).toBe(true);
+    expect(isExcludedCodexAmbientSession(session({ firstPrompt }))).toBe(true);
+    expect(isExcludedCodexAmbientSession({ ...normal, codexNativeCapture: { cursor: { parser: { normalUserSeen: true, normalSessionSeen: true, internalTurn: true } } } })).toBe(true);
+  });
+
   it("removes only ambient UI blocks from otherwise normal user text", () => {
     const result = sanitizeCodexAmbientObservation(
       observation(

@@ -1,6 +1,8 @@
-import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, parse, posix, relative, resolve, sep, win32 } from "node:path";
 import { withCodexSourceSegments, type CodexSourceFile } from "./codex-source-segments.js";
+import { withCodexCompressedFile } from "./codex-source-compressed.js";
+import { CodexReadBudget } from "../replay/codex-read-budget.js";
 
 export interface CodexSourceIdentity {
   sessionId: string;
@@ -118,23 +120,27 @@ export function codexSourceRelativePath(sourceRoot: string, absolutePath: string
   const segments = flavor.relative(root, path).split(/[\\/]/);
   if (!['sessions', 'archived_sessions'].includes(segments[0]) ||
       segments.some(part => !part || part === "." || part === ".." || part.includes(":")) ||
-      !/^rollout-[^/\\]+\.jsonl$/.test(segments.at(-1) ?? "")) {
+      !/^rollout-[^/\\]+\.jsonl(?:\.zst)?$/i.test(segments.at(-1) ?? "")) {
     throw new Error("Codex source path is outside the supported history directories");
   }
-  return segments.join("/");
+  return segments.join("/").replace(/\.zst$/i, "");
 }
 
 export async function withReadOnlyCodexSource<T>(
   sourceRoot: string, relativePath: string, sessionId: string,
   read: (source: CodexSourceIdentity, file: CodexSourceFile) => Promise<T>,
+  budget = new CodexReadBudget(),
 ): Promise<T> {
-  return withCodexSourceSegments(sourceRoot, relativePath, sessionId, withReadOnlyCodexPhysicalSource, read);
+  return withCodexSourceSegments(sourceRoot, relativePath, sessionId,
+    (root, path, id, callback) => withReadOnlyCodexPhysicalSource(root, path, id, callback, budget), read, budget);
 }
 
 export async function withReadOnlyCodexPhysicalSource<T>(
   sourceRoot: string, relativePath: string, sessionId: string,
-  read: (source: CodexSourceIdentity, file: FileHandle, headerBytes: number) => Promise<T>,
+  read: (source: CodexSourceIdentity, file: CodexSourceFile, headerBytes: number) => Promise<T>,
+  budget = new CodexReadBudget(),
 ): Promise<T> {
+  budget.check();
   if (!sourceRoot || !isAbsolute(sourceRoot)) throw new Error("Codex source root is not configured");
   if (typeof relativePath !== "string" || relativePath.includes("\0") ||
       isAbsolute(relativePath) || win32.isAbsolute(relativePath)) {
@@ -147,35 +153,58 @@ export async function withReadOnlyCodexPhysicalSource<T>(
     throw new Error("Codex source path is outside the supported history directories");
   }
   const root = resolve(sourceRoot);
-  const path = resolve(root, ...segments);
-  if (relative(root, path).startsWith(".." + sep)) throw new Error("Codex source path escapes its root");
-  await rejectLinkedComponents(path);
-  if (canonicalCodexCwd(await realpath(path)) !== canonicalCodexCwd(path)) throw new Error("Codex source path identity changed");
-  const file = await open(path, "r");
+  const plainPath = resolve(root, ...segments);
+  if (relative(root, plainPath).startsWith(".." + sep)) throw new Error("Codex source path escapes its root");
+  const prepare = async () => {
+    let path = plainPath, compressed = false;
+    try { await rejectLinkedComponents(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      path += ".zst"; compressed = true; await rejectLinkedComponents(path);
+    }
+    if (canonicalCodexCwd(await realpath(path)) !== canonicalCodexCwd(path)) throw new Error("Codex source path identity changed");
+    return { path, compressed, file: await open(path, "r") };
+  };
+  let prepared: Awaited<ReturnType<typeof prepare>>;
+  for (let attempt = 0; ; attempt++) {
+    try { prepared = await prepare(); break; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt >= 3) throw error;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  const { path, compressed, file } = prepared;
   try {
     const identity = await file.stat();
     if (!identity.isFile()) throw new Error("Codex source is not a regular file");
-    const maximumHeaderBytes = 2 * 1024 * 1024;
-    const bytes = Buffer.alloc(Math.min(identity.size, maximumHeaderBytes));
-    let count = 0;
-    let end = -1;
-    while (count < bytes.length && end === -1) {
-      const result = await file.read(bytes, count, Math.min(64 * 1024, bytes.length - count), count);
-      if (result.bytesRead === 0) break;
-      end = bytes.indexOf(10, count);
-      count += result.bytesRead;
-      if (end >= count) end = -1;
-    }
-    if (end === -1) throw new Error("Codex metadata is incomplete or exceeds the supported header size");
-    const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end)).replace(/^\uFEFF/, ""));
-    const source = parseCodexSourceIdentity(parsed, sessionId, segments.join("/"));
-    const result = await read(source, file, end + 1);
+    const inspect = async (logical: CodexSourceFile) => {
+      const originalSize = (await logical.stat()).size;
+      const maximumHeaderBytes = 2 * 1024 * 1024;
+      const bytes = Buffer.alloc(Math.min(originalSize, maximumHeaderBytes));
+      let count = 0;
+      let end = -1;
+      while (count < bytes.length && end === -1) {
+        const result = await logical.read(bytes, count, Math.min(64 * 1024, bytes.length - count), count);
+        if (result.bytesRead === 0) break;
+        end = bytes.indexOf(10, count);
+        count += result.bytesRead;
+        if (end >= count) end = -1;
+      }
+      if (end === -1) throw new Error("Codex metadata is incomplete or exceeds the supported header size");
+      const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end)).replace(/^\uFEFF/, ""));
+      const source = parseCodexSourceIdentity(parsed, sessionId, segments.join("/"));
+      return read(source, logical, end + 1);
+    };
+    const physical = budget.physical(file);
+    const result = compressed ? await withCodexCompressedFile(physical, path, inspect, budget) : await inspect(physical);
     await rejectLinkedComponents(path);
     if (canonicalCodexCwd(await realpath(path)) !== canonicalCodexCwd(path)) throw new Error("Codex source path identity changed");
     const current = await lstat(path);
-    if (current.isSymbolicLink() || current.dev !== identity.dev || current.ino !== identity.ino) {
+    if (current.isSymbolicLink() || current.dev !== identity.dev || current.ino !== identity.ino ||
+        compressed && (current.size !== identity.size || current.mtimeMs !== identity.mtimeMs)) {
       throw new Error("Codex source file changed while reading identity");
     }
+    budget.check();
     return result;
   } finally {
     await file.close();

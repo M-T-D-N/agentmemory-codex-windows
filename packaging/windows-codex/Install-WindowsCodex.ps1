@@ -419,7 +419,11 @@ function Move-PackageJunctionTargets {
         if ($sourceTarget -ne $source -and -not $sourceTarget.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Package junction target escapes the release package: $($junction.FullName)"
         }
-        $relativeTarget = [System.IO.Path]::GetRelativePath($source, $sourceTarget)
+        $relativeTarget = if ([System.StringComparer]::OrdinalIgnoreCase.Equals($sourceTarget, $source)) {
+            '.'
+        } else {
+            $sourceTarget.Substring($sourcePrefix.Length)
+        }
         $destinationTarget = [System.IO.Path]::GetFullPath((Join-Path $destination $relativeTarget))
         if ($destinationTarget -ne $destination -and -not $destinationTarget.StartsWith($destinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Relocated package junction target escapes the installed package: $($junction.FullName)"
@@ -440,7 +444,7 @@ function Get-OwnedTaskRegistrations {
     foreach ($name in @('task-registration.json', 'watchdog-task-registration.json')) {
         $path = Join-Path $Root "config\$name"
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-        $registration = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        $registration = Get-Content -Encoding UTF8 -Raw -LiteralPath $path | ConvertFrom-Json
         $registrations += [pscustomobject]@{
             Name = $name
             TaskPath = [string]$registration.task_path
@@ -459,7 +463,7 @@ function Stop-OwnedRuntimeForCutover {
     # Capture the original run before stop scripts or Job close can replace state.
     $runtimeStatePath = Join-Path $Root 'data\runtime-state.json'
     if (-not (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf)) { throw 'Cannot confirm AgentMemory stop without the recorded runtime state.' }
-    $runtimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
+    $runtimeState = Get-Content -Encoding UTF8 -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
     Import-Module ScheduledTasks -ErrorAction Stop
     $watchStopScript = Join-Path $Root 'scripts\agentmemory-watch-stop.ps1'
     if (Test-Path -LiteralPath $watchStopScript -PathType Leaf) {
@@ -508,8 +512,8 @@ function Get-OwnedTaskForCutover {
         default { throw 'Unknown AgentMemory task registration.' }
     }
     $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $ownerMarker = Get-Content -Raw -LiteralPath (Join-Path $Root '.agentmemory-install-owner.json') | ConvertFrom-Json
-    $protectedRegistration = Get-Content -Raw -LiteralPath (Join-Path $Root "config\$($Registration.Name)") | ConvertFrom-Json
+    $ownerMarker = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $Root '.agentmemory-install-owner.json') | ConvertFrom-Json
+    $protectedRegistration = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $Root "config\$($Registration.Name)") | ConvertFrom-Json
     Assert-AgentMemoryTaskRegistration -Root $Root -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind $kind -Registration $protectedRegistration
     $task = Get-ScheduledTask -TaskPath ([string]$protectedRegistration.task_path) -TaskName ([string]$protectedRegistration.task_name) -ErrorAction Stop
     return Assert-AgentMemoryScheduledTaskOwnership -Root $Root -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind $kind -Registration $protectedRegistration -Task $task
@@ -607,7 +611,7 @@ if ($root.TrimEnd('\') -eq [System.IO.Path]::GetPathRoot($root).TrimEnd('\')) {
     throw 'InstallRoot cannot be a drive root.'
 }
 
-$releaseManifest = Get-Content -Raw -LiteralPath $releaseManifestPath | ConvertFrom-Json
+$releaseManifest = Get-Content -Encoding UTF8 -Raw -LiteralPath $releaseManifestPath | ConvertFrom-Json
 $targetDataContract = Get-ManagedDataContractVersion -Manifest $releaseManifest
 if ([string]$releaseManifest.product_id -ne 'agentmemory-codex-windows') {
     throw 'Release manifest product_id is not agentmemory-codex-windows.'
@@ -651,10 +655,11 @@ if ($Fresh -or $ActivatePrepared -or $automaticFresh) {
 }
 
 . (Join-Path $payload 'scripts\agentmemory-lifecycle.ps1')
+. (Join-Path $payload 'scripts\agentmemory-layout.ps1')
 if ($UpstreamPackageRoot) { throw 'The target is already managed; update it without upstream adoption arguments.' }
 
-$owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
-$installed = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+$owner = Get-Content -Encoding UTF8 -Raw -LiteralPath $ownerPath | ConvertFrom-Json
+$installed = Get-Content -Encoding UTF8 -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
 $currentDataContract = Get-ManagedDataContractVersion -Manifest $installed
 if ($targetDataContract -lt $currentDataContract) {
     throw "Runtime downgrade cannot read this installation's data contract ($currentDataContract). Restore a matching pre-upgrade data backup in a separately reviewed recovery operation."
@@ -673,15 +678,19 @@ $existingWorkspacePath = Join-Path $root 'config\codex-workspace.json'
 $existingWorkspace = $null
 $preservedCodexSourceRoot = $null
 if (Test-Path -LiteralPath $existingWorkspacePath -PathType Leaf) {
-    $existingWorkspace = Get-Content -Raw -LiteralPath $existingWorkspacePath | ConvertFrom-Json
+    $existingWorkspace = Get-Content -Encoding UTF8 -Raw -LiteralPath $existingWorkspacePath | ConvertFrom-Json
     if ($existingWorkspace.PSObject.Properties['codex_source_root']) {
         if ($existingWorkspace.codex_source_root -isnot [string] -or $existingWorkspace.codex_source_root -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {
             throw 'The configured Codex source root must be an absolute path.'
         }
         $preservedCodexSourceRoot = [System.IO.Path]::GetFullPath($existingWorkspace.codex_source_root)
     }
+    if ($existingWorkspace.PSObject.Properties['local_qwen']) {
+        [void](Get-AgentMemoryLocalQwenSettings -WorkspaceRoot $workspace -Settings $existingWorkspace.local_qwen -TrustedProfilePath (Join-Path $payload 'config\third-party-inputs.json'))
+    }
     $previousWorkspaceRoot = [string]$existingWorkspace.workspace_root
-    if (-not [string]::IsNullOrWhiteSpace($previousWorkspaceRoot)) {
+    $explicitLauncher = $existingWorkspace.PSObject.Properties['local_qwen'] -and $existingWorkspace.local_qwen.PSObject.Properties['lifecycle_script']
+    if (-not $explicitLauncher -and -not [string]::IsNullOrWhiteSpace($previousWorkspaceRoot)) {
         $localAIRelative = 'projects\local-ai\scripts\Invoke-LocalAI.ps1'
         $previousLocalAI = Join-Path $previousWorkspaceRoot $localAIRelative
         $targetLocalAI = Join-Path $workspace $localAIRelative
@@ -700,7 +709,7 @@ if (Test-Path -LiteralPath $managedRequirements -PathType Leaf) {
     $managedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $managedRequirements).Hash
     $ownedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $existingManagedCopy).Hash
     if ($managedHash -ne $ownedHash) {
-        $candidateHookSpec = Get-Content -Raw -LiteralPath (Join-Path $payload 'config\hook-spec.json') | ConvertFrom-Json
+        $candidateHookSpec = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $payload 'config\hook-spec.json') | ConvertFrom-Json
         $candidateHookArtifacts = New-HookArtifacts -Root $root -Spec $candidateHookSpec
         $managedNormalizedHash = Get-NormalizedTextSha256 -Path $managedRequirements
         $candidateNormalizedHash = Get-NormalizedStringSha256 -Text $candidateHookArtifacts.Toml
@@ -790,7 +799,7 @@ try {
     $runtimeStatePath = Join-Path $root 'data\runtime-state.json'
     $previousRunId = $null
     try {
-        $previousRuntimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
+        $previousRuntimeState = Get-Content -Encoding UTF8 -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
         $previousRunId = [string]$previousRuntimeState.run_id
     }
     catch {}
@@ -841,7 +850,7 @@ try {
     }
     if ($null -ne $preservedCodexSourceRoot) { $workspaceConfig.codex_source_root = $preservedCodexSourceRoot }
     Write-Utf8NoBom -Path (Join-Path $root 'config\codex-workspace.json') -Content ($workspaceConfig | ConvertTo-Json -Depth 6)
-    $hookSpec = Get-Content -Raw -LiteralPath (Join-Path $root 'config\hook-spec.json') | ConvertFrom-Json
+    $hookSpec = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $root 'config\hook-spec.json') | ConvertFrom-Json
     $hookArtifacts = New-HookArtifacts -Root $root -Spec $hookSpec
     Write-Utf8NoBom -Path (Join-Path $root 'config\managed-requirements.toml') -Content $hookArtifacts.Toml
     Write-Utf8NoBom -Path (Join-Path $root 'config\codex-hooks.json') -Content $hookArtifacts.Json
@@ -898,7 +907,7 @@ try {
         Start-Sleep -Milliseconds 500
         $startupFailure = $null
         try {
-            $runtimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
+            $runtimeState = Get-Content -Encoding UTF8 -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
             $freshRun = (
                 [System.IO.Path]::GetFullPath([string]$runtimeState.root) -eq $root -and
                 -not [string]::IsNullOrWhiteSpace([string]$runtimeState.run_id) -and

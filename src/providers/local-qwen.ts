@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, unlink, link, lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
@@ -534,12 +534,7 @@ export class LocalQwenProvider implements MemoryProvider {
     };
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const handle = await open(leasePath, "wx");
-        try {
-          await handle.writeFile(JSON.stringify(record), "utf8");
-        } finally {
-          await handle.close();
-        }
+        await this.publishBackgroundLease(leasePath, record);
         if (await activeMarker(foregroundPath)) {
           const deferred = new Error("local_qwen_deferred:foreground_requested");
           try {
@@ -559,6 +554,52 @@ export class LocalQwenProvider implements MemoryProvider {
       }
     }
     throw new Error("local_qwen_deferred:lease_busy");
+  }
+
+  private async publishBackgroundLease(path: string, record: LeaseRecord): Promise<void> {
+    const candidate = `${path}.pending-${record.token}`;
+    const bytes = JSON.stringify(record);
+    const handle = await open(candidate, "wx");
+    let identity: import("node:fs").Stats | undefined;
+    let published = false;
+    try {
+      try {
+        try {
+          identity = await handle.stat();
+          await handle.writeFile(bytes, "utf8");
+        } finally {
+          await handle.close();
+        }
+        const prepared = await lstat(candidate);
+        if (!prepared.isFile() || prepared.ino !== identity!.ino || prepared.dev !== identity!.dev ||
+            prepared.birthtimeMs !== identity!.birthtimeMs || await readFile(candidate, "utf8") !== bytes) {
+          throw new Error("local_qwen_lease_prepare_replaced");
+        }
+        await link(candidate, path);
+        published = true;
+        const installed = await lstat(path);
+        if (installed.ino !== identity!.ino || installed.dev !== identity!.dev || await readFile(path, "utf8") !== bytes) {
+          throw new Error("local_qwen_lease_prepare_replaced");
+        }
+      } finally {
+        if (identity) {
+          const current = await lstat(candidate).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+            throw error;
+          });
+          if (current?.isFile() && current.ino === identity.ino && current.dev === identity.dev &&
+              current.birthtimeMs === identity.birthtimeMs && bytes.startsWith(await readFile(candidate, "utf8"))) {
+            await rm(candidate);
+          }
+        }
+      }
+    } catch (error) {
+      if (published) {
+        try { await this.releaseLease(path, record); }
+        catch (cleanupError) { throw requestAndCleanupError(error, cleanupError); }
+      }
+      throw error;
+    }
   }
 
   private async retryPendingLease(path: string): Promise<void> {

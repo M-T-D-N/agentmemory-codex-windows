@@ -1,11 +1,13 @@
 import type { IIIClient } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
+import { withKeyedLock, withKeyedLocks } from "../state/keyed-mutex.js";
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { KV, fingerprintId } from "../state/schema.js";
 import type { Lesson } from "../types.js";
 import { SearchIndex } from "../state/search-index.js";
 import { lessonToObservation } from "../state/memory-utils.js";
 import { recordAudit, safeAudit } from "./audit.js";
-import { readArchiveVisibility, readArchiveCleanupProtection, assertArchiveTargetOwnership } from "./archive.js";
+import { readArchiveVisibility, readArchiveCleanupProtection, assertArchiveTargetOwnership, archiveTargetAddress, validateArchiveState } from "./archive.js";
 import { registerObservationWriter } from "../state/observation-write.js";
 import { prepareArchiveTargetForget } from "./archive-forget.js";
 import {
@@ -87,7 +89,7 @@ export function normalizeLessonSourceIds(value: unknown): string[] | null {
 }
 
 export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
-  sdk.registerFunction("mem::lesson-save", 
+  registerObservationWriter(sdk, "mem::lesson-save",
     async (data: {
       content: string;
       context?: string;
@@ -151,15 +153,30 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
       }
 
       const normalizedContent = data.content.trim().toLowerCase();
-      const existing = (await kv.list<Lesson>(KV.lessons)).find(
+      const observedLessons = await kv.list<Lesson>(KV.lessons);
+      const deletedAtLookup = observedLessons.find(lesson => lesson.deleted && lesson.project === project && lesson.content.trim().toLowerCase() === normalizedContent);
+      const candidate = observedLessons.find(
         (lesson) =>
           !lesson.deleted &&
           lesson.project === project &&
           lesson.content.trim().toLowerCase() === normalizedContent,
       );
       const fp =
-        existing?.id ??
+        candidate?.id ??
         fingerprintId("lsn", `${project ?? ""}\0${normalizedContent}`);
+
+      return withKeyedLock(`mem:lesson-content:${fingerprintId("lsn", `${project ?? ""}\0${normalizedContent}`)}`, () =>
+        withKeyedLocks([`mem:lesson:${fp}`, ...validatedSessionIds.map(sessionLifecycleLockKey)], async () => {
+      const existing = await kv.get<Lesson>(KV.lessons, fp);
+      if (existing?.deleted && (!deletedAtLookup || existing.updatedAt !== deletedAtLookup.updatedAt) || candidate && !existing) return { success: false, error: "lesson was deleted before save" };
+      if (existing && (existing.project !== project || existing.content.trim().toLowerCase() !== normalizedContent)) return { success: false, error: "lesson identity changed before save" };
+      if (sourceIsObservationProvenance && ((data.sources?.length ?? 0) > 0 || (data.sourceIds?.length ?? 0) > 0)) {
+        try {
+          const provenance = await validateObservationProvenance(kv, { project: project!, sources: data.sources, sourceObservationIds: data.sourceIds });
+          validatedObservationIds = provenance.sourceObservationIds;
+          validatedSessionIds = provenance.sourceSessionIds;
+        } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+      }
 
       if (existing && !existing.deleted) {
         reinforceLesson(existing);
@@ -240,6 +257,7 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
       } catch {}
 
       return { success: true, action: "created", lesson };
+      }));
     },
   );
 
@@ -329,12 +347,13 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction("mem::lesson-strengthen", 
+  registerObservationWriter(sdk, "mem::lesson-strengthen",
     async (data: { lessonId: string }) => {
       if (!data.lessonId) {
         return { success: false, error: "lessonId is required" };
       }
 
+      return withKeyedLock(`mem:lesson:${data.lessonId}`, async () => {
       const lesson = await kv.get<Lesson>(KV.lessons, data.lessonId);
       if (!lesson || lesson.deleted) {
         return { success: false, error: "lesson not found" };
@@ -353,6 +372,7 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
       } catch {}
 
       return { success: true, lesson };
+      });
     },
   );
 
@@ -362,6 +382,7 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
         return { success: false, error: "lessonId is required" };
       }
 
+      return withKeyedLock(`mem:lesson:${data.lessonId}`, async () => {
       const lesson = await kv.get<Lesson>(KV.lessons, data.lessonId);
       if (data.project !== undefined && (typeof data.project !== "string" || !data.project.trim() || data.project !== data.project.trim() || data.project === "*" || data.project.length > 512 || data.project.includes("\0"))) {
         return { success: false, error: "exact lesson project is required" };
@@ -390,6 +411,7 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
       } catch {}
 
       return { success: true, lesson, ...(archiveStatesRemoved ? { archiveStatesRemoved } : {}) };
+      });
     },
   );
 
@@ -411,14 +433,19 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
         afterDeleted: boolean;
       }> = [];
 
-      for (const lesson of lessons) {
-        if (lesson.deleted) continue;
+      for (const candidate of lessons) {
+        await withKeyedLock(`mem:lesson:${candidate.id}`, async () => {
+        const lesson = await kv.get<Lesson>(KV.lessons, candidate.id);
+        if (!lesson || lesson.deleted) return;
+        const target = { kind: "lesson" as const, id: candidate.id };
+        const archive = await kv.get(KV.archiveStates, archiveTargetAddress(target).key);
+        if (archive) { const state = validateArchiveState(archive); await assertArchiveTargetOwnership(kv, target, lesson, state.project); return; }
 
         const baseline = lesson.lastDecayedAt || lesson.lastReinforcedAt || lesson.createdAt;
         const weeksSinceBaseline =
           (now - new Date(baseline).getTime()) / (1000 * 60 * 60 * 24 * 7);
 
-        if (weeksSinceBaseline < 1) continue;
+        if (weeksSinceBaseline < 1) return;
 
         const decay = lesson.decayRate * weeksSinceBaseline;
         const newConfidence = Math.max(0.05, lesson.confidence - decay);
@@ -437,6 +464,10 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
             decayed++;
           }
 
+          await kv.set(KV.lessons, lesson.id, lesson);
+          if (lesson.deleted) { lessonRecords.delete(lesson.id); if (lessonIndex) lessonIndex.remove(lesson.id); }
+          else lessonRecords.set(lesson.id, lesson);
+          noteLessonMutation();
           dirty.push(lesson);
           auditEvents.push({
             id: lesson.id,
@@ -447,18 +478,9 @@ export function registerLessonsFunctions(sdk: IIIClient, kv: StateKV): void {
             afterDeleted: !!lesson.deleted,
           });
         }
+        });
       }
 
-      await Promise.all(dirty.map((l) => kv.set(KV.lessons, l.id, l)));
-      for (const l of dirty) {
-        if (l.deleted) {
-          lessonRecords.delete(l.id);
-          if (lessonIndex) lessonIndex.remove(l.id);
-        } else {
-          lessonRecords.set(l.id, l);
-        }
-      }
-      if (dirty.length > 0) noteLessonMutation();
       await Promise.all(
         auditEvents.map((event) =>
           safeAudit(kv, "lesson_strengthen", "mem::lesson-decay-sweep", [event.id], {

@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$ReleaseRoot,
-    [Parameter(Mandatory = $true)][string]$OutputDirectory
+    [Parameter(Mandatory = $true)][string]$OutputDirectory,
+    [Parameter(Mandatory = $true)][string]$QualificationPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -11,7 +12,7 @@ $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $output) { throw 'OutputDirectory already exists.' }
 if ($output.StartsWith($release.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Distribution output must be outside ReleaseRoot.' }
 $manifestPath = Join-Path $release 'release-manifest.json'
-$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$manifest = Get-Content -Encoding UTF8 -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $version = [string]$manifest.downstream_version
 $head = (& git -C $sourceRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $head -ne [string]$manifest.source_commit) { throw 'Release and packaging source commits differ.' }
@@ -28,6 +29,9 @@ foreach ($file in @($manifest.release_files) + @($manifest.immutable_files)) {
 }
 $expectedCount = @($manifest.release_files).Count + @($manifest.immutable_files).Count + 1
 if (@(Get-ChildItem -Force -Recurse -File -LiteralPath $release).Count -ne $expectedCount) { throw 'Release contains unmanifested files.' }
+$node = [string](Get-Command node.exe -ErrorAction Stop).Source
+& $node (Join-Path $PSScriptRoot 'verification\distribution-qualification.mjs') verify $sourceRoot $release $QualificationPath $head
+if ($LASTEXITCODE -ne 0) { throw 'Distribution requires matching successful build, Windows and native operating qualification.' }
 [void][IO.Directory]::CreateDirectory($output)
 $asset = "agentmemory-codex-windows-$version-win32-x64.zip"
 $archive = Join-Path $output $asset
@@ -51,8 +55,17 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $packageRoot 'package.json'), ($package | ConvertTo-Json -Depth 5), $utf8)
 Push-Location $packageRoot
 try {
-    & npm.cmd pack --ignore-scripts --json --pack-destination $output
-    if ($LASTEXITCODE -ne 0) { throw 'npm pack failed.' }
+    $pnpm = [string](Get-Command pnpm.cmd -ErrorAction Stop).Source
+    & $pnpm --config.ignore-scripts=true pack --json --pack-destination $output
+    if ($LASTEXITCODE -ne 0) { throw 'pnpm pack failed.' }
 } finally { Pop-Location }
+$tarball = Join-Path $output "agentmemory-codex-windows-$version.tgz"
+if (-not (Test-Path -LiteralPath $tarball -PathType Leaf) -or (Get-Item -LiteralPath $tarball).Length -lt 1) { throw 'Pack did not produce the expected npm tarball.' }
+Copy-Item -LiteralPath (Join-Path $packageRoot 'release.json') -Destination (Join-Path $output 'release.json')
+$checksumLines = foreach ($name in @($asset, "agentmemory-codex-windows-$version.tgz", 'release.json')) {
+    $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $output $name)).Hash.ToLowerInvariant()
+    "$digest  $name"
+}
+[IO.File]::WriteAllText((Join-Path $output 'SHA256SUMS.txt'), (($checksumLines -join "`n") + "`n"), $utf8)
 [ordered]@{ success = $true; source_commit = $head; archive = $archive; archive_sha256 = $descriptor.archive_sha256
-    npm_tarball = (Join-Path $output "agentmemory-codex-windows-$version.tgz"); package_root = $packageRoot } | ConvertTo-Json
+    npm_tarball = $tarball; npm_tarball_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball).Hash.ToLowerInvariant(); package_root = $packageRoot } | ConvertTo-Json

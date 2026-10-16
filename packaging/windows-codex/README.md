@@ -4,12 +4,14 @@
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.16`, based on upstream AgentMemory `v0.9.30`. It is not the
+> Preview `0.1.0-preview.17`, based on upstream AgentMemory `v0.9.30`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
 
-This public version identifies the source and independently packaged downstream launcher. Each generated package and
+Preview.17 is an unpublished source candidate. Its tag and download URLs in this guide are planned release paths, not currently available assets. The existing public preview.16 has its own immutable guide and assets.
+
+This candidate version identifies the source and independently packaged downstream launcher. Each generated package and
 installed runtime has its own qualification and installation evidence.
 Use an explicit new `-ReleaseRevision` and the exact source identity for each
 qualified build. Existing versioned installation targets are not replaced.
@@ -107,7 +109,7 @@ from installed qualification and preserves the current engine/data contracts.
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.16`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.17`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.30` and the `agentmemory` identifier. These are not the
@@ -199,13 +201,32 @@ then build once with a fresh, unused numeric revision. From that same clean
 commit run:
 
 ```powershell
-& .\packaging\windows-codex\Build-NpmDistribution.ps1 -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.16 -OutputDirectory D:\staging\npm-preview16
+& .\packaging\windows-codex\Build-NpmDistribution.ps1 `
+  -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.17 `
+  -OutputDirectory D:\staging\npm-preview17 `
+  -QualificationPath D:\staging\build\qualification.json
 ```
 
-This produces the versioned Windows ZIP and npm tarball, without publishing.
+The release builder records raw tracked-input digests before and after the build,
+test log hashes and suite counts in `qualification.json`, outside the immutable
+release directory. Its Windows scenarios start as `not-run` and native evidence
+is absent. That initial record cannot authorize distribution. Attach the actual
+same-candidate Windows matrix result and the confirmed native operating E2E
+process outcome; passing labels alone are insufficient. The matrix result must
+bind `source_commit`, `source_input_digest`, `manifest_sha256` and the four
+`scenarios` (`fresh_install`, `managed_update`, `restart`, `failure_recovery`).
+`windows_e2e.evidence` identifies that result by path and SHA-256.
+`operating_e2e` identifies the existing native evidence root and successful
+wrapper `process_outcome`. Do not copy internal evidence into public assets.
+
+This produces the versioned Windows ZIP, npm-compatible tarball, release
+descriptor and SHA256SUMS.txt, without publishing. It uses the existing pnpm
+toolchain to pack the script-free launcher; a separate npm installation is not
+required to produce the tarball.
 The producer rejects dirty/mismatched source, unmanifested files and junctions.
-Upload the exact ZIP under the descriptor's versioned GitHub asset name before
-publishing the tarball with the preview dist-tag. Publishing either artifact,
+After final review and the exact-source CI result, upload the exact assets under
+the descriptor's versioned GitHub names. npm-registry publication is optional
+and is not required for the GitHub TGZ installation command. Publishing artifacts,
 creating tags and changing an existing installation require separate authorization.
 SHA-256 integrity is not Authenticode signing or an independent security audit.
 
@@ -259,8 +280,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.16\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.16 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.17\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.17 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -452,8 +473,21 @@ Automatic native capture and graph recovery are not enabled by this inspection.
 `action: "initialize-source"` on the same endpoint previews the initial native
 correspondence with `dryRun: true`. Applying requires the returned `expectedVersion`,
 `dryRun: false`, and a non-empty `reason`; the source root remains server-owned.
-Initialization preserves existing observation IDs and metadata. Legacy matching
-ignores already deleted, unbound empty rows as conversation candidates using
+For reviewed large-source maintenance, the existing internal
+`mem::codex-source-initialize` SDK function also accepts an explicit integer
+`readTimeoutMilliseconds` from 30000 to 90000. The default remains 30000;
+physical/decoded byte and decoder-window limits remain unchanged. The timeout
+is bound to `expectedVersion`, so preview and apply must use the same value.
+This internal maintenance option is not forwarded by the REST session action.
+Cooperative checks bound the work between reads; they do not forcibly cancel an
+in-flight operating-system read. Longer maintenance can hold the session capture
+lock longer, so inspect its measured cost and run reviewed repairs sequentially.
+Initialization preserves existing observation IDs and metadata.
+When its complete inventory has no missing, adopted or recovered records and no
+unresolved provenance, source holds or ownership/content repairs, initialization
+resumes from the verified end instead of replaying already captured originals.
+Missing native input keeps the replay path so it is still collected.
+Legacy matching ignores already deleted, unbound empty rows as conversation candidates using
 the official empty-observation content check. Those rows and their recovery
 metadata are not modified. Protected rows with content, restored state or source
 provenance continue to require their existing lifecycle.
@@ -700,7 +734,7 @@ incomplete correspondence and unknown inherited-history formats still require re
 For an initialized source moved between `sessions` and `archived_sessions`,
 discovery verifies the existing file identity, source metadata and cursor anchor
 at the indexed path, then updates only the source location and capture wait state.
-The saved cursor is not advanced by this check. The normal drain captures any
+When relocation also changes between plain JSONL and Zstandard, discovery first verifies the same original metadata at the indexed location and runs the complete preview/apply correspondence check. It uses the verified new cursor only after that check; missing messages remain for ordinary capture. The saved cursor is not advanced by this check. The normal drain captures any
 unread tail, preserving observation IDs and graph provenance. Copies with a new
 file identity are held for reconciliation rather than borrowing the old cursor.
 For an initialized source, the host index's latest working directory is not its
@@ -1543,38 +1577,20 @@ binary passed all eight synthetic process-crash boundaries; this does not certif
 Windows power-loss recovery, disk failure recovery or full production acceptance.
 
 To rebuild the engine, check out `iii/v0.22.1` at the exact `source_commit` in
-`config/third-party-inputs.json`, apply `patches/iii-0.22.1-state-flush.patch`, then
-run `cargo build --release --locked -p iii --bin iii` in an x64 MSVC build environment.
-For a one-shot rebuild, run the following in a child PowerShell with the x64
-MSVC toolchain available. Set the patched engine checkout, this public source
-checkout and an unused qualification output directory explicitly. The Cargo
-target and temporary files belong to that directory. This example does not
-change your global environment or automatically delete failed qualification data.
+`config/third-party-inputs.json` and apply `patches/iii-0.22.1-state-flush.patch`.
+Use the included qualified Cargo lock and the Rust/native prefix mappings in
+**Rebuilding the engine without build-machine paths** below before running
+`cargo build --release --locked -p iii --bin iii` in a child x64 MSVC environment.
+Use the recorded compiler versions; a bare build without prefix mappings retains
+build-machine paths. Assertions must remain unchanged.
 
-```powershell
-$ErrorActionPreference = 'Stop'
-$engineSource = 'D:\source\iii-patched'
-$agentMemorySource = 'D:\source\agentmemory-codex-windows'
-$qualificationRoot = 'D:\staging\iii-qualification'
-if (Test-Path -LiteralPath $qualificationRoot) { throw 'Choose an unused qualification root.' }
-[void][IO.Directory]::CreateDirectory($qualificationRoot)
-$env:TEMP = $qualificationRoot
-$env:TMP = $qualificationRoot
-$env:TMPDIR = $qualificationRoot
-$env:CARGO_INCREMENTAL = '0'
-$env:CARGO_TARGET_DIR = Join-Path $qualificationRoot 'cargo-target'
-& cargo build --manifest-path (Join-Path $engineSource 'Cargo.toml') --release --locked -p iii --bin iii
-if ($LASTEXITCODE -ne 0) { throw "Cargo build failed: $LASTEXITCODE" }
-$binary = Join-Path $env:CARGO_TARGET_DIR 'release\iii.exe'
-$env:AGENTMEMORY_TEST_ENGINE = $binary
-$env:AGENTMEMORY_TEST_ENGINE_SHA256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
-$env:AGENTMEMORY_TEST_ENGINE_DURABILITY = 'required'
-$env:AGENTMEMORY_ENGINE_TEST_REPORT = Join-Path $qualificationRoot 'engine-write-recovery.json'
-& pnpm --dir $agentMemorySource exec vitest run test/engine-write-recovery.test.ts
-if ($LASTEXITCODE -ne 0) { throw "Engine recovery qualification failed: $LASTEXITCODE" }
-[IO.File]::Copy($binary, (Join-Path $qualificationRoot 'iii-qualified.exe'), $false)
-```
-
+Qualify the rebuilt executable with `test/engine-write-recovery.test.ts`, setting
+`AGENTMEMORY_TEST_ENGINE`, its actual `AGENTMEMORY_TEST_ENGINE_SHA256`,
+`AGENTMEMORY_TEST_ENGINE_DURABILITY=required` and a task-owned
+`AGENTMEMORY_ENGINE_TEST_REPORT`. Keep TEMP/TMP/TMPDIR and the Cargo target in
+that task's qualification directory. The current pinned hash passed 20 actual
+process-crash/write-recovery cases; the optional performance case was not run.
+This does not certify power loss or disk-failure recovery.
 Retain the qualified binary, hash, test report and build provenance. After every
 consumer has finished, remove only this invocation's disposable Cargo target and
 test fixtures; preserve failed inputs until diagnosis ends. A locally rebuilt
@@ -1867,3 +1883,127 @@ Reports retain singular `warning`, index/snapshot provenance, optional exactness
 
 The existing opt-in runtime diagnostic collector accepts the qualification request header `x-agentmemory-request-id` and retains bounded stage times, read/mutation call counts and server completion records. It does not store payloads or credentials. Client deadlines do not cancel server work; correlate the request ID with a completed server record before claiming completion. Busy recovery diagnostics record writer counts and rejection before mutation; exclusion still prevents recovery work from overlapping an observation writer. Successful bounded retries are not evidence that contention is resolved. A limited cold/warm comparison means fresh process caches, not a cleared operating-system page cache, and cannot establish the cause of a previous unobserved timeout.
 In the managed Windows profile (`AGENTMEMORY_FORCE_PROXY=true` and `AGENTMEMORY_AUTO_COMPRESS=false`), administrative recovery may reserve admission for up to five seconds while existing writers drain. New writers wait for that reservation, preventing continuous native capture from starving archive/import requests. A timeout starts no recovery work and releases the reservation; reentrant recovery and concurrent recovery still reject. Other profiles retain immediate rejection by default. This is in-process bounded admission in the existing coordinator, not durable scheduling or cancellation of client-aborted work.
+### Installation-owned local Qwen overrides
+
+The managed default remains http://127.0.0.1:8000 and the workspace's projects/local-ai/scripts/Invoke-LocalAI.ps1 when present. To use an already supported relocated LocalAI installation, set local_qwen in config/codex-workspace.json:
+
+```json
+"local_qwen": {
+  "base_url": "http://127.0.0.1:8890",
+  "lifecycle_script": "D:\\LocalAI\\scripts\\Invoke-LocalAI.ps1"
+}
+```
+
+These are installation-owned settings, retained on managed updates; inherited environment variables cannot override them. The endpoint must be loopback HTTP with no credentials, query, fragment or custom route (root and /v1 are supported). The launcher must be the LocalAI entry point with its companion/config layout and supported Operation/Background/ExpectedOwnerToken/ReadOnly API. Its qwen.api_base must match the configured host/port. Merely renaming another script is not a supported launcher. If no default launcher exists, an endpoint alone allows a manually managed local server; it does not authorize arbitrary automatic startup. Configure the LocalAI installation itself through its own supported procedure before changing this setting. AgentMemory does not modify its GPU/model configuration. Coordination remains installation-scoped and ownership tokens are retained for exact release, without logging service responses.
+
+### Rebuilding the engine without build-machine paths
+
+Use the exact source_commit and existing state-flush patch above. The qualified Windows build uses the included patches/iii-0.22.1-Cargo.lock (verify cargo_lock_sha256); copy it over the source checkout's Cargo.lock before the locked build. The upstream lock identity is separately recorded. This preserves the previously qualified dependency resolution instead of silently selecting new crates.
+
+In the child x64 MSVC build environment, use the recorded Rust 1.98.0 and clang-cl 22.1.8. Set CARGO_INCREMENTAL=0 and a task-owned CARGO_TARGET_DIR. Use CARGO_ENCODED_RUSTFLAGS with --remap-path-prefix mappings from the actual engine source, task scratch, Cargo home, Rust sysroot and user profile to /src/iii, /build/agentmemory, /cargo, /rust/toolchain and /user. Separate encoded Rust arguments with character 31.
+
+Set CC and CXX to clang-cl and target CFLAGS_x86_64_pc_windows_msvc/CXXFLAGS_x86_64_pc_windows_msvc to /clang:-ffile-prefix-map=FROM=TO for the same prefixes, plus the MSVC toolchain parent and LLVM root to /msvc and /llvm. Include native and slash-normalized FROM spellings. This covers native library file macros as well as Rust panic/debug paths; do not disable assertions or modify executable bytes after compilation. Run the existing locked release command and scan ASCII/UTF-16 paths before qualifying the actual new binary. Do not reuse an older hash's crash/flush results for the rebuilt engine.
+
+Explicit relocated launchers must also match a qualified launcher/common fingerprint pair in the installed immutable third-party-inputs.json profile. Matching a filename and parameter shape alone is insufficient. Unknown controller revisions require support qualification; an arbitrary script or operator-provided fingerprint is not accepted through local_qwen settings. The legacy implicit workspace integration remains unchanged.
+
+
+### Native source status and explicit history
+
+The authenticated `GET /agentmemory/status` JSON response includes `nativeCapture` on the managed Windows/Codex profile. The existing `agentmemory://status` MCP resource exposes the same canonical source report. Service, hook inbox and graph checks describe their own scopes; they do not establish original-source collection health.
+
+`nativeCapture.components` counts current unknown sources, sources requiring reconciliation and retained failed calls. Categories can overlap: `uniqueSessionCount` counts affected sessions and `uniqueEventCount` deduplicates current target/observation-time records; categories from the same observation do not create additional events, and missing observation times leave this count unknown. `issueCount` is the number of displayed issue categories. `batch` describes the latest scheduler drain separately, including observation time, cycle completion, freshness and its non-unique component sum. Neither current-state counts nor batch totals are a lifetime incident count.
+
+Issue pages default to ten records. Use `nativeLimit` (1–100) and `nativeOffset`, following `nativeCapture.nextOffset`, and optionally `nativeProject` for one exact registered project. `nativeHistory=true` explicitly includes reviewed legacy IDs/fingerprints and their existing archive audit/revision evidence; its `history.nextOffset` pages that list independently. Ordinary responses contain no closed-history banner or original text. The normal archive inspect lifecycle remains the explicit original-content lookup/recovery path.
+
+An archived legacy original is treated as reviewed history only when the retained exact observation ID and the existing correspondence fingerprint match. Relevant correspondence changes, newly encountered targets/errors and an explicit archive restore are reported. An archive read failure or pending import verification returns an incomplete/unavailable report with unknown counts; it is not a clean result. These status reads do not drain, discover, capture, heal, delete or start a provider.
+
+### Explicit source cwd reconciliation
+
+The existing authenticated session-start maintenance action `initialize-source` accepts optional `reconcileSourceCwd: true`. Its dry-run reads the complete native inventory and binds the option to the existing expectedVersion proof. It requires the same stored source identity (session, creation time, kind and fork/continuation metadata), allowing only its cwd/path to reflect relocation. The canonical session project and owner stay fixed; the new cwd comes from the verified final turn context, or the source header when no turn cwd exists. Existing captureCwd proof remains valid. The preview and audit expose previousCwd/reconciledSourceCwd. This is explicit maintenance, not automatic ownership reassignment or cursor reset on a failed read.
+
+An invalid/replaced/truncated cursor is reported as native_source_cursor_invalid and requires reconciliation instead of being repeatedly retried as a generic filesystem read failure. Incidental pure host Page context already excluded from normal conversation is preserved in canonical data but does not block unmatched-capture reconciliation; actual mapped content conflicts and protected observation lifecycles remain blocking.
+
+Retained-source reconciliation also reuses the verified continuation base path. That exact prior segment can retain a captured original even when its creation time equals the current segment and cwd has moved; unrelated same-time/different-cwd candidates remain excluded, and ambiguous/conflicting source locations still block.
+
+### Internal warning recovery (r204)
+
+The ordinary status view continues to report unresolved capture jobs. Explicit authenticated `capture/retry` can reconcile legacy server-generated project-mismatch jobs only when the supported native reader proves the same session, turn, kind and full content, and the corresponding canonical native observation is already stored with matching provenance. Existing session/observation projects are preserved. Missing originals are collected through the existing source-initialization/capture workflow first; retry does not manufacture an observation or weaken the ordinary project check. Prior failure and exact source linkage remain in the existing completed capture-event record.
+
+A stale approval-review first-prompt preview cannot hide a session whose native parser proves a normal user turn. Full initialization replaces that derived preview with a verified source user request and retains its earlier digest/source key in the audit. Explicit capture exclusion still wins. Index health consults the existing StateModule scope list to avoid reads for genuinely absent zero-count observation scopes; stale zero-count scopes remain inspected. Live acceptance must still verify capture, search and automatic graph provenance after cutover.
+
+Approval-preview recovery in explicit source initialization validates the entire supported inventory before any state change; its proof does not depend on the last-turn parser flags remaining unchanged between preview and apply. No normal source request or explicit capture exclusion means no recovery.
+
+### Compressed Codex archives
+
+The Windows source reader also follows a missing logical `.jsonl` source to its
+exact `.jsonl.zst` sibling. Node's Zstandard streaming decoder reads the original
+byte offsets without expanding archives onto disk; shared cached read ranges are bounded
+to 32 MiB in process memory. Each open decoder also retains at most 4.25 MiB
+of chunk data so other readers evicting shared ranges cannot restart its
+sequential prefetch. This buffer is released with the decoder. Decoded ranges
+may prefetch up to the existing
+4 MiB capture window and are shared across unchanged file identities; a single
+Zstd frame still requires sequential decoding for an uncached later offset. Concatenated frames, skippable metadata frames and
+frames without a declared original size are supported. RFC 8878 container
+boundaries are checked before decoding each frame independently, avoiding Node's
+concatenated-stream truncation. Declared sizes are summed across frames; absent
+sizes are counted by a complete streaming decode. Size metadata is cached for up
+to 1,024 unchanged physical file identities without storing expanded originals.
+An ENOENT during source resolution/open is retried three times at 50 ms intervals,
+rechecking both representations; callbacks and other errors are never retried.
+Plain files remain authoritative when both forms exist. Linked paths, invalid
+headers, truncated streams, changed source identity and changed correspondence
+remain errors. An archive transport transition uses the existing full source
+preview and initialization path; it preserves a completed cursor only when the
+source, parser, offset, ordinal, anchor and stored correspondence still match and
+no original is missing. Otherwise the existing replay path collects missing
+originals. Reviewed holds and archived legacy originals retain their existing
+provenance and visibility. This does not change Codex files or require a Codex
+restart.
+
+Native collection diagnostics retain batch.workerStartedAt and batch.lastCycleCompletedAt
+from the current scheduler. These timestamps survive subsequent incomplete batches
+but reset on worker startup. A fresh completed cycle and current issue counters
+are separate evidence; latest batch cycleComplete=false alone does not negate a
+completed cycle. Verification rejects an old completion or a changed worker epoch.
+
+
+### Native collection E2E evidence
+
+The tracked `verification/run-native-capture-e2e.mjs` operating wrapper runs
+`native-operating-e2e.mjs` as a child, using the installed SDK, authenticated
+REST API and actual Codex source observations. Its JSON configuration supplies
+`installRoot`, `releaseRoot`, `expectedRevision`, `project`, `sessionId`, `query`,
+`existingGraphObservationId`, `baselinePath` and `evidenceRoot`; set
+`requireFreshGraph: true` only when Qwen startup/extraction is authorized.
+The baseline mode takes `selectionPath` (session/observation identities) and
+creates a fresh no-overwrite baseline of canonical narrative/source/deletion
+identities and the authentication file hash before cutover. It never edits
+canonical rows. Optional `apiUrl`, `engineUrl` and `deadlineMs` retain explicit
+host routing and bounded execution.
+
+Run the child with `native-operating-e2e.mjs baseline <config.json>` before
+cutover, then run `run-native-capture-e2e.mjs run <config.json>` after activation.
+Load the official installed environment for authentication without printing its
+secret. The parent emits the current execution ID and result hash only after
+its child exits normally with code zero and the confirmation write completes.
+A caller must retain that actual parent process exit code and invoke
+`run-native-capture-e2e.mjs consume <config.json> <execution-id> <result-hash>
+<actual-parent-exit-code>`. Never substitute zero for an unknown outcome.
+
+Each execution has an exclusive UUID directory. `result.json` always contains
+an unconfirmed record with `success: false`; passing checks alone are not a
+committed result. `confirmation.json` binds its exact bytes to the child outcome.
+Consumption requires the expected current UUID/hash, both complete matching
+files and an actual normal zero parent exit. A partial file, write-then-throw,
+missing response, late writer, old successful run, nonzero exit or interruption
+cannot certify the new execution. If persistence itself fails, failure may be
+available only in process output; absence of a confirmed result is never PASS.
+
+Worker identity is acquired before capture and checked after capture, every
+discovery/drain iteration (including direct completion), exact search, final
+diagnostics and additional operating qualification. Missing, invalid or changed
+identity fails the whole execution. A scheduler completion timestamp is accepted
+only on that same worker and after this execution began. Operating qualification
+checks preserved canonical identities/authentication and actual graph lookup
+with original observation links; an old extraction is never labelled fresh.

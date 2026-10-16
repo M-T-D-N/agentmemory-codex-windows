@@ -177,7 +177,7 @@ export function registerObserveFunction(
       let originChannel: Origin["channel"] = "agent";
       if (payload.hookType === "prompt_submit") originChannel = "user";
       else if (TOOL_HOOKS.has(payload.hookType)) originChannel = "tool";
-      const raw: RawObservation = {
+      let raw: RawObservation = {
         id: obsId,
         sessionId: payload.sessionId,
         timestamp: payload.timestamp,
@@ -225,8 +225,8 @@ export function registerObserveFunction(
 
       const pendingImageData = extractedImage;
       const submittedPrompt = payload.hookType === "prompt_submit" && typeof raw.userPrompt === "string" ? raw.userPrompt : undefined;
-      const backfillPrompt = submittedPrompt && isBackfillPrompt(payload.data) ? submittedPrompt : undefined;
-      const livePrompt = submittedPrompt && !backfillPrompt ? submittedPrompt : undefined;
+      let backfillPrompt = submittedPrompt && isBackfillPrompt(payload.data) ? submittedPrompt : undefined;
+      let livePrompt = submittedPrompt && !backfillPrompt ? submittedPrompt : undefined;
       const promptRef = durable || typeof payload.eventId !== "string" ? obsId : payload.eventId;
 
       return withKeyedLock(sessionLifecycleLockKey(payload.sessionId), async () => {
@@ -300,16 +300,34 @@ export function registerObserveFunction(
         const existingObservations = durable || backfillPrompt || maxObservationsPerSession
           ? await kv.list<CompressedObservation>(KV.observations(payload.sessionId)) : undefined;
         const stored = durable ? existingObservations?.find(row => row.id === obsId) : undefined;
-        if (stored) {
-          if (livePrompt) await recordLivePrompt(kv, payload.sessionId, livePrompt, promptRef);
+        if (stored && stored.sessionId !== payload.sessionId) {
+          throw new Error("Stored observation session mismatch");
+        }
+        if (stored && typeof stored.title === "string") {
+          await indexObservationSession(kv, obsId, stored.sessionId);
           await restoreIndexEntries(stored);
+          if (existingSession && existingSession.observationCount !== existingObservations!.length) {
+            await kv.update(KV.sessions, stored.sessionId, [
+              { type: "set", path: "observationCount", value: existingObservations!.length },
+            ]);
+          }
+          if (existingSession?.project) await addSessionToProjectIndex(kv, existingSession.project, {
+            id: existingSession.id, startedAt: existingSession.startedAt,
+            ...(existingSession.agentId ? { agentId: existingSession.agentId } : {}),
+          });
           return { observationId: obsId, deduplicated: true, existing: true };
         }
-        if (backfillPrompt && await claimBackfillPrompt(kv, payload.sessionId, backfillPrompt, promptRef)) {
+        if (stored) {
+          raw = stored as unknown as RawObservation;
+          const prompt = raw.hookType === "prompt_submit" && typeof raw.userPrompt === "string" ? raw.userPrompt : undefined;
+          backfillPrompt = prompt && isBackfillPrompt(raw.raw) ? prompt : undefined;
+          livePrompt = prompt && !backfillPrompt ? prompt : undefined;
+        }
+        if (!stored && backfillPrompt && await claimBackfillPrompt(kv, payload.sessionId, backfillPrompt, promptRef)) {
           recordDedupSkip();
           return { deduplicated: true, sessionId: payload.sessionId };
         }
-        if (dedupMap && dedupHash && dedupMap.isDuplicate(dedupHash)) {
+        if (!stored && dedupMap && dedupHash && dedupMap.isDuplicate(dedupHash)) {
           recordDedupSkip();
           if (existingSession && captureUpdates.length) {
             await kv.update(KV.sessions, payload.sessionId, [
@@ -320,7 +338,7 @@ export function registerObserveFunction(
           }
           return { deduplicated: true, sessionId: payload.sessionId };
         }
-        if (maxObservationsPerSession && maxObservationsPerSession > 0) {
+        if (!stored && maxObservationsPerSession && maxObservationsPerSession > 0) {
           const existing = existingObservations!;
           if (existing.length >= maxObservationsPerSession) {
             return {
@@ -332,11 +350,11 @@ export function registerObserveFunction(
         const inheritedAgentId = existingSession
           ? existingSession.agentId
           : getAgentId();
-        if (inheritedAgentId) {
+        if (!stored && inheritedAgentId) {
           raw.agentId = inheritedAgentId;
         }
 
-        if (pendingImageData && (pendingImageData.startsWith("data:image/") || pendingImageData.startsWith("iVBORw0KGgo") || pendingImageData.startsWith("/9j/"))) {
+        if (!stored && pendingImageData && (pendingImageData.startsWith("data:image/") || pendingImageData.startsWith("iVBORw0KGgo") || pendingImageData.startsWith("/9j/"))) {
           const { filePath, bytesWritten } = await saveImageToDisk(pendingImageData);
           raw.imageData = filePath;
           const { incrementImageRef } = await import("./image-refs.js");
@@ -361,12 +379,11 @@ export function registerObserveFunction(
 
         try {
 
-          await kv.set(KV.observations(payload.sessionId), obsId, raw);
-          await indexObservationSession(kv, obsId, payload.sessionId).catch(error =>
-            logger.warn("observation index update failed", { obsId, error: String(error) }));
+          if (!stored) await kv.set(KV.observations(payload.sessionId), obsId, raw);
 
         } catch (error) {
-          if (raw.imageData) {
+          const canonical = await kv.get<RawObservation>(KV.observations(payload.sessionId), obsId).catch(() => undefined);
+          if (!stored && raw.imageData && canonical === null) {
             // Roll back the ref taken above. decrementImageRef deletes the file
             // only when no other observation still references it (deduped images
             // survive) and emits the disk-size delta itself — deleting the file
@@ -386,7 +403,7 @@ export function registerObserveFunction(
           throw error;
         }
 
-        if (dedupMap && dedupHash) dedupMap.record(dedupHash);
+        await indexObservationSession(kv, obsId, payload.sessionId);
         if (livePrompt) await recordLivePrompt(kv, payload.sessionId, livePrompt, promptRef);
 
         await sdk.trigger({
@@ -399,17 +416,17 @@ export function registerObserveFunction(
             data: { type: "raw", observation: raw, sessionId: payload.sessionId },
           },
           action: TriggerAction.Void(),
-        });
+        }).catch(error => logger.warn("Raw observation viewer update failed", { obsId, error: String(error) }));
 
         const session = existingSession;
         if (session) {
-          const activitySession = backfillPrompt ? session : advanceSessionActivity(session, payload.timestamp, Boolean(livePrompt) || (!isCodexCapture && raw.toolName !== "assistant_response"));
+          const activitySession = backfillPrompt ? session : advanceSessionActivity(session, raw.timestamp, Boolean(livePrompt) || (!isCodexCapture && raw.toolName !== "assistant_response"));
           const updates: Array<{ type: "set" | "remove"; path: string; value?: unknown }> = [
             { type: "set", path: "updatedAt", value: new Date().toISOString() },
             {
               type: "set",
               path: "observationCount",
-              value: (session.observationCount || 0) + 1,
+              value: durable ? existingObservations!.length + (stored ? 0 : 1) : (session.observationCount || 0) + 1,
             },
           ];
           updates.push({ type: "set", path: "lastActivityAt", value: activitySession.lastActivityAt ?? sessionActivityAt(session) });
@@ -431,6 +448,10 @@ export function registerObserveFunction(
           }
           await kv.update(KV.sessions, payload.sessionId, [...updates, ...captureUpdates]);
           await auditReactivation();
+          await addSessionToProjectIndex(kv, session.project, {
+            id: session.id, startedAt: session.startedAt,
+            ...(session.agentId ? { agentId: session.agentId } : {}),
+          });
         } else if (
           typeof payload.project === "string" &&
           payload.project.trim().length > 0 &&
@@ -468,7 +489,7 @@ export function registerObserveFunction(
           await addSessionToProjectIndex(kv, payload.project, {
             id: payload.sessionId, startedAt: payload.timestamp ?? ts,
             ...(inheritedAgentId ? { agentId: inheritedAgentId } : {}),
-          }).catch(error => logger.warn("session index update failed", { sessionId: payload.sessionId, error: String(error) }));
+          });
         }
 
         // Per-observation LLM compression is opt-in as of 0.8.8.
@@ -513,9 +534,10 @@ export function registerObserveFunction(
                 sessionId: payload.sessionId,
               },
             },
-          });
+          }).catch(error => logger.warn("Compressed observation viewer update failed", { obsId, error: String(error) }));
         }
 
+        if (dedupMap && dedupHash) dedupMap.record(dedupHash);
         trackViewerStreamItem(obsId);
         void pruneViewerStreamIfDue(sdk).catch(() => {});
         logger.info("Observation captured", {
@@ -531,7 +553,7 @@ export function registerObserveFunction(
             error: error instanceof Error ? error.message : String(error),
           });
         }
-        return { observationId: obsId };
+        return { observationId: obsId, ...(stored ? { existing: true, deduplicated: true } : {}) };
       });
     },
   );

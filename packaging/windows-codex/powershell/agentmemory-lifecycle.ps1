@@ -87,7 +87,7 @@ function Assert-AgentMemoryTaskRegistration {
     $expectedName = "AgentMemoryCodex-$taskKind-" + (Get-AgentMemoryTaskSidSuffix -Sid $OwnerSid)
     $workspaceConfigPath = Join-Path $expectedRoot 'config\codex-workspace.json'
     if (Test-Path -LiteralPath $workspaceConfigPath -PathType Leaf) {
-        $workspaceConfig = Get-Content -Raw -LiteralPath $workspaceConfigPath | ConvertFrom-Json
+        $workspaceConfig = Get-Content -Encoding UTF8 -Raw -LiteralPath $workspaceConfigPath | ConvertFrom-Json
         if ($workspaceConfig.PSObject.Properties['service_ports']) {
             $restPort = $workspaceConfig.service_ports.rest
             if (($restPort -isnot [int] -and $restPort -isnot [long]) -or $restPort -lt 1 -or $restPort -gt 65535) { throw 'Invalid AgentMemory task service port.' }

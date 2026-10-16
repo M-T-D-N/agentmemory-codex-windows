@@ -29,7 +29,7 @@ foreach ($requiredFile in @($envScript, $lifecycleScript, $statePath)) {
 . $lifecycleScript
 . $envScript -Root $resolvedRoot
 
-$state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+$state = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
 if ([string]$state.status -ne 'active' -or -not $state.worker -or -not $state.daemon -or -not $state.run_id) {
     throw 'AgentMemory does not have an active owned runtime state.'
 }

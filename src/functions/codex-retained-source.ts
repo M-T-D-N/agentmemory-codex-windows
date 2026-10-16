@@ -1,38 +1,49 @@
 import type { CompressedObservation } from "../types.js";
-import { canonicalCodexCwd, withReadOnlyCodexPhysicalSource } from "./codex-source-identity.js";
+import { canonicalCodexCwd, withReadOnlyCodexSource, withReadOnlyCodexPhysicalSource } from "./codex-source-identity.js";
 import { codexSourceCandidatePaths } from "./codex-source-segments.js";
 import { readCodexInventory } from "../replay/codex-inventory.js";
-import { readCodexWindow } from "../replay/codex-window.js";
+import { readCodexWindow, readCodexWindowFromFile } from "../replay/codex-window.js";
+import { CodexReadBudget } from "../replay/codex-read-budget.js";
 import { codexSourceMessages, codexTextDigest, type CodexMessageReference } from "../replay/codex-match.js";
 
 export async function readCodexRetainedSources(
   input: { sourceRoot: string; sourcePath: string; sessionId: string },
   current: CodexMessageReference[], observations: CompressedObservation[],
   readWindow: typeof readCodexWindow = readCodexWindow,
+  bounds: { readBudget?: CodexReadBudget; maxInventoryWindows?: number } = {},
 ) {
   const messages: CodexMessageReference[] = [];
   const sources: Array<{ source: Awaited<ReturnType<typeof readCodexInventory>>["last"]["source"]; cursor: Awaited<ReturnType<typeof readCodexInventory>>["last"]["cursor"] }> = [];
   const eligible = observations.filter(row => row.emptyDeletion === undefined && typeof row.narrative === "string" &&
     row.narrative.length > 0 && ["prompt_submit", "assistant_response"].includes(row.title));
   if (!eligible.length) return { messages, sources, singlePhysicalSource: false };
-  const paths = (await codexSourceCandidatePaths(input.sourceRoot, input.sessionId))
+  const budget = bounds.readBudget ?? new CodexReadBudget();
+  const paths = (await codexSourceCandidatePaths(input.sourceRoot, input.sessionId, budget))
     .filter(path => path.toLowerCase() !== input.sourcePath.toLowerCase());
   if (!paths.length) return { messages, sources, singlePhysicalSource: true };
   if (paths.length > 16) throw Error("Retained native source inventory exceeds the supported bound");
-  const active = await withReadOnlyCodexPhysicalSource(input.sourceRoot, input.sourcePath, input.sessionId, async source => source);
+  const active = await withReadOnlyCodexSource(input.sourceRoot, input.sourcePath, input.sessionId, async source => source, budget);
   const known = new Map(current.map(message => [message.key, message]));
   const retained = new Set<string>();
   const digests = new Map(eligible.map(row => [row.id, codexTextDigest(row.narrative)]));
   for (const sourcePath of paths.sort()) {
     let physical;
-    try { physical = await withReadOnlyCodexPhysicalSource(input.sourceRoot, sourcePath, input.sessionId, async source => source); }
+    try { physical = await withReadOnlyCodexPhysicalSource(input.sourceRoot, sourcePath, input.sessionId, async source => source, budget); }
     catch (error) {
       if (error instanceof Error && error.message === "Codex source session identity does not match") continue;
       throw error;
     }
-    if (physical.fork || physical.source !== active.source || Date.parse(physical.createdAt) >= Date.parse(active.createdAt) ||
-      canonicalCodexCwd(physical.cwd) !== canonicalCodexCwd(active.cwd)) continue;
-    const previous = await readCodexInventory({ ...input, sourcePath, includeExcludedMessages: true }, readWindow);
+    const referencedBase = active.continuation?.sourcePath === sourcePath;
+    if (physical.fork || physical.source !== active.source || Date.parse(physical.createdAt) > Date.parse(active.createdAt) ||
+      (!referencedBase && (Date.parse(physical.createdAt) === Date.parse(active.createdAt) ||
+        canonicalCodexCwd(physical.cwd) !== canonicalCodexCwd(active.cwd)))) continue;
+    const inventoryInput = { ...input, sourcePath, includeExcludedMessages: true };
+    const inventoryBounds = { maxWindows: bounds.maxInventoryWindows };
+    const previous = readWindow === readCodexWindow
+      ? await withReadOnlyCodexSource(input.sourceRoot, sourcePath, input.sessionId,
+        (source, file) => readCodexInventory(inventoryInput,
+          options => readCodexWindowFromFile(options, source, file), inventoryBounds), budget)
+      : await readCodexInventory(inventoryInput, readWindow, inventoryBounds);
     if (!previous.last.caughtUp || previous.last.issue) throw Error("A complete prior source inventory is required to retain captures");
     const found: CodexMessageReference[] = [];
     for (const message of codexSourceMessages([...previous.messages, ...previous.legacyMessages], input.sessionId).values()) {

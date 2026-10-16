@@ -16,11 +16,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalQwenProvider } from "../src/providers/local-qwen.js";
-import { unlink } from "node:fs/promises";
+import { unlink, open, link, rm } from "node:fs/promises";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, unlink: vi.fn(actual.unlink) };
+  return { ...actual, unlink: vi.fn(actual.unlink), open: vi.fn(actual.open), link: vi.fn(actual.link), rm: vi.fn(actual.rm) };
 });
 
 const originalFetch = globalThis.fetch;
@@ -124,6 +124,9 @@ describe("LocalQwenProvider", () => {
   beforeEach(async () => {
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     vi.mocked(unlink).mockReset().mockImplementation(actual.unlink);
+    vi.mocked(open).mockReset().mockImplementation(actual.open);
+    vi.mocked(link).mockReset().mockImplementation(actual.link);
+    vi.mocked(rm).mockReset().mockImplementation(actual.rm);
     coordinationDir = mkdtempSync(join(tmpdir(), "agentmemory-qwen-"));
     for (const key of touchedEnv) {
       originalEnv[key] = process.env[key];
@@ -232,7 +235,15 @@ describe("LocalQwenProvider", () => {
       await actual.unlink(path);
     });
 
+    let releasePublication!: () => void;
+    const publicationHeld = new Promise<void>(resolve => { releasePublication = resolve; });
+    let publications = 0;
+    vi.mocked(link).mockImplementation(async (from, to) => {
+      await actual.link(from, to);
+      if (++publications === 1) await publicationHeld;
+    });
     const pending = [provider.compress("system", "first"), provider.compress("system", "second")];
+    for (const request of pending) void request.catch(() => releasePublication());
     await started;
     unblock();
     const outcomes = await Promise.allSettled(pending);
@@ -446,9 +457,9 @@ describe("LocalQwenProvider", () => {
     });
   });
 
-  it("runs one canary per discovered fingerprint before graph generation", async () => {
+  it.each(["http://localhost:8000/v1", "http://127.0.0.1:8890"])("runs the health probe and canary at the configured endpoint %s", async (endpoint) => {
     const fetchMock = installFetchMock();
-    const provider = new LocalQwenProvider("auto", 2048, "http://localhost:8000/v1");
+    const provider = new LocalQwenProvider("auto", 2048, endpoint);
 
     await expect(provider.compress("system", "user")).resolves.toContain(
       "<entities>",
@@ -458,6 +469,10 @@ describe("LocalQwenProvider", () => {
         String(url).endsWith("/v1/chat/completions"),
       ),
     ).toHaveLength(2);
+    for (const [url, options] of fetchMock.mock.calls) {
+      expect(new URL(String(url)).origin).toBe(new URL(endpoint).origin);
+      expect(options?.redirect).toBe("error");
+    }
     expect(provider.getRuntimeInfo()).toMatchObject({
       model: "better-qwen",
       contextTokens: 262144,
@@ -598,4 +613,41 @@ describe("LocalQwenProvider", () => {
     await expect(pending).rejects.toThrow("local_qwen_deferred:foreground_requested");
     expect(existsSync(join(coordinationDir, "qwen-use.lock"))).toBe(false);
   });
+  it.each(["write-before", "partial-write", "close"])("dot F3 acquisition failure %s leaves no busy lease and permits retry", async mode => {
+    const fetch=installFetchMock();
+    const actual=await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(open).mockImplementationOnce(async(...args)=>{
+      const handle=await actual.open(...args);
+      return new Proxy(handle,{get(target,key){
+        if(key==="writeFile"&&mode!=="close")return async(data:string)=>{if(mode==="partial-write")await target.writeFile(data.slice(0,8));throw Object.assign(Error("acquisition write failed"),{code:"ENOSPC"});};
+        if(key==="close"&&mode==="close")return async()=>{await target.close();throw Object.assign(Error("acquisition close failed"),{code:"EIO"});};
+        const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+      }});
+    });
+    const provider=new LocalQwenProvider("auto",2048,"http://127.0.0.1:8000");
+    await expect(provider.compress("system","user")).rejects.toThrow(mode==="close"?"acquisition close failed":"acquisition write failed");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(existsSync(join(coordinationDir,"qwen-use.lock"))).toBe(false);
+    await expect(new LocalQwenProvider("auto",2048,"http://127.0.0.1:8000").compress("system","retry")).resolves.toContain("<entities>");
+  });
+
+  it("dot F3 keeps a public lease published by a competing owner", async () => {
+    const fetch=installFetchMock(),lease=join(coordinationDir,"qwen-use.lock");
+    const replacement={owner:"qwen-foreground",pid:process.pid,token:"replacement-owner"};
+    vi.mocked(link).mockImplementationOnce(async()=>{writeFileSync(lease,JSON.stringify(replacement));throw Object.assign(Error("competing lease"),{code:"EEXIST"});});
+    await expect(new LocalQwenProvider("auto",2048,"http://127.0.0.1:8000").compress("system","user")).rejects.toThrow("local_qwen_deferred:lease_busy");
+    expect(JSON.parse(readFileSync(lease,"utf8"))).toEqual(replacement);expect(fetch).not.toHaveBeenCalled();
+  });
+  it("dot F3 preserves a replacement prepared file and does not publish it", async () => {
+    const fetch=installFetchMock();const actual=await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");let replaced="";
+    vi.mocked(open).mockImplementationOnce(async(...args)=>{const handle=await actual.open(...args);replaced=String(args[0]);return new Proxy(handle,{get(target,key){if(key==="close")return async()=>{await target.close();await actual.rename(replaced,replaced+".original");writeFileSync(replaced,'{"owner":"another"}');};const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;}});});
+    await expect(new LocalQwenProvider("auto",2048,"http://127.0.0.1:8000").compress("system","user")).rejects.toThrow("local_qwen_lease_prepare_replaced");
+    expect(readFileSync(replaced,"utf8")).toBe('{"owner":"another"}');expect(existsSync(join(coordinationDir,"qwen-use.lock"))).toBe(false);expect(fetch).not.toHaveBeenCalled();
+  });
+  it("dot F3 prepared cleanup failure releases its published lease and permits retry",async()=>{
+    installFetchMock();vi.mocked(rm).mockRejectedValueOnce(Object.assign(Error("prepared cleanup failed"),{code:"EPERM"}));
+    const provider=new LocalQwenProvider("auto",2048,"http://127.0.0.1:8000");await expect(provider.compress("system","user")).rejects.toThrow("prepared cleanup failed");expect(existsSync(join(coordinationDir,"qwen-use.lock"))).toBe(false);
+    await expect(provider.compress("system","retry")).resolves.toContain("<entities>");
+  });
+
 });

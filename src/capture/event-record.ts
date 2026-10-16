@@ -13,6 +13,10 @@ export interface CompletedEvent {
   acceptedAt: string;
   completedAt: string;
   attempts: number;
+  nativeSourceRecovery?: {
+    sourceProject: string; sourceKey: string; turnId: string;
+    previousError?: string; previousDeadAt?: string; previousAttempts: number;
+  };
   state?: "deleted";
   deletedAt?: string;
 }

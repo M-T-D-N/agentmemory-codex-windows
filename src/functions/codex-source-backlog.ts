@@ -3,6 +3,8 @@ import type { Session } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
+import { withObservationWrite } from "../state/observation-write.js";
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
 import { logger } from "../logger.js";
 import { localQwenBackgroundDeferral } from "../providers/local-qwen-lifecycle.js";
@@ -10,11 +12,13 @@ import { readCodexThreadIndex } from "./codex-source-index.js";
 import { discoverCodexSession, existingCodexDiscoveryStatus } from "./codex-source-discovery.js";
 import { projectFor, readProjectRegistry } from "../../packaging/windows-codex/hooks/codex-project.mjs";
 import { readArchiveVisibility } from "./archive.js";
+import { readCodexSourceStatus } from "./codex-source-status.js";
 
 const sourceUnavailable = (session: Session) => session.codexNativeCapture?.status === "unknown" &&
   session.codexNativeCapture.issue === "native_source_missing";
 
 export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId: () => string) {
+  sdk.registerFunction("mem::codex-source-status", (input: Parameters<typeof readCodexSourceStatus>[2]) => readCodexSourceStatus(kv, agentId(), input));
   let discoveryAfterId: string | undefined;
   let discoveryConfiguration = "";
   let captureAfterId: string | undefined;
@@ -35,6 +39,7 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
     const startedAt = Date.now();
     const page = await readCodexThreadIndex(sourceRoot, { afterId: discoveryAfterId, limit: 500 });
     const sessions = new Map((await kv.list<Session>(KV.sessions)).map(session => [session.id, session]));
+    const archived = await readArchiveVisibility(kv);
     let registry: ReturnType<typeof readProjectRegistry> | undefined;
     const projectForCwd = (cwd: string) => projectFor(cwd, registry ??= readProjectRegistry(registryPath, workspaceRoot));
     const result = { scanned: 0, created: 0, initialized: 0, relocated: 0, managed: 0, excluded: 0, pending: 0, reconcileRequired: 0, unknown: 0,
@@ -49,7 +54,9 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
         else if (entry.status === "candidate") {
           const existing = sessions.get(entry.sessionId);
           const status = existing ? existingCodexDiscoveryStatus(existing, entry, owner) : "inspect";
-          const outcome = status !== "inspect" && status !== "relocate" ? { status }
+          const retryArchivedMissing = status === "managed" && existing && sourceUnavailable(existing) && archived({ kind: "session", id: existing.id });
+          const retryCompressedTransition = existing && ["native_source_missing", "native_source_cursor_invalid"].includes(existing.codexNativeCapture?.issue ?? "");
+          const outcome = status !== "inspect" && status !== "relocate" && !retryArchivedMissing && !retryCompressedTransition ? { status }
             : (++inspected, await discoverCodexSession(kv, entry, { sourceRoot, agentId: owner, projectForCwd }));
           if (outcome.status === "reconcile_required") {
             result.reconcileRequired++;
@@ -133,6 +140,7 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
         reportedUnknown = unknown; reportedUnavailable = unavailable;
       };
       for (let window = 0; window < (priority ? 1 : 4); window++) {
+        const attemptStartedAt = Date.now();
         try {
           const captured = await sdk.trigger({ function_id: "mem::codex-source-capture", payload: { project: session.project, sessionId: session.id } }) as {
             status?: string; inserted?: number; bytesReadThrough?: number; snapshotBytes?: number; issue?: { reason?: string };
@@ -150,7 +158,24 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
           if (captured.status !== "pending" || noProgress || captured.bytesReadThrough === captured.snapshotBytes || Date.now() - startedAt >= 2000) break;
         } catch (error) {
           progressingTail = false;
-          const current = await kv.get<Session>(KV.sessions, session.id).catch(() => undefined);
+          // Retain failures in the existing canonical capture state, not a batch-local queue.
+          // Use the capture/forget lifecycle lock and merge the current row so concurrent
+          // observation writes and a later proven success are never overwritten.
+          const current = await withObservationWrite(() => withKeyedLock(sessionLifecycleLockKey(session.id), async () => {
+            const latest = await kv.get<Session>(KV.sessions, session.id);
+            if (!latest || latest.id !== session.id || latest.project !== session.project || latest.agentId !== owner ||
+                !latest.codexNativeCapture || isExcludedCodexAmbientSession(latest)) return latest;
+            const state = latest.codexNativeCapture;
+            if (state.status === "reconcile_required" ||
+                (["caught_up", "caught_up_with_holds"].includes(state.status) &&
+                 Date.parse(state.checkedAt ?? "") >= attemptStartedAt)) return latest;
+            const observedAt = new Date().toISOString();
+            const next = { ...latest, codexNativeCapture: { ...state, status: "unknown" as const,
+              issue: state.status === "unknown" ? state.issue : "native_capture_rpc_failed", checkedAt: observedAt,
+              lastFailure: { reason: "native_capture_rpc_failed", observedAt } } };
+            await kv.set(KV.sessions, session.id, next);
+            return next;
+          }));
           if (current?.codexNativeCapture) updateStatus(current.codexNativeCapture.status, current.codexNativeCapture.issue);
           result.failures.push({ sessionId: session.id, error: error instanceof Error ? error.message.slice(0, 512) : "Native capture failed",
             ...(sourceUnavailable(current ?? session) ? { reason: "native_source_missing" } : {}) });
@@ -178,9 +203,30 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
   const startedAt = Date.now();
   let lastAttemptAt: number | undefined, lastCompletedAt: number | undefined, lastDiscoveryCompletedAt: number | undefined;
   let lastCaptureCycleCompletedAt: number | undefined;
+  let captureComponents = { unknownSessions: 0, reconciliationSessions: 0, batchFailureEvents: 0 };
+  let captureCycleComplete: boolean | null = null;
   let consecutiveFailures = 0, disabled = false;
   let discoveryIssues = 0, completedDiscoveryIssues = 0, captureIssues = 0, sourceUnavailableCount = 0, archivedUnavailableCount = 0, graphFailures = 0, unresolvedCaptures = 0, sourceHolds = 0;
-  const status = () => ({
+  const discoveryRecords = new Map<string, { sessionId: string | null; category: string; reason: string; observedAt: string }>();
+  let completedDiscoveryRecords: Array<{ sessionId: string | null; category: string; reason: string; observedAt: string }> = [];
+  const discoveryReasons = new Set(["unsupported_source", "unsupported_thread_source", "invalid_thread_metadata", "invalid_thread_path",
+    "existing_source_requires_reconciliation", "relocated_source_identity_changed", "returned_source_identity_changed", "returned_source_requires_reconciliation", "source_identity_changed", "native_source_missing",
+    "native_source_read_failed", "source_not_created"]);
+  const recordDiscovery = (rows: unknown[] | undefined, category: string) => {
+    for (const raw of rows ?? []) {
+      const row = raw as { sessionId?: unknown; reason?: unknown; error?: unknown } | null;
+      const sessionId = typeof row?.sessionId === "string" && /^[\w.-]{1,512}$/.test(row.sessionId) ? row.sessionId : null;
+      const candidate = row?.reason ?? row?.error;
+      const reason = typeof candidate === "string" && discoveryReasons.has(candidate) ? candidate : "discovery_issue_unclassified";
+      discoveryRecords.set(JSON.stringify([sessionId, category, reason]), { sessionId, category, reason, observedAt: new Date().toISOString() });
+    }
+  };
+  const status = (page: { limit?: number; offset?: number } = {}) => {
+    const records = [...completedDiscoveryRecords, ...discoveryRecords.values()];
+    const unique = new Map(records.map(row => [JSON.stringify([row.sessionId, row.category, row.reason]), row]));
+    const all = [...unique.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const limit = page.limit ?? 10, offset = page.offset ?? 0;
+    return ({
     status: stopped ? "stopped" : disabled && !consecutiveFailures ? "disabled" : Date.now() - (lastCompletedAt ?? startedAt) > 180_000 ? "stalled"
       : consecutiveFailures || discoveryIssues || completedDiscoveryIssues || captureIssues || graphFailures ? "attention"
       : lastCompletedAt === undefined ? "starting" : "checking",
@@ -189,8 +235,30 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
     lastCompletedAt: lastCompletedAt === undefined ? null : new Date(lastCompletedAt).toISOString(),
     lastDiscoveryCompletedAt: lastDiscoveryCompletedAt === undefined ? null : new Date(lastDiscoveryCompletedAt).toISOString(),
     lastCaptureCycleCompletedAt: lastCaptureCycleCompletedAt === undefined ? null : new Date(lastCaptureCycleCompletedAt).toISOString(),
+    captureSnapshot: {
+      observedAt: lastCompletedAt === undefined ? null : new Date(lastCompletedAt).toISOString(),
+      freshness: lastCompletedAt === undefined ? "unobserved" : consecutiveFailures || Date.now() - lastCompletedAt > 180_000 ? "stale" : "current",
+      scope: "latest_drain",
+      cycleComplete: captureCycleComplete,
+      workerStartedAt: new Date(startedAt).toISOString(),
+      lastCycleCompletedAt: lastCaptureCycleCompletedAt === undefined ? null : new Date(lastCaptureCycleCompletedAt).toISOString(),
+      components: { ...captureComponents },
+      counting: "non_unique_component_sum",
+      uniqueSessionCount: null,
+    },
+    pipeline: {
+      scope: "server_discovery_and_graph", discoveryIssues: Math.max(discoveryIssues, completedDiscoveryIssues),
+      schedulerFailures: consecutiveFailures, graphFailures,
+      observedAt: lastCompletedAt === undefined ? null : new Date(lastCompletedAt).toISOString(),
+      discoveryCycleCompletedAt: lastDiscoveryCompletedAt === undefined ? null : new Date(lastDiscoveryCompletedAt).toISOString(),
+      discoveryIssueCount: all.length, discoveryTargetCount: new Set(all.flatMap(row => row.sessionId ? [row.sessionId] : [])).size,
+      discoveryDetailsComplete: all.length >= Math.max(discoveryIssues, completedDiscoveryIssues) && all.every(row => row.sessionId !== null && row.reason !== "discovery_issue_unclassified"),
+      discoveryRecords: all.slice(offset, offset + limit),
+      nextOffset: offset + limit < all.length ? offset + limit : null,
+    },
     consecutiveFailures, discoveryIssues: Math.max(discoveryIssues, completedDiscoveryIssues), captureIssues, sourceUnavailable: sourceUnavailableCount, archivedSourceUnavailable: archivedUnavailableCount, graphFailures, unresolvedCaptures, sourceHolds,
   });
+  };
   const wake = () => {
     if (stopped || running) return;
     clearTimeout(continuation); continuation = undefined;
@@ -200,7 +268,7 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
       const result = await sdk.trigger({ function_id: "mem::codex-source-drain", payload: {} }) as {
         disabled?: boolean; unknown?: number; failures?: unknown[]; captureUnknown?: number; sourceUnavailable?: number; archivedSourceUnavailable?: number; requiresReconciliation?: number; graphFailures?: number; unresolvedCaptures?: number; sourceHolds?: number;
         captureCycleComplete?: boolean; moreCaptureWork?: boolean;
-        discovery?: { disabled?: boolean; unknown?: number; reconcileRequired?: number; cycleComplete?: boolean };
+        discovery?: { disabled?: boolean; unknown?: number; reconcileRequired?: number; cycleComplete?: boolean; failures?: unknown[]; reconciliation?: unknown[] };
       };
       if (!result || typeof result !== "object" || (result.disabled !== true &&
           (![result.captureUnknown, result.sourceUnavailable ?? 0, result.archivedSourceUnavailable ?? 0, result.requiresReconciliation, result.unknown, result.graphFailures, result.unresolvedCaptures ?? 0].every(value => Number.isSafeInteger(value) && value! >= 0) ||
@@ -209,14 +277,23 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
            (result.moreCaptureWork !== undefined && typeof result.moreCaptureWork !== "boolean") ||
            !Array.isArray(result.failures) || !result.discovery || typeof result.discovery !== "object"))) throw Error("Invalid native source drain response");
       disabled = result.disabled === true || result.discovery?.disabled === true;
-      captureIssues = (result.captureUnknown ?? 0) + (result.requiresReconciliation ?? 0) + (result.failures?.length ?? 0);
+      captureComponents = {
+        unknownSessions: result.captureUnknown ?? 0,
+        reconciliationSessions: result.requiresReconciliation ?? 0,
+        batchFailureEvents: result.failures?.length ?? 0,
+      };
+      captureCycleComplete = result.captureCycleComplete ?? null;
+      captureIssues = captureComponents.unknownSessions + captureComponents.reconciliationSessions + captureComponents.batchFailureEvents;
       sourceUnavailableCount = result.sourceUnavailable ?? 0;
       archivedUnavailableCount = result.archivedSourceUnavailable ?? 0;
       unresolvedCaptures = result.unresolvedCaptures ?? 0;
       sourceHolds = result.sourceHolds ?? 0;
       graphFailures = result.graphFailures ?? 0;
+      recordDiscovery(result.discovery?.failures, "discovery_unknown");
+      recordDiscovery(result.discovery?.reconciliation, "discovery_reconciliation");
       discoveryIssues += (result.discovery?.unknown ?? 0) + (result.discovery?.reconcileRequired ?? 0);
       if (result.discovery?.cycleComplete === true) {
+        completedDiscoveryRecords = [...discoveryRecords.values()]; discoveryRecords.clear();
         completedDiscoveryIssues = discoveryIssues; discoveryIssues = 0; lastDiscoveryCompletedAt = Date.now();
       }
       if (result.captureCycleComplete === true) lastCaptureCycleCompletedAt = Date.now();
@@ -228,7 +305,7 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
       });
     }).catch(error => {
       consecutiveFailures++;
-      logger.warn("Native Codex source reconciliation failed", { error: error instanceof Error ? error.message : String(error) });
+      logger.warn("Native Codex source reconciliation failed", { reason: error instanceof Error && error.message === "Invalid native source drain response" ? "invalid_native_drain_response" : "native_drain_failed" });
     })
       .finally(() => {
         running = undefined;

@@ -37,6 +37,7 @@ export interface GraphWritePlanPages {
 }
 
 export interface GraphObservationResult {
+  coverage?: { version: 1; nextOffset: number; totalLength: number };
   version: 1;
   id: string;
   sessionId: string;
@@ -109,7 +110,10 @@ export interface Session {
     capturedAfter?: string;
     indexPending?: boolean;
     snapshotBytes?: number;
+    cursorDiagnostic?: import("./replay/codex-window.js").CodexCursorDiagnostic;
+    readBudget?: import("./replay/codex-read-budget.js").CodexReadUsage;
     unresolvedCaptures?: CodexUnresolvedCapture[];
+    lastFailure?: { reason: string; observedAt: string };
   };
   semanticGraphThroughObservationId?: string;
   semanticGraphCompletionVersion?: 1;

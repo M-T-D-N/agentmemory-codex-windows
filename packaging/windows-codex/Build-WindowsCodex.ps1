@@ -16,6 +16,27 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+$buildKind = if ($ValidationOnly) { 'validation' } elseif ($DiagnosticOnly) { 'diagnostic' } else { 'release_candidate' }
+if ($buildKind -eq 'release_candidate' -and $SkipTests) {
+    throw 'Release candidates cannot skip tests. Use ValidationOnly or DiagnosticOnly for unqualified development work.'
+}
+
+function Get-BuildSourceSnapshot {
+    $snapshotOutput = & $node (Join-Path $PSScriptRoot 'verification\distribution-qualification.mjs') snapshot $sourceRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Could not bind qualification to source inputs.' }
+    return ($snapshotOutput | Out-String | ConvertFrom-Json)
+}
+
+function Get-BuildTestProof {
+    param([string]$Name, [object[]]$Lines)
+    $logRoot = if ($buildKind -eq 'release_candidate') { $outputRoot } else { $scratchRoot }
+    $path = Join-Path $logRoot ("qualification-$Name.log")
+    [IO.File]::WriteAllText($path, ($Lines | Out-String), (New-Object Text.UTF8Encoding($false)))
+    $proof = & $node (Join-Path $PSScriptRoot 'verification\distribution-qualification.mjs') suite $path $Name
+    if ($LASTEXITCODE -ne 0) { throw "Could not qualify $Name test outcomes." }
+    return ($proof | Out-String | ConvertFrom-Json)
+}
+
 function Assert-PhysicalDirectoryPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     $cursor = [System.IO.Path]::GetFullPath($Path)
@@ -100,7 +121,7 @@ foreach ($required in @($node, (Join-Path $sourceRoot 'pnpm-lock.yaml'), (Join-P
 }
 
 if (-not $ValidationOnly) {
-$thirdParty = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'config\third-party-inputs.json') | ConvertFrom-Json
+$thirdParty = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $PSScriptRoot 'config\third-party-inputs.json') | ConvertFrom-Json
 $stateDurability = $thirdParty.iii_engine.PSObject.Properties['state_durability']
 if ($null -eq $stateDurability -or [string]$stateDurability.Value -ne 'file-flush-v1') {
     throw 'The pinned engine has not been qualified for the required StateModule durability barrier.'
@@ -111,6 +132,13 @@ if ([string]$thirdParty.iii_engine.source_commit -notmatch '^[a-f0-9]{40}$' -or
     (Get-NormalizedTextSha256 -Path $enginePatch) -ne [string]$thirdParty.iii_engine.patch_sha256 -or
     [string]$thirdParty.iii_engine.build_profile -ne 'release') {
     throw 'Patched engine source, patch hash and release build provenance are required.'
+}
+$engineLock = $null
+if ($thirdParty.iii_engine.PSObject.Properties['cargo_lock_file']) {
+    $engineLock = Join-Path $PSScriptRoot ([string]$thirdParty.iii_engine.cargo_lock_file)
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $engineLock).Hash -ne [string]$thirdParty.iii_engine.cargo_lock_sha256) {
+        throw 'Qualified engine Cargo lock identity mismatch.'
+    }
 }
     $iii = [IO.Path]::GetFullPath($IiiEnginePath)
     if (-not (Test-Path -LiteralPath $iii -PathType Leaf)) { throw 'Required iii-engine input is missing.' }
@@ -123,7 +151,7 @@ if ($iiiHash -ne [string]$thirdParty.iii_engine.sha256) {
 }
 }
 
-$packageJson = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
+$packageJson = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
 $version = [string]$packageJson.version
 $downstreamVersion = [string]$packageJson.agentmemoryDownstream.version
 if ($packageJson.agentmemoryDownstream.dataContractVersion -ne 5) {
@@ -178,6 +206,9 @@ elseif ($priorNodeOptions -notmatch '(?:^|\s)--max-old-space-size(?:=|\s)') {
     $env:NODE_OPTIONS = "$priorNodeOptions $nodeHeapOption"
 }
 
+if ($buildKind -eq 'release_candidate') { $sourceInputBefore = Get-BuildSourceSnapshot }
+$suiteProofs = [ordered]@{}
+
 Push-Location $sourceRoot
 try {
     & $pnpm --config.confirmModulesPurge=false --config.node-linker=hoisted install --frozen-lockfile
@@ -193,12 +224,16 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
 
     if (-not $SkipTests) {
-        & $pnpm test
+        $testSuites = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $PSScriptRoot 'test-suites.json') | ConvertFrom-Json
+        & $pnpm test | Tee-Object -Variable sourceTestLines | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "test suite failed with exit code $LASTEXITCODE" }
-        & $node --test (Join-Path $PSScriptRoot 'tests\codex-turn.test.mjs') (Join-Path $PSScriptRoot 'tests\recall-first.test.mjs')
+        $suiteProofs.source = Get-BuildTestProof -Name source -Lines $sourceTestLines
+        & $node --test --test-reporter=tap @($testSuites.adapter) | Tee-Object -Variable adapterTestLines | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "Codex adapter tests failed with exit code $LASTEXITCODE" }
-        & $node --test (Join-Path $PSScriptRoot 'tests\npm-distribution.test.mjs') (Join-Path $PSScriptRoot 'tests\build-validation.test.mjs') (Join-Path $PSScriptRoot 'tests\backup-closeout.test.mjs') (Join-Path $PSScriptRoot 'tests\installer-backup-retention.test.mjs') (Join-Path $PSScriptRoot 'tests\qualification-state.test.mjs')
+        $suiteProofs.adapter = Get-BuildTestProof -Name adapter -Lines $adapterTestLines
+        & $node --test --test-reporter=tap @($testSuites.packaging) | Tee-Object -Variable packagingTestLines | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "npm distribution tests failed with exit code $LASTEXITCODE" }
+        $suiteProofs.packaging = Get-BuildTestProof -Name packaging -Lines $packagingTestLines
     }
 
     if (-not $ValidationOnly) {
@@ -246,6 +281,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\mcp-launcher-environment
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'upstream-source.json') -Destination $configOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'launcher\AgentMemoryHiddenLauncher.cs') -Destination $srcOut
 Copy-Item -LiteralPath $enginePatch -Destination $srcOut
+if ($engineLock) { Copy-Item -LiteralPath $engineLock -Destination $srcOut }
 Copy-Item -LiteralPath $iii -Destination (Join-Path $binOut 'iii.exe')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-WindowsCodex.ps1') -Destination $releaseRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Initialize-WindowsCodex.ps1') -Destination $releaseRoot
@@ -279,7 +315,7 @@ if ($unexpectedBackups.Count -gt 0) {
     throw "Release payload contains backup artifacts: $($unexpectedBackups.FullName -join ', ')"
 }
 
-$upstream = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'upstream-source.json') | ConvertFrom-Json
+$upstream = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $sourceRoot 'upstream-source.json') | ConvertFrom-Json
 $files = @(
     Get-ChildItem -Force -Recurse -File -LiteralPath $payloadRoot |
         Sort-Object FullName |
@@ -306,6 +342,9 @@ $releaseFiles = @(
 )
 $manifest = [ordered]@{
     schema_version = 1
+    build_kind = $buildKind
+    tests_skipped = [bool]$SkipTests
+    source_input_digest = if ($buildKind -eq 'release_candidate') { [string]$sourceInputBefore.sha256 } else { $null }
     source_commit = $sourceCommit
     product = 'AgentMemory for Codex on Windows'
     product_id = 'agentmemory-codex-windows'
@@ -343,12 +382,31 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     $utf8NoBom
 )
 
+if ($buildKind -eq 'release_candidate') {
+    $sourceInputAfter = Get-BuildSourceSnapshot
+    if ([string]$sourceInputAfter.sha256 -ne [string]$sourceInputBefore.sha256) { throw 'Source inputs changed during build qualification.' }
+    $payloadDigestOutput = & $node (Join-Path $PSScriptRoot 'verification\distribution-qualification.mjs') payload $releaseRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Could not bind qualification to payload.' }
+    $payloadDigest = $payloadDigestOutput | Out-String | ConvertFrom-Json
+    $manifestDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $releaseRoot 'release-manifest.json')).Hash.ToLowerInvariant()
+    $qualification = [ordered]@{ schema_version = 1; tests_skipped = [bool]$SkipTests; source_commit = $sourceCommit
+        source_input_digest = [string]$sourceInputBefore.sha256; manifest_sha256 = $manifestDigest; payload_digest = [string]$payloadDigest.sha256
+        environment = [ordered]@{ node = $manifest.build_runtime.node; pnpm = $manifest.build_runtime.pnpm; platform = [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString() }
+        suites = $suiteProofs
+        windows_e2e = [ordered]@{ source_commit = $sourceCommit; manifest_sha256 = $manifestDigest; fresh_install = 'not-run'; managed_update = 'not-run'; restart = 'not-run'; failure_recovery = 'not-run' }
+        operating_e2e = $null }
+    [IO.File]::WriteAllText((Join-Path $outputRoot 'qualification.json'), ($qualification | ConvertTo-Json -Depth 12), $utf8NoBom)
+}
+
 $result = [ordered]@{
     success = $true
+    build_kind = $buildKind
+    tests_skipped = [bool]$SkipTests
     release_root = $releaseRoot
     payload_files = $files.Count
     version = $downstreamVersion
     agentmemory_version = $version
+    qualification_path = if ($buildKind -eq 'release_candidate') { Join-Path $outputRoot 'qualification.json' } else { $null }
 }
 if ($DiagnosticOnly) {
     # The trusted callback owns synchronous qualification and must finish its

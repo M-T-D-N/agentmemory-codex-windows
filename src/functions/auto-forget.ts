@@ -1,3 +1,4 @@
+import { withKeyedLock } from "../state/keyed-mutex.js";
 import { registerObservationWriter } from "../state/observation-write.js";
 import type { IIIClient } from "iii-sdk";
 import { markCaptureEventDeleted } from "../capture/event-record.js";
@@ -27,7 +28,7 @@ interface AutoForgetResult {
 
 export function registerAutoForgetFunction(sdk: IIIClient, kv: StateKV): void {
   registerObservationWriter(sdk, "mem::auto-forget",
-    async (data: { dryRun?: boolean }): Promise<AutoForgetResult> => {
+    async (data: { dryRun?: boolean }): Promise<AutoForgetResult> => withKeyedLock("mem:remember", async () => {
       const dryRun = data?.dryRun ?? false;
       const now = Date.now();
       const { decrementImageRef } = await import("./image-refs.js");
@@ -123,6 +124,17 @@ export function registerAutoForgetFunction(sdk: IIIClient, kv: StateKV): void {
             if (sim > CONTRADICTION_THRESHOLD) {
               const memA = memById.get(memIds[i])!;
               const memB = memById.get(memIds[j])!;
+              if (!memA.project?.trim() || !memA.agentId?.trim() || memA.project !== memB.project || memA.agentId !== memB.agentId) continue;
+              const [currentA, currentB] = await Promise.all([
+                kv.get<Memory>(KV.memories, memA.id), kv.get<Memory>(KV.memories, memB.id),
+              ]);
+              const currentProtection = await readArchiveCleanupProtection(kv);
+              if (!currentA || !currentB || currentA.isLatest === false || currentB.isLatest === false
+                || currentA.content !== memA.content || currentB.content !== memB.content
+                || currentA.project !== memA.project || currentB.project !== memB.project
+                || currentA.agentId !== memA.agentId || currentB.agentId !== memB.agentId
+                || currentA.createdAt !== memA.createdAt || currentB.createdAt !== memB.createdAt
+                || currentProtection({ kind: "memory", id: memA.id }) || currentProtection({ kind: "memory", id: memB.id })) continue;
               result.contradictions.push({
                 memoryA: memA.id,
                 memoryB: memB.id,
@@ -133,10 +145,9 @@ export function registerAutoForgetFunction(sdk: IIIClient, kv: StateKV): void {
                 const older =
                   new Date(memA.createdAt).getTime() <
                     new Date(memB.createdAt).getTime()
-                    ? memA
-                    : memB;
-                older.isLatest = false;
-                await kv.set(KV.memories, older.id, older);
+                    ? currentA
+                    : currentB;
+                await kv.set(KV.memories, older.id, { ...older, isLatest: false });
                 getSearchIndex().remove(older.id);
                 vectorIndexRemove(older.id);
                 await flushIndexSave();
@@ -211,6 +222,6 @@ export function registerAutoForgetFunction(sdk: IIIClient, kv: StateKV): void {
         dryRun,
       });
       return result;
-    },
+    }),
   );
 }

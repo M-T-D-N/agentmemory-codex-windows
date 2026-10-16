@@ -145,8 +145,8 @@ function Get-XmlChildText {
 function Assert-OwnedScheduledTaskRegistration {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $ownerSid = $identity.User.Value
-    $ownerMarker = Get-Content -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
-    $registration = Get-Content -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
+    $ownerMarker = Get-Content -Encoding UTF8 -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
+    $registration = Get-Content -Encoding UTF8 -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
     Assert-AgentMemoryTaskRegistration -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration
     $expectedName = [string]$registration.task_name
     $expectedDescription = "OpenAI Codex AgentMemory daemon; install_nonce=$([string]$ownerMarker.install_nonce)"
@@ -208,8 +208,8 @@ function Assert-OwnedScheduledTaskRegistration {
 function Get-OwnedScheduledTask {
     Import-Module ScheduledTasks -ErrorAction Stop
     $ownerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $ownerMarker = Get-Content -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
-    $registration = Get-Content -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
+    $ownerMarker = Get-Content -Encoding UTF8 -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
+    $registration = Get-Content -Encoding UTF8 -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
     Assert-AgentMemoryTaskRegistration -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration
     $task = Get-ScheduledTask -TaskPath ([string]$registration.task_path) -TaskName ([string]$registration.task_name) -ErrorAction Stop
     return Assert-AgentMemoryScheduledTaskOwnership -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration -Task $task
@@ -271,7 +271,7 @@ try {
                 $failureDetail = $null
                 $statePath = Join-Path $resolvedRoot 'data\runtime-state.json'
                 try {
-                    $runtimeState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+                    $runtimeState = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
                     if ([string]$runtimeState.status -eq 'failed' -and $runtimeState.error_message) {
                         $failureDetail = [string]$runtimeState.error_message
                     }

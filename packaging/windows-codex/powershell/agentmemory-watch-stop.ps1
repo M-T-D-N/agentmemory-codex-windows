@@ -19,7 +19,7 @@ foreach ($requiredFile in @($envScript, $statePath, $registrationPath)) {
 }
 . $envScript -Root $resolvedRoot
 
-$state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+$state = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
 if ([string]$state.status -ne 'active' -or -not $state.watcher_pid -or -not $state.watcher_started_at_utc -or -not $state.watcher_process_started_at_utc) {
     return
 }
@@ -57,7 +57,7 @@ $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 do {
     Start-Sleep -Milliseconds 250
     try {
-        $current = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+        $current = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
         if ($current.watcher_started_at_utc -is [DateTime] -or $current.watcher_started_at_utc -is [DateTimeOffset]) {
             $current.watcher_started_at_utc = $current.watcher_started_at_utc.ToUniversalTime().ToString('o')
         }
@@ -70,7 +70,7 @@ do {
             if ($watcherProcess -and $watcherProcess.StartTime.ToUniversalTime().ToString('o') -eq [string]$state.watcher_process_started_at_utc) {
                 continue
             }
-            $registration = Get-Content -Raw -LiteralPath $registrationPath | ConvertFrom-Json
+            $registration = Get-Content -Encoding UTF8 -Raw -LiteralPath $registrationPath | ConvertFrom-Json
             Import-Module ScheduledTasks -ErrorAction Stop
             $task = Get-ScheduledTask -TaskPath ([string]$registration.task_path) -TaskName ([string]$registration.task_name) -ErrorAction Stop
             if ([string]$task.State -eq 'Ready') {

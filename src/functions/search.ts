@@ -311,9 +311,11 @@ export async function findUnindexedObservations(kv: StateKV): Promise<{ sessions
   const live = getSearchIndex();
   const sessions = await kv.list<Session>(KV.sessions);
   const indexed = live.observationCountsBySession();
+  const observationScopes = typeof kv.listGroups === "function" ? new Set(await kv.listGroups()) : null;
   const missing: CompressedObservation[] = [];
   for (const session of sessions) {
     if (session.observationCount > 0 && session.observationCount <= (indexed.get(session.id) ?? 0)) continue;
+    if (session.observationCount === 0 && observationScopes && !observationScopes.has(KV.observations(session.id))) continue;
     const rows = await kv.list<CompressedObservation>(KV.observations(session.id));
     missing.push(...rows.filter(row => row.title && row.narrative && !live.has(row.id)));
   }

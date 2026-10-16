@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { logger } from "../src/logger.js";
 import { createLocalQwenLifecycle, localQwenChildEnvironment, localQwenBackgroundDeferral } from "../src/providers/local-qwen-lifecycle.js";
 
 const config = {
@@ -89,4 +90,52 @@ describe("read-only host background admission", () => {
     expect(localQwenBackgroundDeferral({script:config.script,read:()=>{throw Error("read failed");}})).toBe("background_policy_unknown");
     expect(localQwenBackgroundDeferral({script:"relative.ps1"})).toBe("background_policy_unknown");
   });
+});
+
+describe("host Qwen response privacy", () => {
+  it.each(["owned", "borrowed", "deferred", "malformed-status", "malformed-identity", "malformed-json", "invoke-failure", "deferred-secret", "release-retry"])(
+    "never exposes host response fields for %s", async (scenario) => {
+      const secret = "synthetic-host-secret-do-not-log";
+      const modelPath = "D:\\Synthetic Private Models\\fixture.gguf";
+      const service = { owner_token: token, secret, model_path: modelPath, nested: { credential: secret } };
+      const response: Record<string, unknown> = { status: "ready_owned", started_by_request: true, service };
+      if (scenario === "borrowed") response.started_by_request = false;
+      if (scenario === "deferred") Object.assign(response, { status: "deferred", reason: "background_held" });
+      if (scenario === "malformed-status") response.status = "invalid";
+      if (scenario === "malformed-identity") response.service = { ...service, owner_token: "invalid" };
+      if (scenario === "deferred-secret") Object.assign(response, { status: "deferred", reason: secret });
+      const invoke = vi.fn();
+      if (scenario === "invoke-failure") invoke.mockRejectedValueOnce(new Error(secret));
+      else invoke.mockResolvedValueOnce(scenario === "malformed-json" ? "owner_token:" + token : JSON.stringify(response));
+      if (scenario === "release-retry") invoke.mockRejectedValueOnce(new Error(secret));
+      invoke.mockResolvedValue(JSON.stringify({ status: "stopped", service }));
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const info = vi.spyOn(logger, "info");
+      const warn = vi.spyOn(logger, "warn");
+      const error = vi.spyOn(logger, "error");
+      try {
+        const host = createLocalQwenLifecycle({ ...config, invoke })!;
+        if (scenario.startsWith("malformed") || scenario === "invoke-failure") {
+          const failure = await host.start().then(() => null, (error: Error) => error);
+          expect(failure).toBeInstanceOf(Error);
+          logger.warn("Synthetic caller startup failure", { error: failure?.message });
+        } else {
+          const start = await host.start();
+          if (!start.ready) logger.info("Synthetic caller startup deferred", { reason: start.reason });
+        }
+        if (scenario === "release-retry") expect(await host.release()).toBe(false);
+        expect(await host.release()).toBe(true);
+        if (scenario === "owned" || scenario === "release-retry") {
+          const releases = invoke.mock.calls.slice(1);
+          expect(releases.length).toBe(scenario === "release-retry" ? 2 : 1);
+          for (const call of releases) expect(call[1]).toEqual([
+            "-NoProfile", "-NonInteractive", "-File", config.script,
+            "-Operation", "stop-qwen", "-ExpectedOwnerToken", token,
+          ]);
+        } else expect(invoke).toHaveBeenCalledOnce();
+        const captured = JSON.stringify({ stderr: stderr.mock.calls, info: info.mock.calls, warn: warn.mock.calls, error: error.mock.calls });
+        for (const forbidden of [token, secret, modelPath, "owner_token", "model_path", "credential"]) expect(captured).not.toContain(forbidden);
+      } finally { stderr.mockRestore(); info.mockRestore(); warn.mockRestore(); error.mockRestore(); }
+    },
+  );
 });

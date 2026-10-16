@@ -6,6 +6,7 @@ import type { CodexNativeMessage } from "./codex-record.js";
 import { validateCodexExclusion } from "../functions/codex-capture-exclusion.js";
 import { isCodexApprovalReviewText, isCodexInternalAmbientText } from "../functions/observation-visibility.js";
 import { observationContentFields } from "../functions/forget-preview.js";
+import { HISTORICAL_PRIVACY_VERSION, HISTORICAL_PRIVACY_RULES_DIGEST, type HistoricalPrivacyDigest } from "./codex-historical-privacy.js";
 
 export interface CodexMatchDecision {
   sourceKey: string;
@@ -18,6 +19,7 @@ export interface CodexMatchDecision {
   legacyDelayedHookMatch?: true;
   duplicateOfObservationId?: string;
   reason?: string;
+  historicalPrivacyPreserved?: HistoricalPrivacyDigest;
 }
 
 export const codexTextDigest = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -111,7 +113,8 @@ export function unmatchedCodexCaptures(observations: CompressedObservation[], de
   const matched = new Set(decisions.filter(row => row.action === "adopt" || row.action === "present")
     .map(row => row.observationId));
   const conflicted = new Set(decisions.filter(row => row.action === "blocked").map(row => row.observationId));
-  return observations.filter(row => (row.codexSource !== undefined || capturedKind(row) !== null) && !matched.has(row.id))
+  return observations.filter(row => !(row.emptyDeletion === undefined && !conflicted.has(row.id) && row.codexSource?.kind === "user" && isCodexInternalAmbientText(row.narrative)) &&
+      (row.codexSource !== undefined || capturedKind(row) !== null) && !matched.has(row.id))
     .map(row => ({ observationId: row.id,
       reason: conflicted.has(row.id) ? "blocked_native_correspondence" : "unresolved_native_correspondence" }));
 }
@@ -120,6 +123,11 @@ export function codexSourceMessages<T extends CodexNativeMessage | CodexMessageR
   const sources = new Map<string, T>();
   for (const message of messages) {
     const prompt = promptDigests(message);
+    const historical = message.historicalPrivacy;
+    if (historical !== undefined && (!historical || historical.version !== HISTORICAL_PRIVACY_VERSION ||
+        historical.rulesDigest !== HISTORICAL_PRIVACY_RULES_DIGEST || !/^[a-f0-9]{64}$/.test(historical.textDigest) ||
+        historical.currentTextDigest !== messageDigest(message) || historical.textDigest === historical.currentTextDigest))
+      throw Error("Invalid historical privacy correspondence");
     if (retainedPath(message) !== undefined && !validRetainedPath(retainedPath(message))) throw Error("Invalid retained native source path");
     if (message.sessionId !== sessionId || !/^[a-f0-9]{64}$/.test(message.key) ||
         !Number.isFinite(Date.parse(message.timestamp)) || !/^[a-f0-9]{64}$/.test(messageDigest(message)) ||
@@ -141,6 +149,7 @@ export function codexSourceMessages<T extends CodexNativeMessage | CodexMessageR
           !/^[a-f0-9]{64}$/.test(message.legacyRecovery?.textDigest)))) throw Error("Invalid native message identity");
     const prior = sources.get(message.key);
     if (prior && (messageDigest(prior) !== messageDigest(message) || prior.kind !== message.kind ||
+        JSON.stringify(prior.historicalPrivacy) !== JSON.stringify(message.historicalPrivacy) ||
         prior.nativeMessageId !== message.nativeMessageId || prior.turnId !== message.turnId || syntheticDigest(prior) !== syntheticDigest(message) ||
         prior.legacyExcludedReason !== message.legacyExcludedReason || retainedPath(prior) !== retainedPath(message) ||
         promptDigests(prior)?.textDigest !== prompt?.textDigest || promptDigests(prior)?.syntheticDigest !== prompt?.syntheticDigest ||
@@ -290,13 +299,21 @@ function matchSingleCodexMessages(
     const imageRepair = !mapped.length && delayedHooks.get(key) === candidate?.id &&
       digests.get(candidate.id)?.exact === imageFailureDigest(message) ? "restore_image_read_diagnostic" as const
       : undefined;
-    if (typeof candidate.narrative !== "string" || (codexTextDigest(candidate.narrative) !== messageDigest(message) && !repair && !imageRepair)) { decisions.set(key, blocked("legacy_or_canonical_content_mismatch", candidate)); continue; }
+    const historical = message.historicalPrivacy;
+    const historicalPrivacyPreserved = historical && candidate.codexSource && scope.completeNativeInventory &&
+      candidate.project === scope.project && candidate.timestamp === message.timestamp &&
+      candidate.codexSource.ordinal === message.ordinal && candidate.codexSource.byteOffset === message.byteOffset &&
+      candidate.codexSource.legacyExcludedReason === message.legacyExcludedReason &&
+      candidate.codexSource.retainedSourcePath === retainedPath(message) &&
+      typeof candidate.narrative === "string" && codexTextDigest(candidate.narrative) === historical.textDigest &&
+      candidate.codexSource.textDigest === historical.textDigest ? historical : undefined;
+    if (typeof candidate.narrative !== "string" || (codexTextDigest(candidate.narrative) !== messageDigest(message) && !historicalPrivacyPreserved && !repair && !imageRepair)) { decisions.set(key, blocked("legacy_or_canonical_content_mismatch", candidate)); continue; }
     if (candidate.codexSource) {
       const source = candidate.codexSource;
       const preservedEligibilityReview = source.legacyExcludedReason === "assistant_without_normal_user" &&
         message.kind === "assistant_final" && message.legacyExcludedReason === undefined;
       if (source.version !== 1 || source.nativeMessageId !== message.nativeMessageId || source.kind !== message.kind || capturedKind(candidate) !== message.kind ||
-          source.timestamp !== message.timestamp || source.textDigest !== messageDigest(message) ||
+          source.timestamp !== message.timestamp || (source.textDigest !== messageDigest(message) && !historicalPrivacyPreserved) ||
           (source.legacyExcludedReason !== message.legacyExcludedReason && !preservedEligibilityReview) ||
           (source.retainedSourcePath !== undefined && retainedPath(message) !== undefined && source.retainedSourcePath !== retainedPath(message))) {
         decisions.set(key, blocked("canonical_source_provenance_mismatch", candidate)); continue;
@@ -309,6 +326,7 @@ function matchSingleCodexMessages(
     const legacyUserItemMatch = !mapped.length && Math.abs(Date.parse(candidate.timestamp) - Date.parse(message.timestamp)) > 5000 &&
       codexTextDigest(candidate.narrative) === messageDigest(message) && matchesLegacyUserItem(candidate, message);
     decisions.set(key, { sourceKey: key, observationId: candidate.id, action: mapped.length && (!retainedPath(message) || candidate.codexSource?.retainedSourcePath) ? "present" : "adopt",
+      ...(historicalPrivacyPreserved ? { historicalPrivacyPreserved } : {}),
       ...(repair || imageRepair ? { contentRepair: repair ?? imageRepair } : {}), ...(timestampRepair ? { timestampRepair } : {}),
       ...(!mapped.length && Math.abs(Date.parse(candidate.timestamp) - Date.parse(message.timestamp)) > 5000 && delayedHooks.get(key) === candidate.id ? { legacyDelayedHookMatch: true as const } : {}),
       ...(legacyTurnMatch ? { legacyTurnMatch: true } : {}), ...(legacyUserItemMatch ? { legacyUserItemMatch: true } : {}) });

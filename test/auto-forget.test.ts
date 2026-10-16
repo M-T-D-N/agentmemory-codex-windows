@@ -1,3 +1,5 @@
+import { withKeyedLock } from "../src/state/keyed-mutex.js";
+import { registerArchiveFunctions } from "../src/functions/archive-tools.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mockKV as createMockKV } from "./helpers/mocks.js";
 
@@ -42,6 +44,8 @@ function mockSdk() {
 function makeMemory(overrides: Partial<Memory> = {}): Memory {
   return {
     id: "mem_1",
+    project: "project",
+    agentId: "owner",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     type: "pattern",
@@ -258,4 +262,50 @@ describe("Auto-Forget Function", () => {
 
     expect(result.contradictions.length).toBe(0);
   });
+});
+
+
+describe("dot F1 auto-forget owner boundaries", () => {
+ it.each([
+  ["different project", {project:"other",agentId:"owner"}],
+  ["different agent", {project:"project",agentId:"other"}],
+  ["missing project", {project:undefined,agentId:"owner"}],
+  ["missing owner", {project:"project",agentId:undefined}],
+  ["unknown legacy ownership", {project:undefined,agentId:undefined}],
+ ])("preserves older memory for %s",async(_,scope)=>{
+  const sdk=mockSdk(),kv=mockKV();registerAutoForgetFunction(sdk as never,kv as never);
+  const older=makeMemory({id:"old-scope",project:"project",agentId:"owner",createdAt:"2026-01-01T00:00:00Z"});
+  const newer=makeMemory({id:"new-scope",...scope,createdAt:"2026-02-01T00:00:00Z"});
+  await kv.set("mem:memories",older.id,older);await kv.set("mem:memories",newer.id,newer);
+  getSearchIndex().add(memoryToObservation(older));
+  const result=await sdk.trigger("mem::auto-forget",{});
+  expect(result.contradictions).toEqual([]);
+  expect((await kv.get<Memory>("mem:memories",older.id))?.isLatest).toBe(true);
+  expect(getSearchIndex().has(older.id)).toBe(true);
+  getSearchIndex().remove(older.id);
+ });
+});
+
+
+describe("dot F1 canonical and lock revalidation",()=>{
+ const pair=async()=>{const sdk=mockSdk(),kv=mockKV();registerAutoForgetFunction(sdk as never,kv as never);const old=makeMemory({id:"canonical-old",createdAt:"2026-01-01T00:00:00Z"}),newer=makeMemory({id:"canonical-new",createdAt:"2026-02-01T00:00:00Z"});await kv.set("mem:memories",old.id,old);await kv.set("mem:memories",newer.id,newer);return{sdk,kv,old,newer};};
+ it("reports same-owner candidates in dry run without changing head or index",async()=>{
+  const f=await pair();getSearchIndex().add(memoryToObservation(f.old));const result=await f.sdk.trigger("mem::auto-forget",{dryRun:true});expect(result.contradictions).toHaveLength(1);expect(await f.kv.get("mem:memories",f.old.id)).toEqual(f.old);expect(getSearchIndex().has(f.old.id)).toBe(true);getSearchIndex().remove(f.old.id);
+ });
+ it("rechecks canonical owner after comparison selection",async()=>{
+  const f=await pair(),get=f.kv.get.bind(f.kv);let changed=false;
+  vi.spyOn(f.kv,"get").mockImplementation(async(scope,key)=>{if(!changed&&scope==="mem:memories"&&key===f.old.id){changed=true;await f.kv.set(scope,key,{...f.old,agentId:"new-owner"});}return get(scope,key);});
+  const result=await f.sdk.trigger("mem::auto-forget",{});expect(changed).toBe(true);expect(result.contradictions).toEqual([]);expect(await f.kv.get("mem:memories",f.old.id)).toMatchObject({isLatest:true,agentId:"new-owner"});
+ });
+ it("waits for the remember lock and uses the changed canonical scope",async()=>{
+  const f=await pair();let entered!:()=>void,release!:()=>void;const ready=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);let finished=false;
+  const remembering=withKeyedLock("mem:remember",async()=>{entered();await gate;await f.kv.set("mem:memories",f.old.id,{...f.old,project:"other-project"});});await ready;
+  const forgetting=f.sdk.trigger("mem::auto-forget",{}).then(r=>{finished=true;return r;});await new Promise(r=>setTimeout(r,10));expect(finished).toBe(false);release();await remembering;
+  expect((await forgetting).contradictions).toEqual([]);expect(await f.kv.get("mem:memories",f.old.id)).toMatchObject({isLatest:true,project:"other-project"});
+ });
+ it("preserves an officially archived same-owner duplicate",async()=>{
+  const f=await pair();registerArchiveFunctions(f.sdk as never,f.kv as never);const target={kind:"memory",id:f.old.id};const preview=await f.sdk.trigger("mem::archive",{project:"project",target,action:"archive"});
+  await f.sdk.trigger("mem::archive",{project:"project",target,action:"archive",dryRun:false,expectedRevision:preview.expectedRevision,expectedDigest:preview.expectedDigest,reason:"keep evidence"});
+  expect((await f.sdk.trigger("mem::auto-forget",{})).contradictions).toEqual([]);expect(await f.kv.get("mem:memories",f.old.id)).toEqual(f.old);
+ });
 });

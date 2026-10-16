@@ -50,6 +50,38 @@ function codes(report: ReturnType<typeof evaluateStatus>): string[] {
 }
 
 describe("evaluateStatus", () => {
+  it("does not hide discovery, scheduler or graph pipeline failures behind a clean capture inventory", () => {
+    const native = { readOnly: true as const, readAt: "2026-09-24T12:00:00Z", status: "checking" as const,
+      complete: true, components: { unknownSessions: 0, reconciliationSessions: 0, failureSessions: 0 },
+      uniqueSessionCount: 0, uniqueEventCount: 0, issueCount: 0, limit: 10, offset: 0, nextOffset: null, issues: [],
+      pipeline: { scope: "server_discovery_and_graph" as const, discoveryIssues: 1, schedulerFailures: 2, graphFailures: 3,
+        observedAt: null, discoveryCycleCompletedAt: null, discoveryIssueCount: 0, discoveryTargetCount: 0,
+        discoveryDetailsComplete: false, discoveryRecords: [], nextOffset: null } };
+    expect(codes(evaluateStatus(inputs({ nativeCapture: native })))).toEqual(expect.arrayContaining([
+      "native-discovery-attention", "native-scheduler-failed", "native-graph-extraction-failed",
+    ]));
+  });
+
+  it("reports source collection independently of healthy service and graph checks", () => {
+    const native = { readOnly: true as const, readAt: "2026-09-24T12:00:00Z", status: "attention" as const,
+      complete: true, components: { unknownSessions: 1, reconciliationSessions: 0, failureSessions: 1 },
+      uniqueSessionCount: 1, uniqueEventCount: 1, issueCount: 2, limit: 10, offset: 0, nextOffset: null,
+      issues: [{ project: "p", sessionId: "one", category: "capture_failed" as const,
+        reason: "native_capture_rpc_failed", observedAt: "2026-09-24T11:59:00Z" }] };
+    const report = evaluateStatus(inputs({ nativeCapture: native }));
+    expect(report.status).toBe("warn");
+    expect(report.headline).toContain("1 unique sessions");
+    expect(report.nativeCapture).toEqual(native);
+    expect(renderStatusHtml(report, "nonce")).toContain("native_capture_rpc_failed");
+    expect(evaluateStatus(inputs({ nativeCapture: { ...native, status: "unavailable", complete: false,
+      components: null, uniqueSessionCount: null, issueCount: null, issues: [] } })).problems)
+      .toContainEqual(expect.objectContaining({ code: "native-capture-unverified" }));
+    const healthy = evaluateStatus(inputs({ nativeCapture: { ...native, status: "checking", components: {
+      unknownSessions: 0, reconciliationSessions: 0, failureSessions: 0 }, uniqueSessionCount: 0, issueCount: 0, issues: [] } }));
+    expect(healthy.status).toBe("ok");
+    expect(healthy.problems).not.toContainEqual(expect.objectContaining({ code: "native-capture-attention" }));
+  });
+
   it("keeps graph failures visible while general LLM features are intentionally disabled", () => {
     const metric = (functionId: string) => ({ functionId, totalCalls: 314, successCount: 0, failureCount: 314, avgLatencyMs: 1 });
     const report = evaluateStatus(inputs({ provider: "noop", graphProvider: "llm",
@@ -465,12 +497,13 @@ describe("status wiring", () => {
 
   it("time-boxes every status probe so a slow store cannot hang the page", () => {
     const reporter = api.slice(api.indexOf("export function createStatusReporter"), api.indexOf("export function createConsolidationStatusReader"));
-    expect(reporter.match(/valueWithin\(/g)?.length).toBe(6);
+    expect(reporter.match(/valueWithin\(/g)?.length).toBe(7);
+    expect(reporter).toContain("valueWithin(deps.nativeCapture(options.nativeSelection), STATUS_CHECK_TIMEOUT_MS)");
     expect(reporter).toMatch(/valueWithin\(scan\.run\(\), STATUS_CHECK_TIMEOUT_MS\)/);
     expect(api).toMatch(/run: singleFlight\(async \(\) => \{\s*const value = await findUnindexedObservations\(kv\);/);
     const handler = api.slice(api.indexOf('registerFunction("api::status"'), api.indexOf('function_id: "api::status"'));
     expect(reporter).toMatch(/valueWithin\(\s*kv\.get<AuditMigrationState>\(KV\.auditMonths, AUDIT_MIGRATION_STATE_KEY\),\s*STATUS_CHECK_TIMEOUT_MS,\s*\)/);
-    expect(handler).toContain("const report = await statusReport();");
+    expect(handler).toContain("const report = await statusReport({ nativeSelection: selection });");
   });
 
   it("streams the same report to the viewer on every health tick and in the snapshot", () => {

@@ -73,14 +73,26 @@ export function createLocalQwenLifecycle(options: {
     return stdout;
   });
   let ownerToken: string | undefined;
-  const call = async (args: string[]) => JSON.parse(await invoke(powershell, [
-    "-NoProfile", "-NonInteractive", "-File", script, ...args,
-  ])) as Record<string, unknown>;
+  const call = async (args: string[]): Promise<Record<string, unknown>> => {
+    let result: unknown;
+    try {
+      result = JSON.parse(await invoke(powershell, [
+        "-NoProfile", "-NonInteractive", "-File", script, ...args,
+      ]));
+    } catch { throw new Error("local_qwen_host_call_failed"); }
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("local_qwen_invalid_host_result");
+    return result as Record<string, unknown>;
+  };
+  const deferredReasons = new Set([
+    "background_held", "background_policy_unknown", "qwen_not_off", "comfyui_not_off",
+    "gpu_budget_unconfigured", "ram_budget_unconfigured", "gpu_state_unknown", "ram_state_unknown",
+    "gpu_memory_insufficient", "ram_memory_insufficient",
+  ]);
   return {
     async start() {
       const result = await call(["-Operation", "start-qwen", "-Background"]);
       if (result.status === "deferred") {
-        return { ready: false, reason: String(result.reason ?? "host_deferred") };
+        return { ready: false, reason: typeof result.reason === "string" && deferredReasons.has(result.reason) ? result.reason : "host_deferred" };
       }
       if (result.status !== "ready_owned") throw new Error("local_qwen_invalid_start_result");
       if (result.started_by_request === true) {
@@ -89,7 +101,7 @@ export function createLocalQwenLifecycle(options: {
           throw new Error("local_qwen_missing_start_identity");
         }
         ownerToken = service.owner_token;
-        logger.info("Semantic graph owns automatic Qwen instance", { service });
+        logger.info("Semantic graph owns automatic Qwen instance");
       }
       return { ready: true };
     },

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { appendFile, mkdtemp, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { zstdCompressSync } from "node:zlib";
+import { withReadOnlyCodexSource } from "../src/functions/codex-source-identity.js";
+import { CodexReadBudget } from "../src/replay/codex-read-budget.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCodexWindow } from "../src/replay/codex-window.js";
@@ -22,6 +25,57 @@ async function fixture(content = jsonl([header, start, user("u1"), user("u2")]))
 }
 
 describe("bounded restartable native Codex reads", () => {
+  it("applies the total physical budget before metadata and window parsing", async () => {
+    const { input } = await fixture();
+    const budget = new CodexReadBudget({ maxPhysicalBytes: 4 });
+    await expect(withReadOnlyCodexSource(input.sourceRoot, input.sourcePath, input.sessionId, async () => true, budget))
+      .rejects.toMatchObject({ name: "CodexReadBudgetError", reason: "physical_bytes" });
+    expect(budget.usage().physicalBytes).toBe(0);
+    expect((await readCodexWindow(input)).caughtUp).toBe(true);
+  });
+  it("counts decompression needed before the logical window and releases a rejected compressed reader", async () => {
+    const content = jsonl([header, start, user("one")]);
+    const { input, path } = await fixture(content);
+    await writeFile(path + ".zst", zstdCompressSync(Buffer.from(content)));
+    await rm(path);
+    const budget = new CodexReadBudget({ maxDecodedBytes: 1 });
+    await expect(withReadOnlyCodexSource(input.sourceRoot, input.sourcePath, input.sessionId, async () => true, budget))
+      .rejects.toMatchObject({ name: "CodexReadBudgetError", reason: "decoded_bytes" });
+    expect(budget.usage().decodedBytes).toBeGreaterThan(1);
+    expect((await readCodexWindow(input)).caughtUp).toBe(true);
+  });
+  it("identifies cursor rejection conditions without disclosing source or parser content", async () => {
+    const { input } = await fixture();
+    const baseline = await readCodexWindow(input);
+    const cursor = baseline.cursor;
+    const cases = [
+      { reason: "version", update: { version: 99 } },
+      { reason: "hold_mode", update: { version: 2 } },
+      { reason: "file_identity", update: { fileIdentity: "private-source-path" } },
+      { reason: "source_identity", update: { sourceIdentity: "private-source-header" } },
+      { reason: "byte_offset", update: { byteOffset: baseline.snapshotBytes + 1 } },
+      { reason: "ordinal", update: { ordinal: -1 } },
+      { reason: "anchor", update: { anchor: "private-anchor" } },
+      { reason: "parser", update: { parser: { ...cursor.parser, normalUserSeen: "private-parser-value" } } },
+      { reason: "parser", update: { parser: { ...cursor.parser, cwd: "\\\\?\\unsupported" } } },
+    ];
+    const preserved = JSON.stringify(cursor);
+    for (const { reason, update } of cases) {
+      const changed = { ...cursor, ...update } as typeof cursor;
+      try {
+        await readCodexWindow({ ...input, cursor: changed });
+        expect.fail(`Cursor ${reason} unexpectedly accepted`);
+      } catch (error) {
+        expect(error).toMatchObject({ name: "CodexCursorValidationError", diagnostic: { reason,
+          snapshotBytes: baseline.snapshotBytes, expectedDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          observedDigest: expect.stringMatching(/^[a-f0-9]{64}$/) } });
+        expect(JSON.stringify(error)).not.toContain("private-");
+        expect(JSON.stringify(error)).not.toContain("unsupported");
+      }
+    }
+    expect(JSON.stringify(cursor)).toBe(preserved);
+    expect((await readCodexWindow({ ...input, cursor })).caughtUp).toBe(true);
+  });
   it("retains verified turn cwd across read windows and rejects an invalid cursor cwd", async () => {
     const context = (turnId: string, cwd: string) => ({ type: "turn_context", payload: { turn_id: turnId, cwd } });
     const { input } = await fixture(jsonl([header, start, context("turn-a", "C:/work/a"), user("one"),

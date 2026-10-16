@@ -1,3 +1,4 @@
+import { attachCodexCaptureBatch, readCodexSourceStatus, type NativeCaptureReport } from "../functions/codex-source-status.js";
 import { currentMemoryHeads } from "../state/memory-utils.js";
 import { randomBytes } from "node:crypto";
 import { DEDUP_WINDOW_MS, getDedupSkippedCount } from "../functions/dedup.js";
@@ -412,19 +413,20 @@ function unindexedScanFor(kv: StateKV) {
 }
 
 export interface StatusReporterDeps {
+  nativeCapture?: (selection?: Parameters<typeof readCodexSourceStatus>[2]) => Promise<NativeCaptureReport>;
   metricsStore?: MetricsStore;
   provider?: ResilientProvider | { name?: string; circuitState?: unknown };
 }
 
 export function createStatusReporter(sdk: IIIClient, kv: StateKV, deps: StatusReporterDeps) {
-  return async function statusReport(options: { health?: HealthSnapshot | null; scanMaxAgeMs?: number } = {}): Promise<StatusReport> {
+  return async function statusReport(options: { health?: HealthSnapshot | null; scanMaxAgeMs?: number; nativeSelection?: Parameters<typeof readCodexSourceStatus>[2] } = {}): Promise<StatusReport> {
     const idx = getSearchIndex();
     const keywordRebuildRunning = isKeywordRebuildInProgress();
     const scan = unindexedScanFor(kv);
     const cached = scan.last && options.scanMaxAgeMs !== undefined && Date.now() - scan.last.at < options.scanMaxAgeMs
       ? scan.last.value
       : null;
-    const [health, functionMetrics, graph, unindexed, auditMigrationState, stateStore, capture] = await Promise.all([
+    const [health, functionMetrics, graph, unindexed, auditMigrationState, stateStore, capture, nativeCapture] = await Promise.all([
       options.health !== undefined ? Promise.resolve(options.health) : valueWithin(getLatestHealth(kv), STATUS_CHECK_TIMEOUT_MS),
       deps.metricsStore ? valueWithin(deps.metricsStore.getAll(), STATUS_CHECK_TIMEOUT_MS) : Promise.resolve([]),
       valueWithin(
@@ -438,6 +440,7 @@ export function createStatusReporter(sdk: IIIClient, kv: StateKV, deps: StatusRe
       ),
       probeStateStore(kv),
       valueWithin(getCaptureController()?.status() ?? Promise.resolve(null), STATUS_CHECK_TIMEOUT_MS),
+      deps.nativeCapture ? valueWithin(deps.nativeCapture(options.nativeSelection), STATUS_CHECK_TIMEOUT_MS) : Promise.resolve(undefined),
     ]);
     const observationsIndexed = [...idx.observationCountsBySession().values()].reduce((a, n) => a + n, 0);
     const documentKinds = idx.documentKindCounts();
@@ -496,6 +499,7 @@ export function createStatusReporter(sdk: IIIClient, kv: StateKV, deps: StatusRe
       indexPersistence: getIndexPersistenceStatus(),
       stateStore,
       capture: capture ?? null,
+      ...(deps.nativeCapture ? { nativeCapture: nativeCapture ?? null } : {}),
       observeDedup: { skippedSinceStart: getDedupSkippedCount(), windowSeconds: Math.round(DEDUP_WINDOW_MS / 1000) },
     });
   };
@@ -560,7 +564,7 @@ export function registerApiTriggers(
   metricsStore?: MetricsStore,
   provider?: { name?: string; circuitState?: unknown },
   onNativeCaptured?: () => void,
-  nativeSourceStatus?: () => unknown,
+  nativeSourceStatus?: (page?: { limit?: number; offset?: number }) => unknown,
 ): void {
   sdk.registerFunction(
     "middleware::api-auth",
@@ -674,13 +678,28 @@ export function registerApiTriggers(
     },
   });
 
-  const statusReport = createStatusReporter(sdk, kv, { metricsStore, provider });
+  const statusReport = createStatusReporter(sdk, kv, { metricsStore, provider,
+    ...(nativeSourceStatus ? { nativeCapture: async (selection: Parameters<typeof readCodexSourceStatus>[2]) => attachCodexCaptureBatch(await readCodexSourceStatus(kv, getAgentId() ?? "", selection), nativeSourceStatus(selection)) } : {}),
+  });
 
   sdk.registerFunction("api::status",
     async (req: HttpRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const report = await statusReport();
+      const query = req.query_params ?? {};
+      const selection = {
+        ...(query.nativeProject !== undefined ? { project: String(query.nativeProject) } : {}),
+        ...(query.nativeLimit !== undefined ? { limit: Number(query.nativeLimit) } : {}),
+        ...(query.nativeOffset !== undefined ? { offset: Number(query.nativeOffset) } : {}),
+        ...(query.nativeHistory !== undefined ? { includeHistory: query.nativeHistory === "true" } : {}),
+      };
+      if (selection.project !== undefined && (!selection.project.trim() || selection.project !== selection.project.trim() || selection.project === "*" || selection.project.length > 512) ||
+          selection.limit !== undefined && (!Number.isSafeInteger(selection.limit) || selection.limit < 1 || selection.limit > 100) ||
+          selection.offset !== undefined && (!Number.isSafeInteger(selection.offset) || selection.offset < 0) ||
+          query.nativeHistory !== undefined && !["true", "false"].includes(String(query.nativeHistory))) {
+        return { status_code: 400, body: { error: "Invalid native capture selection" } };
+      }
+      const report = await statusReport({ nativeSelection: selection });
       const accept = req.headers?.["accept"] ?? req.headers?.["Accept"];
       const format = req.query_params?.["format"];
       if (prefersHtml(typeof accept === "string" ? accept : undefined, typeof format === "string" ? format : undefined)) {
@@ -1160,7 +1179,7 @@ export function registerApiTriggers(
           if (body.action === "initialize-source") {
             const result = await sdk.trigger({ function_id: "mem::codex-source-initialize", payload: {
               project: body.project, sessionId: body.sessionId, sourcePath: body.sourcePath,
-              dryRun: body.dryRun, expectedVersion: body.expectedVersion, reason: body.reason, reconcileDuplicates: body.reconcileDuplicates, retainUnmatched: body.retainUnmatched, reviewSourceHolds: body.reviewSourceHolds,
+              dryRun: body.dryRun, expectedVersion: body.expectedVersion, reason: body.reason, reconcileDuplicates: body.reconcileDuplicates, retainUnmatched: body.retainUnmatched, reviewSourceHolds: body.reviewSourceHolds, reconcileSourceCwd: body.reconcileSourceCwd,
             } });
             return { status_code: 200, body: result };
           }

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
@@ -86,7 +86,8 @@ describe("prompt-submit hook stores identical prompts twice", () => {
         child.on("close", () => resolve());
         child.stdin.end(payload);
       });
-      await new Promise((r) => setTimeout(r, 5));
+      await vi.waitFor(() => expect(received.filter(r => r["hookType"] === "prompt_submit")).toHaveLength(i + 1),
+        { timeout: 3000, interval: 25 });
     }
     const prompts = received.filter((r) => r["hookType"] === "prompt_submit");
     expect(prompts).toHaveLength(2);

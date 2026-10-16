@@ -1,6 +1,8 @@
+import { zstdCompressSync } from "node:zlib";
+import { discoverCodexSession } from "../src/functions/codex-source-discovery.js";
 import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile, appendFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mockKV } from "./helpers/mocks.js";
@@ -16,6 +18,233 @@ import { codexSessionForTransfer } from "../src/replay/codex-capture-state.js";
 import { retainCodexForgetExclusions, codexExclusionId } from "../src/functions/codex-capture-exclusion.js";
 
 describe("native source capture checkpoints", () => {
+  it("previews historical privacy correspondence without changing canonical content, source metadata or archive state", async () => {
+    const raw = "identifier_sk-" + "a".repeat(32);
+    await appendFile(join(root, sourcePath), JSON.stringify(assistantMessage("historical-final", 25, raw)) + "\n");
+    await initialize(); await capture();
+    const rows = await kv.list<CompressedObservation>(KV.observations("s"));
+    const target = rows.find(row => row.codexSource?.nativeMessageId === "historical-final")!;
+    const narrative = "identifier_[REDACTED_SECRET]";
+    const stored = { ...target, narrative, codexSource: { ...target.codexSource!, textDigest: createHash("sha256").update(narrative).digest("hex") } };
+    await kv.set(KV.observations("s"), target.id, stored);
+    const archiveTarget = { kind: "observation" as const, id: target.id, sessionId: "s" };
+    const archivePlan = await changeArchiveState(kv as never, { project: "p", target: archiveTarget, action: "archive", dryRun: true });
+    await changeArchiveState(kv as never, { project: "p", target: archiveTarget, action: "archive", dryRun: false,
+      expectedRevision: (archivePlan as any).expectedRevision, expectedDigest: (archivePlan as any).expectedDigest, reason: "synthetic historical privacy preservation" });
+    const before = structuredClone(await kv.list(KV.observations("s")));
+    const archive = (await readArchiveVisibility(kv as never))(archiveTarget);
+    const first = await preview(), retry = await preview();
+    expect(first).toMatchObject({ adopt: 0, missing: 0, historicalPrivacyPreserved: [{ observationId: target.id,
+      currentTextDigest: createHash("sha256").update(raw).digest("hex"), textDigest: stored.codexSource.textDigest }] });
+    expect(retry).toEqual(first);
+    expect(await kv.list(KV.observations("s"))).toEqual(before);
+    expect((await readArchiveVisibility(kv as never))(archiveTarget)).toEqual(archive);
+    expect(JSON.stringify(first)).not.toContain(raw);
+    await initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
+      expectedVersion: first.expectedVersion, reason: "synthetic historical privacy apply and continuation" }, managed());
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations("s"))).toEqual(before);
+    expect((await readArchiveVisibility(kv as never))(archiveTarget)).toEqual(archive);
+    const savedSession = JSON.parse(JSON.stringify(await kv.get(KV.sessions, "s")));
+    await kv.set(KV.sessions, "s", savedSession);
+    await appendFile(join(root, sourcePath), JSON.stringify(message("after-historical-checkpoint-reload", 30, "new incremental content")) + "\n");
+    expect(await capture()).toMatchObject({ inserted: 1, status: "caught_up" });
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.get(KV.observations("s"), target.id)).toEqual(stored);
+  });
+  it("rejects existing option and inventory-bound errors before opening a source", async () => {
+    const state = structuredClone(await kv.get(KV.sessions, "s"));
+    const unavailable = { ...managed(), sourceRoot: join(root, "missing-source-root") };
+    await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: true },
+      { ...unavailable, maxInventoryWindows: 2000 })).rejects.toThrow("Invalid native inventory window bound");
+    await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: "invalid" as never },
+      unavailable)).rejects.toThrow("Capture initialization requires an explicit preview");
+    expect(await kv.get(KV.sessions, "s")).toEqual(state);
+  });
+  it("bounds an explicit maintenance deadline and binds it to the initialization preview", async () => {
+    const unavailable = { ...managed(), sourceRoot: join(root, "missing-source-root") };
+    for (const readTimeoutMilliseconds of [29_999, 90_001, 40_000.5, NaN, "90000" as never]) {
+      await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: true,
+        readTimeoutMilliseconds }, unavailable)).rejects.toThrow("Invalid capture initialization read timeout");
+    }
+    const input = { ...scope, sourcePath, dryRun: true, readTimeoutMilliseconds: 90_000 };
+    const plan = await initializeCodexSourceCapture(kv as never, input, managed());
+    await expect(initializeCodexSourceCapture(kv as never, { ...input, dryRun: false, readTimeoutMilliseconds: 30_000,
+      expectedVersion: plan.expectedVersion, reason: "changed maintenance deadline" }, managed())).rejects.toThrow("preview is stale");
+    await initializeCodexSourceCapture(kv as never, { ...input, dryRun: false,
+      expectedVersion: plan.expectedVersion, reason: "bounded synthetic maintenance initialization" }, managed());
+    expect(await capture()).toMatchObject({ inserted: 2, status: "caught_up" });
+  });
+  it("captures newly appended input in isolated state after a completed checkpoint", async () => {
+    await initialize(); await capture();
+    const before = await kv.list<CompressedObservation>(KV.observations("s"));
+    await appendFile(join(root, sourcePath), JSON.stringify(message("fresh-increment", 33, "new increment")) + "\n");
+    expect(await capture()).toMatchObject({ status: "caught_up", inserted: 1, issue: null });
+    expect(await kv.list(KV.observations("s"))).toHaveLength(before.length + 1);
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+  });
+  it("resumes a fully captured transfer at its verified end but still captures missing native input", async () => {
+    await initialize(); await capture();
+    const prior = (await kv.get<Session>(KV.sessions, "s"))!;
+    const originals = structuredClone(await kv.list<CompressedObservation>(KV.observations("s")));
+    await kv.set(KV.sessions, "s", codexSessionForTransfer(prior));
+    const complete = await preview();
+    expect(complete).toMatchObject({ missing: 0, adopt: 0, recoverRaw: 0, sourceHoldCount: 0, unresolvedCaptureCount: 0 });
+    await initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
+      expectedVersion: complete.expectedVersion, reason: "verified complete transferred source" }, managed());
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.cursor!.byteOffset)
+      .toBe(prior.codexNativeCapture!.cursor!.byteOffset);
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations("s"))).toEqual(originals);
+    await appendFile(join(root, sourcePath), JSON.stringify(message("missing-after-full-inventory", 35, "new source input")) + "\n");
+    const missing = await preview(); expect(missing.missing).toBe(1);
+    await initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
+      expectedVersion: missing.expectedVersion, reason: "collect actual missing source input" }, managed());
+    expect(await capture()).toMatchObject({ inserted: 1, status: "caught_up" });
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    for (const row of originals) expect(await kv.get(KV.observations("s"), row.id)).toEqual(row);
+  });
+  it("automatically verifies an unchanged compressed archive and preserves the completed cursor and originals", async () => {
+    await initialize(); await capture();
+    const prior = (await kv.get<Session>(KV.sessions, "s"))!;
+    const originals = structuredClone(await kv.list(KV.observations("s")));
+    const raw = await readFile(join(root, sourcePath));
+    await writeFile(join(root, sourcePath + ".zst"), zstdCompressSync(raw)); await rm(join(root, sourcePath));
+    await expect(capture()).rejects.toThrow("reconciliation is required");
+    const outcome = await discoverCodexSession(kv as never, { status: "candidate", sessionId: "s", sourcePath,
+      cwd: prior.cwd, source: prior.codexNativeCapture!.source.source, threadSource: "user",
+      createdAt: prior.startedAt, updatedAt: new Date().toISOString(), archived: true },
+      { sourceRoot: root, agentId: "codex-global", projectForCwd: () => "p" });
+    expect(outcome.status).toBe("initialized");
+    const changed = (await kv.get<Session>(KV.sessions, "s"))!;
+    expect(changed.codexNativeCapture!.cursor!.fileIdentity).toMatch(/^zstd:/);
+    expect(changed.codexNativeCapture!.cursor!.byteOffset).toBe(prior.codexNativeCapture!.cursor!.byteOffset);
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations("s"))).toEqual(originals);
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.lastFailure).toBeUndefined();
+    await writeFile(join(root, sourcePath), raw);
+    await expect(capture()).rejects.toThrow("reconciliation is required");
+    expect((await discoverCodexSession(kv as never, { status: "candidate", sessionId: "s", sourcePath,
+      cwd: prior.cwd, source: prior.codexNativeCapture!.source.source, threadSource: "user",
+      createdAt: prior.startedAt, updatedAt: new Date().toISOString(), archived: false },
+      { sourceRoot: root, agentId: "codex-global", projectForCwd: () => "p" })).status).toBe("initialized");
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations("s"))).toEqual(originals);
+  });
+  it("replays a compressed archive when complete verification finds a missing original", async () => {
+    await initialize(); await capture();
+    const before = await kv.list<CompressedObservation>(KV.observations("s"));
+    await kv.delete(KV.observations("s"), before[0].id);
+    const raw = await readFile(join(root, sourcePath));
+    await writeFile(join(root, sourcePath + ".zst"), zstdCompressSync(raw)); await rm(join(root, sourcePath));
+    const plan = await preview(); expect(plan.missing).toBe(1);
+    await initialize();
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.cursor!.byteOffset).toBe(0);
+    expect(await capture()).toMatchObject({ status: "caught_up", inserted: 1 });
+    expect(await kv.list(KV.observations("s"))).toHaveLength(before.length);
+  });
+  it("does not promote changed compressed source metadata as an automatic transport transition", async () => {
+    await initialize(); await capture();
+    const prior = (await kv.get<Session>(KV.sessions, "s"))!;
+    const lines = (await readFile(join(root, sourcePath), "utf8")).split("\n");
+    const header = JSON.parse(lines[0]); header.payload.timestamp = "2026-10-14T00:00:00.000Z"; lines[0] = JSON.stringify(header);
+    await writeFile(join(root, sourcePath + ".zst"), zstdCompressSync(Buffer.from(lines.join("\n")))); await rm(join(root, sourcePath));
+    await expect(capture()).rejects.toThrow();
+    const before = structuredClone(await kv.get(KV.sessions, "s"));
+    const result = await discoverCodexSession(kv as never, { status: "candidate", sessionId: "s", sourcePath,
+      cwd: prior.cwd, source: prior.codexNativeCapture!.source.source, threadSource: "user",
+      createdAt: prior.startedAt, updatedAt: new Date().toISOString(), archived: true },
+      { sourceRoot: root, agentId: "codex-global", projectForCwd: () => "p" });
+    expect(result).toMatchObject({ status: "reconcile_required", reason: "source_identity_changed" });
+    expect(await kv.get(KV.sessions, "s")).toEqual(before);
+  });
+
+  it("repairs a stale approval-review preview from complete normal source history", async () => {
+    await initialize(); await capture();
+    const current = await kv.get<Session>(KV.sessions, "s");
+    await kv.set(KV.sessions, "s", { ...current!, firstPrompt: "The following is the Codex agent history added since your last approval assessment. Continue the same review conversation.",
+      codexNativeCapture: { ...current!.codexNativeCapture!, cursor: { ...current!.codexNativeCapture!.cursor!, parser: { ...current!.codexNativeCapture!.cursor!.parser, normalUserSeen: false, internalTurn: true } } } });
+    const before = await kv.list(KV.observations("s"));
+    expect(await preview()).toHaveProperty("restoredFirstPromptSourceKey");
+    await initialize();
+    const repaired = await kv.get<Session>(KV.sessions, "s");
+    expect(repaired!.firstPrompt).toBeTruthy();
+    expect(repaired!.firstPrompt).not.toContain("approval assessment");
+    await capture();
+    expect(await kv.list(KV.observations("s"))).toEqual(before);
+  });
+
+  it("requires a real normal source request and preserves explicit exclusion during approval preview recovery", async () => {
+    await initialize(); await capture();
+    const current = await kv.get<Session>(KV.sessions, "s");
+    const stale = { ...current!, firstPrompt: "The following is the Codex agent history added since your last approval assessment. Continue the same review conversation." };
+    await kv.set(KV.sessions, "s", { ...stale, captureExcluded: true });
+    await expect(preview()).rejects.toThrow("proven canonical session owner");
+    await kv.set(KV.sessions, "s", stale);
+    const header = (await readFile(join(root, sourcePath), "utf8")).split("\n")[0];
+    await writeFile(join(root, sourcePath), header + "\n");
+    await expect(preview()).rejects.toThrow("normal user source message");
+    expect(await kv.get(KV.sessions, "s")).toEqual(stale);
+  });
+
+  it("reconciles a proved header cwd relocation only through an explicit bound preview", async () => {
+    await initialize(); await capture();
+    const originals = structuredClone(await kv.list(KV.observations("s")));
+    const lines = (await readFile(join(root, sourcePath), "utf8")).trimEnd().split("\n");
+    const header = JSON.parse(lines[0]); header.payload.cwd = "D:/relocated/p"; lines[0] = JSON.stringify(header);
+    await writeFile(join(root, sourcePath), lines.join("\n") + "\n");
+    await expect(capture()).rejects.toThrow("reconciliation is required");
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture).toMatchObject({
+      status: "reconcile_required", issue: "native_source_cursor_invalid" });
+    await expect(preview()).rejects.toThrow("cwd does not match");
+    const input = { ...scope, sourcePath, dryRun: true, reconcileSourceCwd: true };
+    const plan = await initializeCodexSourceCapture(kv as never, input, managed());
+    expect(plan).toMatchObject({ previousCwd: session.cwd, reconciledSourceCwd: "d:\\relocated\\p" });
+    await expect(initializeCodexSourceCapture(kv as never, { ...input, reconcileSourceCwd: false,
+      dryRun: false, expectedVersion: plan.expectedVersion, reason: "changed request" }, managed())).rejects.toThrow();
+    await initializeCodexSourceCapture(kv as never, { ...input, dryRun: false,
+      expectedVersion: plan.expectedVersion, reason: "verified same source header relocation" }, managed());
+    expect(await kv.get(KV.sessions, "s")).toMatchObject({ cwd: "d:\\relocated\\p", project: "p", agentId: "codex-global" });
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations("s"))).toEqual(originals);
+  });
+  it("rejects a changed source timestamp even when cwd reconciliation is explicitly requested", async () => {
+    await initialize(); await capture();
+    const before = structuredClone(await kv.get(KV.sessions, "s"));
+    const lines = (await readFile(join(root, sourcePath), "utf8")).trimEnd().split("\n");
+    const header = JSON.parse(lines[0]); header.payload.cwd = "D:/changed/p"; header.payload.timestamp = "2026-09-14T00:00:00Z";
+    lines[0] = JSON.stringify(header); await writeFile(join(root, sourcePath), lines.join("\n") + "\n");
+    await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: true,
+      reconcileSourceCwd: true }, managed())).rejects.toThrow("same source identity");
+    expect(await kv.get(KV.sessions, "s")).toEqual(before);
+  });
+  it("preserves incidental Page metadata without letting it block real source reconciliation", async () => {
+    await initialize(); await capture();
+    const ambient = { ...legacy("ambient", 1), narrative: '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>',
+      codexSource: { version: 1 as const, key: "a".repeat(64), nativeMessageId: "incidental-page", kind: "user" as const,
+        timestamp: message("ambient", 1).timestamp, ordinal: 1, byteOffset: 1, textDigest: "b".repeat(64) } };
+    await kv.set(KV.observations("s"), ambient.id, ambient);
+    expect(await preview()).toMatchObject({ unresolvedCaptureCount: 0 });
+    await initialize(); await capture();
+    expect(await kv.get(KV.observations("s"), ambient.id)).toEqual(ambient);
+    const changed = { ...ambient, id: "actual-user", narrative: "A new real user request" };
+    await kv.set(KV.observations("s"), changed.id, changed);
+    await expect(preview()).rejects.toThrow("Unresolved capture correspondence");
+  });
+
+  it("clears an earlier failed-call marker on a real unchanged source success", async () => {
+    await initialize(); await capture(async () => {});
+    const prior = (await kv.get<Session>(KV.sessions, "s"))!;
+    await kv.set(KV.sessions, "s", { ...prior, codexNativeCapture: { ...prior.codexNativeCapture!,
+      lastFailure: { reason: "native_capture_rpc_failed", observedAt: new Date().toISOString() } } });
+    expect(await capture(async () => {})).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect((await kv.get<Session>(KV.sessions, "s"))?.codexNativeCapture?.lastFailure).toBeUndefined();
+    const writes = vi.spyOn(kv, "set");
+    await capture(async () => {});
+    expect(writes).not.toHaveBeenCalled();
+  });
+
   it("does not persist an unchanged checkpoint but still captures an appended original", async () => {
     await initialize();
     await capture(async () => {});

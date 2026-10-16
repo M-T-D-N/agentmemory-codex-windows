@@ -39,7 +39,7 @@ $listeners = foreach ($line in @(& (Join-Path $env:SystemRoot 'System32\netstat.
 $taskState = $null
 $taskName = $null
 try {
-    $taskRegistration = Get-Content -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
+    $taskRegistration = Get-Content -Encoding UTF8 -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
     $taskName = [string]$taskRegistration.task_name
     Import-Module ScheduledTasks -ErrorAction Stop
     $task = Get-ScheduledTask -TaskPath ([string]$taskRegistration.task_path) -TaskName $taskName -ErrorAction Stop
@@ -53,7 +53,7 @@ $runtimeState = $null
 $stateFilePresent = Test-Path -LiteralPath $statePath -PathType Leaf
 $runtimeStateValid = $false
 if ($stateFilePresent) {
-    try { $runtimeState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json } catch { $runtimeState = $null }
+    try { $runtimeState = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json } catch { $runtimeState = $null }
     $runtimeStateValid = (
         $null -ne $runtimeState -and
         -not [string]::IsNullOrWhiteSpace([string]$runtimeState.run_id) -and
@@ -66,7 +66,7 @@ $installManifest = $null
 $installManifestPresent = Test-Path -LiteralPath $installManifestPath -PathType Leaf
 $installManifestValid = $false
 if ($installManifestPresent) {
-    try { $installManifest = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json } catch { $installManifest = $null }
+    try { $installManifest = Get-Content -Encoding UTF8 -Raw -LiteralPath $installManifestPath | ConvertFrom-Json } catch { $installManifest = $null }
     $installManifestValid = (
         $null -ne $installManifest -and
         -not [string]::IsNullOrWhiteSpace([string]$installManifest.install_root) -and

@@ -97,10 +97,12 @@ export class HybridSearch {
     selection?: SearchCandidateSelection,
     policy?: AutomaticRetrievalPolicy,
     hasExplicitEntityHints = false,
+    skipGraph = false,
   ): Promise<HybridSearchResult[]> {
     const fetchDepth = Math.max(limit * 5, 50);
     const entities = entityHints?.length ? entityHints : extractEntitiesFromQuery(query);
-    const graphEnabled = !policy && this.graphWeight > 0;
+    let graphEnabled = !policy && this.graphWeight > 0 && !skipGraph;
+    let graphEpoch: string | undefined;
     const bm25Candidates = this.bm25.search(query, selection ? this.bm25.size : fetchDepth);
 
     if (policy) policy.channels.graph = "skipped-automatic";
@@ -109,7 +111,7 @@ export class HybridSearch {
 
     const keywordDepth = selection?.resolve && !vectorEligible && (!graphEnabled || entities.length === 0) && (policy || !this.rerankEnabled)
       ? limit : fetchDepth;
-    const [bm25Results, vectorResults, entityGraphResults] = await Promise.all([
+    const [bm25Results, vectorResults] = await Promise.all([
       selection ? selection.select(bm25Candidates, keywordDepth) : Promise.resolve(bm25Candidates),
       (async () => {
         let rows: Array<{ obsId: string; sessionId: string; score: number }> = [];
@@ -123,7 +125,12 @@ export class HybridSearch {
         }
         return selection ? selection.select(rows, fetchDepth) : rows;
       })(),
-      (async () => {
+    ]);
+    if (graphEnabled) {
+      try { graphEpoch = await this.graphRetrieval.readEpoch(); }
+      catch { graphEnabled = false; }
+    }
+    const entityGraphResults = await (async () => {
         let rows: GraphRetrievalResult[] = [];
         if (graphEnabled && entities.length > 0) {
           try {
@@ -136,8 +143,7 @@ export class HybridSearch {
           }
         }
         return selection ? selection.select(rows, limit, id => this.bm25.getSessionId(id)) : rows;
-      })(),
-    ]);
+      })();
     let graphResults = entityGraphResults;
 
     let graphExpansionMatched = false;
@@ -277,13 +283,23 @@ export class HybridSearch {
     const enrichmentLimit = !policy && this.rerankEnabled ? Math.max(limit, rerankWindow) : limit;
     const enriched = await this.enrichResults(combined, enrichmentLimit, selection);
 
+    if (graphEpoch !== undefined) {
+      try { await this.graphRetrieval.assertEpoch(graphEpoch); }
+      catch { return this.tripleStreamSearch(query, limit, entityHints, selection, policy, hasExplicitEntityHints, true); }
+    }
+
     if (!policy && this.rerankEnabled && enriched.length > 1) {
       try {
         const head = enriched.slice(0, rerankWindow);
         const tail = enriched.slice(rerankWindow);
         const reranked = await rerank(query, head, rerankWindow);
+        if (graphEpoch !== undefined) await this.graphRetrieval.assertEpoch(graphEpoch);
         return reranked.concat(tail).slice(0, limit);
       } catch {
+        if (graphEpoch !== undefined) {
+          try { await this.graphRetrieval.assertEpoch(graphEpoch); }
+          catch { return this.tripleStreamSearch(query, limit, entityHints, selection, policy, hasExplicitEntityHints, true); }
+        }
         return enriched.slice(0, limit);
       }
     }

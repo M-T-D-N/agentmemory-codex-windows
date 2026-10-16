@@ -37,8 +37,8 @@ foreach ($requiredFile in @($envScript, $lifecycleScript, $taskRegistrationPath,
 function Get-OwnedDaemonTask {
     Import-Module ScheduledTasks -ErrorAction Stop
     $ownerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $ownerMarker = Get-Content -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
-    $registration = Get-Content -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
+    $ownerMarker = Get-Content -Encoding UTF8 -Raw -LiteralPath $ownerMarkerPath | ConvertFrom-Json
+    $registration = Get-Content -Encoding UTF8 -Raw -LiteralPath $taskRegistrationPath | ConvertFrom-Json
     Assert-AgentMemoryTaskRegistration -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration
     $task = Get-ScheduledTask -TaskPath ([string]$registration.task_path) -TaskName ([string]$registration.task_name) -ErrorAction Stop
     return Assert-AgentMemoryScheduledTaskOwnership -Root $resolvedRoot -OwnerSid $ownerSid -InstallNonce ([string]$ownerMarker.install_nonce) -Kind daemon -Registration $registration -Task $task
@@ -88,7 +88,7 @@ function Request-AgentMemoryStop {
     if (-not (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf)) {
         return $false
     }
-    $runtimeState = Get-Content -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
+    $runtimeState = Get-Content -Encoding UTF8 -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
     if ([string]$runtimeState.status -ne 'active' -or -not $runtimeState.worker -or -not $runtimeState.daemon -or -not $runtimeState.run_id) {
         return $false
     }
@@ -132,7 +132,7 @@ function Test-WatchdogStopRequest {
         return $false
     }
     try {
-        $request = Get-Content -Raw -LiteralPath $watchStopPath | ConvertFrom-Json
+        $request = Get-Content -Encoding UTF8 -Raw -LiteralPath $watchStopPath | ConvertFrom-Json
         if ($request.watcher_started_at_utc -is [DateTime] -or $request.watcher_started_at_utc -is [DateTimeOffset]) {
             $request.watcher_started_at_utc = $request.watcher_started_at_utc.ToUniversalTime().ToString('o')
         }

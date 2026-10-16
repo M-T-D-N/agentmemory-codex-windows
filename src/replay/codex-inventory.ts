@@ -4,13 +4,18 @@ import { validateCodexSourceHolds } from "./codex-source-hold.js";
 import { readCodexWindow, type CodexSourceCursor } from "./codex-window.js";
 import { codexMessageReference, type CodexMessageReference } from "./codex-match.js";
 
+export function codexInventoryWindowBound(bounds: { maxWindows?: number } = {}) {
+  const maxWindows = bounds.maxWindows ?? 256;
+  if (!Number.isSafeInteger(maxWindows) || maxWindows < 1 || maxWindows > 256) throw Error("Invalid native inventory window bound");
+  return maxWindows;
+}
+
 export async function readCodexInventory(
   input: { sourceRoot: string; sourcePath: string; sessionId: string; includeExcludedMessages?: boolean; sourceHolds?: CodexSourceHold[]; discoverSourceHolds?: boolean },
   readWindow: typeof readCodexWindow = readCodexWindow,
   bounds: { maxWindows?: number } = {},
 ) {
-  const maxWindows = bounds.maxWindows ?? 256;
-  if (!Number.isSafeInteger(maxWindows) || maxWindows < 1 || maxWindows > 256) throw Error("Invalid native inventory window bound");
+  const maxWindows = codexInventoryWindowBound(bounds);
   let cursor: CodexSourceCursor | undefined;
   let last: Awaited<ReturnType<typeof readCodexWindow>> | undefined;
   const messages: CodexMessageReference[] = [];

@@ -1,3 +1,4 @@
+import { attachCodexCaptureBatch, readCodexSourceStatus } from "../functions/codex-source-status.js";
 import { currentMemoryHeads } from "../state/memory-utils.js";
 import { LESSON_SOURCE_IDS_MAX, normalizeLessonSourceIds } from "../functions/lessons.js";
 import type { IIIClient } from "iii-sdk";
@@ -160,6 +161,7 @@ export function registerMcpEndpoints(
   sdk: IIIClient,
   kv: StateKV,
   secret?: string,
+  nativeSourceStatus?: (page?: { limit?: number; offset?: number }) => unknown,
 ): void {
   sdk.registerFunction("mcp::tools::list", 
     async (req: ApiRequest): Promise<McpResponse> => {
@@ -1755,6 +1757,9 @@ export function registerMcpEndpoints(
                   uri,
                   mimeType: "application/json",
                   text: JSON.stringify({
+                    ...(process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? {
+                      nativeCapture: attachCodexCaptureBatch(await readCodexSourceStatus(kv, getAgentId() ?? ""), nativeSourceStatus?.()),
+                    } : {}),
                     sessionCount: sessions.length,
                     memoryCount: memories.length,
                     healthStatus:

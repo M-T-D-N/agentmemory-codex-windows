@@ -224,7 +224,7 @@ if (
 ) {
     throw 'AgentMemory daemon must be contained by the owned hidden task launcher.'
 }
-$installManifest = Get-Content -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+$installManifest = Get-Content -Encoding UTF8 -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
 $expectedHiddenLauncherHash = [string]$installManifest.source_hashes.'bin\agentmemory-hidden-launcher.exe'
 if (
     $expectedHiddenLauncherHash -notmatch '^[A-Fa-f0-9]{64}$' -or
@@ -319,7 +319,7 @@ function Test-StopRequest {
         return $false
     }
     try {
-        $request = Get-Content -Raw -LiteralPath $stopPath | ConvertFrom-Json
+        $request = Get-Content -Encoding UTF8 -Raw -LiteralPath $stopPath | ConvertFrom-Json
         return (
             [int]$request.worker_pid -eq $WorkerPid -and
             [string]$request.token -eq $ExpectedToken
@@ -579,7 +579,7 @@ function Save-RuntimeStallEvidence {
         $path = Join-Path $LogsPath "worker-diagnostics-$RunId.json"
         try {
         if ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-Item -LiteralPath $path).Length -le 131072) {
-            $raw = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            $raw = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
             if ($raw.schema -eq 1 -and $raw.runId -ceq $RunId -and $raw.pid -eq $WorkerIdentity.pid) {
                 $cleanEntries = {
                     param($entries, [switch]$Recent)
@@ -635,7 +635,7 @@ function Write-RuntimeState {
         [string]$TerminalReason
     )
     if ($Status -eq 'failed' -and -not $EngineIdentity -and -not $WorkerIdentity -and (Test-Path -LiteralPath $statePath -PathType Leaf)) {
-        $previousState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+        $previousState = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
         if (-not (Test-AgentMemoryRecordedRunExited -RuntimeState $previousState -Probe { param($id) Get-AgentMemoryProcessIdentity -ProcessId $id })) {
             return
         }

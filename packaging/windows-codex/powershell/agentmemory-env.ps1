@@ -43,7 +43,7 @@ if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) {
     throw "AgentMemory environment contract is missing: $contractPath"
 }
 try {
-    $contract = Get-Content -Raw -LiteralPath $contractPath | ConvertFrom-Json
+    $contract = Get-Content -Encoding UTF8 -Raw -LiteralPath $contractPath | ConvertFrom-Json
 }
 catch {
     throw 'The AgentMemory environment contract is malformed.'
@@ -173,7 +173,7 @@ if (-not (Test-Path -LiteralPath $workspaceConfigPath -PathType Leaf)) {
     throw "AgentMemory workspace config is missing: $workspaceConfigPath"
 }
 try {
-    $workspaceConfig = Get-Content -Raw -LiteralPath $workspaceConfigPath | ConvertFrom-Json
+    $workspaceConfig = Get-Content -Encoding UTF8 -Raw -LiteralPath $workspaceConfigPath | ConvertFrom-Json
 }
 catch {
     throw 'The AgentMemory workspace config is malformed.'
@@ -220,9 +220,11 @@ if ($workspaceConfig.PSObject.Properties['upstream_settings']) {
     }
 }
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR', (Join-Path $resolvedRoot 'data\qwen-coordination'), 'Process')
-$localAILauncher = Join-Path $workspaceRoot 'projects\local-ai\scripts\Invoke-LocalAI.ps1'
-if (-not (Test-Path -LiteralPath $localAILauncher -PathType Leaf)) { $localAILauncher = $null }
-[System.Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT', $localAILauncher, 'Process')
+$localQwenSettings = $null
+if ($workspaceConfig.PSObject.Properties['local_qwen']) { $localQwenSettings = $workspaceConfig.local_qwen }
+$localQwen = Get-AgentMemoryLocalQwenSettings -WorkspaceRoot $workspaceRoot -Settings $localQwenSettings -TrustedProfilePath (Join-Path $resolvedRoot 'config\third-party-inputs.json')
+[Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_BASE_URL', $localQwen.BaseUrl, 'Process')
+[Environment]::SetEnvironmentVariable('AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT', $localQwen.LifecycleScript, 'Process')
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_WORKSPACE_ROOT', $workspaceRoot, 'Process')
 [System.Environment]::SetEnvironmentVariable('AGENTMEMORY_PROJECT_REGISTRY', $projectRegistry, 'Process')
 $codexSourceRoot = $defaultCodexSourceRoot

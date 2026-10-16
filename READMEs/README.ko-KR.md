@@ -12,7 +12,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [빌드 없이 설치](#빌드-없이-설치하기) · [운영 가이드](../packaging/windows-codex/README.md) · [검증 범위](#검색필터인덱스의-동작과-검증-범위) · [릴리스 변경](../CHANGELOG.md)
 
 > [!IMPORTANT]
-> 이 저장소는 독립 Technical Preview `0.1.0-preview.16`입니다.
+> 이 저장소는 독립 Technical Preview `0.1.0-preview.17`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -130,7 +130,7 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 공개 다운스트림 버전 | `0.1.0-preview.16` | 저장소 공개판과 소스 tag |
+| 다운스트림 후보 버전 | `0.1.0-preview.17` | 검증 중인 미공개 후보와 예정 소스 tag |
 | AgentMemory 호환 버전 | `0.9.30` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.22.1` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
@@ -140,7 +140,11 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 ## 빌드 없이 설치하기
 
-preview.16 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
+preview.17은 현재 검증 중이며 아직 공개되지 않았습니다. 아래 버전 tag와 다운로드 명령은
+공개 후 사용할 예정 경로입니다. 기존 공개 preview.16은 해당 공개판에 포함된 안내를 사용하고
+다른 버전의 실행기와 ZIP을 혼합하지 않습니다.
+
+preview.17 공개 후 같은 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
 [npm/npx 설치 안내](../packaging/windows-codex/npm/README.md)를 사용합니다.
 Windows x64, Node.js 24 이상, Codex가 필요합니다. 업스트림을 먼저 설치할 필요는 없습니다.
 기본 명령은 dry-run이며 `--execute`로 빈 대상의 설치·활성화·서비스 확인을 진행합니다.
@@ -166,11 +170,12 @@ npm 실행기는 미리 빌드한 ZIP을 받습니다. 실행 파일에 Authenti
 
 ## 소스에서 빌드하기
 
-Windows PowerShell에서 다음과 같이 실행합니다. 출력 폴더는 미리 존재하면 안
+검토된 후보 사본에서 Windows PowerShell로 실행합니다. 아래 tag 복제 명령은
+preview.17 공개 후에만 사용할 수 있습니다. 출력 폴더는 미리 존재하면 안
 됩니다.
 
 ```powershell
-git clone --branch v0.1.0-preview.16 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.17 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

@@ -1,3 +1,4 @@
+import type { NativeCaptureReport } from "./codex-source-status.js";
 import type { IndexLegStatus, IndexPersistenceStatus } from "../state/index-persistence.js";
 import type { VectorBackfillState } from "./search.js";
 import { describeGraphCompactBoot, type GraphCompactBootStatus } from "./graph-compact-boot.js";
@@ -79,6 +80,7 @@ export interface StatusInputs {
   indexPersistence?: IndexPersistenceStatus | null;
   stateStore?: { ok: boolean; latencyMs?: number } | null;
   capture?: CaptureStatus | null;
+  nativeCapture?: NativeCaptureReport | null;
   observeDedup?: ObserveDedupStatus | null;
 }
 
@@ -118,6 +120,7 @@ export interface StatusReport {
   graph: (GraphStatsInput & { ageSeconds: number | null; extractionEnabled: boolean }) | null;
   graphCompaction: GraphCompactBootStatus | null;
   capture: CaptureStatus | null;
+  nativeCapture?: NativeCaptureReport | null;
   observeDedup: ObserveDedupStatus | null;
   functions: Array<FunctionMetricInput & { failureRate: number; offWithoutLlm: boolean }>;
   flags: Array<StatusFlag & { inactiveReason?: string }>;
@@ -238,6 +241,29 @@ function vectorBackfillFix(state: VectorBackfillState | undefined): string {
 
 export function evaluateStatus(input: StatusInputs): StatusReport {
   const problems: StatusProblem[] = [];
+  if (input.nativeCapture !== undefined) {
+    const native = input.nativeCapture;
+    if (!native || !native.complete) problems.push({ level: "warn", code: "native-capture-unverified",
+      message: "Codex source collection could not be verified. Service and graph checks do not establish capture health.",
+      fix: "Retry the read-only source status query and inspect the exact failing target." });
+    if (native?.batch && native.batch.freshness !== "current") problems.push({ level: "warn", code: "native-capture-cycle-unverified",
+      message: "Source metadata was read, but the latest collection cycle is stale or has not been observed.",
+      fix: "Inspect the batch observation time and the exact current source issues; service health does not prove collection progress." });
+    if (native?.pipeline?.discoveryIssues) problems.push({ level: "warn", code: "native-discovery-attention",
+      message: `Native source discovery has ${native.pipeline.discoveryIssues} issue signals in the server-wide discovery cycle. ` +
+        `Known reasons on this page: ${[...new Set(native.pipeline.discoveryRecords.map(row => row.reason))].join(", ") || "details unavailable"}.`,
+      fix: "Inspect the discovery targets and pipeline.nextOffset. Canonical capture counts cover a different scope." });
+    if (native?.pipeline?.schedulerFailures) problems.push({ level: "warn", code: "native-scheduler-failed",
+      message: `The native collector failed ${native.pipeline.schedulerFailures} consecutive refresh attempts; current source metadata does not prove collector progress.` });
+    if (native?.pipeline?.graphFailures) problems.push({ level: "warn", code: "native-graph-extraction-failed",
+      message: `Native graph extraction has ${native.pipeline.graphFailures} unresolved failures. Graph inventory checks do not establish extraction completion.` });
+    if (native?.complete && native.status === "attention") problems.push({ level: "warn", code: "native-capture-attention",
+      message: `Codex source collection needs attention in ${native.uniqueSessionCount} unique sessions (${native.issueCount} issue categories). ` +
+        `Unknown: ${native.components?.unknownSessions ?? 0}; reconciliation: ${native.components?.reconciliationSessions ?? 0}; retained failed captures: ${native.components?.failureSessions ?? 0}. ` +
+        `Reasons on this page: ${[...new Set(native.issues.map(issue => issue.reason))].join(", ")}.`,
+      fix: "Inspect the listed targets and follow nextOffset for additional details. Component counts can overlap within one session." });
+  }
+
 
   if (!input.health) {
     problems.push({
@@ -506,6 +532,7 @@ export function evaluateStatus(input: StatusInputs): StatusReport {
     graph,
     graphCompaction: compaction,
     capture: input.capture ?? null,
+    ...(input.nativeCapture !== undefined ? { nativeCapture: input.nativeCapture } : {}),
     observeDedup: input.observeDedup ?? null,
     functions,
     flags: input.flags.map((flag) =>

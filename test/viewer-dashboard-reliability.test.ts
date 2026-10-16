@@ -304,3 +304,28 @@ describe("viewer navigation and shared components", () => {
     expect(reload).toMatch(/loadGraph\(\{ quiet: true \}\)/);
   });
 });
+
+describe("downstream issue reporting privacy", () => {
+  it("starts with a downstream issue draft link", () => {
+    expect(viewer).toContain('id="footer-feedback" href="https://github.com/M-T-D-N/agentmemory-codex-windows/issues/new"');
+  });
+  it.each(["0.9.30", "D:\\Private\\secret-token"])("keeps updated issue URLs limited to a safe version for %s", (version) => {
+    const link: { href?: string } = {};
+    const privateValue = "synthetic-secret-D:\\Private\\source";
+    const store = { version, provider: privateValue, embeddingProvider: privateValue, flags: [{ key: privateValue, enabled: true }] };
+    const helper = viewer.includes("function feedbackIssueUrl(") ? extractFunction("feedbackIssueUrl") : "";
+    const update = new Function("store", "document", "navigator", "wsOpenedAt", `${helper}\n${extractFunction("updateFooter")}\nreturn updateFooter;`)(
+      store, { getElementById: (id: string) => id === "footer-feedback" ? link : null }, { userAgent: privateValue }, null,
+    );
+    update();
+    const url = new URL(link.href!);
+    expect(url.origin + url.pathname).toBe("https://github.com/M-T-D-N/agentmemory-codex-windows/issues/new");
+    const diagnosticBody = url.searchParams.get("body") ?? "";
+    expect(diagnosticBody).not.toContain(privateValue);
+    expect(diagnosticBody).not.toContain("Private");
+    expect(diagnosticBody).not.toContain("User agent");
+    expect(diagnosticBody).not.toContain("Provider");
+    expect(diagnosticBody).not.toContain("Flags");
+    expect(diagnosticBody).toContain(version === "0.9.30" ? "0.9.30" : "unknown");
+  });
+});

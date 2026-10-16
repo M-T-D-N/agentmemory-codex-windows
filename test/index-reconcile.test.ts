@@ -67,6 +67,19 @@ describe("reconcileIndex", () => {
     setIndexPersistence(null);
   });
 
+  it("uses authoritative scopes to skip empty sessions while checking stale zero counts", async () => {
+    const kv = mockKV();
+    await kv.set("mem:sessions", "empty", makeSession("empty", 0));
+    await kv.set("mem:sessions", "stale", makeSession("stale", 0));
+    await kv.set("mem:obs:stale", "obs_stale", makeObs("obs_stale", "stale"));
+    const listGroups = vi.fn(async () => ["mem:sessions", "mem:obs:stale"]);
+    const added = await reconcileIndex({ ...kv, listGroups } as never);
+    expect(added).toBe(1);
+    expect(getSearchIndex().has("obs_stale")).toBe(true);
+    expect(kv.list).not.toHaveBeenCalledWith("mem:obs:empty");
+    expect(kv.list).toHaveBeenCalledWith("mem:obs:stale");
+  });
+
   it("re-indexes observations missing from the loaded snapshot and schedules a save", async () => {
     const kv = mockKV();
     await kv.set("mem:sessions", "s1", makeSession("s1", 2));

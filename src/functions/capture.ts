@@ -1,3 +1,5 @@
+import { resolveStoredNativeCapture, type NativeRecoveryInventories } from "./capture-native-recovery.js";
+import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -223,7 +225,7 @@ export function registerCaptureFunctions(
     return inboxSize;
   }
 
-  async function complete(rec: InboxRecord, observationId: string): Promise<void> {
+  async function complete(rec: InboxRecord, observationId: string, recovery?: CompletedEvent["nativeSourceRecovery"]): Promise<void> {
     const done: CompletedEvent = {
       key: rec.key,
       eventId: rec.eventId,
@@ -233,8 +235,9 @@ export function registerCaptureFunctions(
       acceptedAt: rec.acceptedAt,
       completedAt: new Date().toISOString(),
       attempts: rec.attempts,
+      ...(recovery ? { nativeSourceRecovery: recovery } : {}),
     };
-    if (rec.eventSource === "client") await kv.set(eventScope(rec.key), rec.key, done);
+    if (rec.eventSource === "client" || recovery) await kv.set(eventScope(rec.key), rec.key, done);
     await kv.delete(KV.captureInbox, rec.key);
     if (inboxSize !== null) inboxSize = Math.max(0, inboxSize - 1);
     counters.completed++;
@@ -359,7 +362,7 @@ export function registerCaptureFunctions(
     });
   }
 
-  async function retryOne(key: string, force: boolean): Promise<"recovered" | "dead" | "waiting" | "gone"> {
+  async function retryOne(key: string, force: boolean, inventories?: NativeRecoveryInventories): Promise<"recovered" | "dead" | "waiting" | "gone"> {
     return withKeyedLock(`capture:${key}`, async () => {
       const rec = await kv.get<InboxRecord>(KV.captureInbox, key);
       if (!rec) return "gone";
@@ -370,6 +373,23 @@ export function registerCaptureFunctions(
         if (inboxSize !== null) inboxSize = Math.max(0, inboxSize - 1);
         counters.duplicates++;
         return "gone";
+      }
+      if (force && inventories && rec.status === "dead") {
+        const recovered = await withKeyedLock(sessionLifecycleLockKey(rec.sessionId), async () => {
+          let proof;
+          try { proof = await resolveStoredNativeCapture(kv, rec, inventories); }
+          catch {
+            logger.warn("native capture recovery source could not be verified", { eventId: rec.eventId });
+            return "unverified" as const;
+          }
+          if (!proof) return false;
+          await complete(rec, proof.observationId, { sourceProject: proof.sourceProject, sourceKey: proof.sourceKey,
+            turnId: proof.turnId, previousError: rec.lastError, previousDeadAt: rec.deadAt, previousAttempts: rec.attempts });
+          counters.recovered++;
+          return true;
+        });
+        if (recovered === "unverified") return "dead";
+        if (recovered === true) return "recovered";
       }
       if (force) rec.attempts = 0;
       const outcome = await attempt({ ...rec });
@@ -536,8 +556,9 @@ export function registerCaptureFunctions(
       return input.all === true;
     });
     const outcomes = { recovered: 0, dead: 0, waiting: 0 };
+    const inventories: NativeRecoveryInventories = new Map();
     for (const rec of targets) {
-      const outcome = await retryOne(rec.key, true);
+      const outcome = await retryOne(rec.key, true, inventories);
       if (outcome === "recovered") outcomes.recovered++;
       else if (outcome === "dead") outcomes.dead++;
       else if (outcome === "waiting") outcomes.waiting++;

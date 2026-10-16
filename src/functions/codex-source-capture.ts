@@ -9,17 +9,18 @@ import { withObservationWrite } from "../state/observation-write.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { checkPayloadFrameSize } from "../state/frame-guard.js";
 import { advanceSessionActivity, seedSourceSessionActivity, sessionLifecycleLockKey } from "./session-lifecycle.js";
-import { canonicalCodexCwd } from "./codex-source-identity.js";
-import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
+import { canonicalCodexCwd, withReadOnlyCodexSource } from "./codex-source-identity.js";
+import { isExcludedCodexAmbientSession, isCodexApprovalReviewText } from "./observation-visibility.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { recordAudit } from "./audit.js";
-import { readCodexInventory } from "../replay/codex-inventory.js";
-import { readCodexWindow } from "../replay/codex-window.js";
+import { codexInventoryWindowBound, readCodexInventory } from "../replay/codex-inventory.js";
+import { CodexCursorValidationError, readCodexWindow, readCodexWindowFromFile } from "../replay/codex-window.js";
+import { CodexReadBudget, CodexReadBudgetError } from "../replay/codex-read-budget.js";
 import { readCodexRetainedSources } from "./codex-retained-source.js";
 import { initialCodexParseState } from "../replay/codex-record.js";
 import { codexLegacyPromptDigests, codexLegacySyntheticDigest, codexMessageReference, codexTextDigest, matchCodexMessages, unmatchedCodexCaptures, type CodexMessageReference } from "../replay/codex-match.js";
 
-type ManagedSource = { sourceRoot: string; agentId: string; maxInventoryWindows?: number };
+type ManagedSource = { sourceRoot: string; agentId: string; maxInventoryWindows?: number; readBudget?: CodexReadBudget };
 type Scope = { sessionId: string; project: string };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const sourceMetadata = (message: CodexMessageReference, duplicateOfObservationId?: string): NonNullable<CompressedObservation["codexSource"]> => ({
@@ -96,23 +97,44 @@ function normalizedObservationView(
   });
   return { observations: normalized, recovered };
 }
-async function scopedSession(kv: StateKV, scope: Scope, managed: ManagedSource) {
+async function scopedSession(kv: StateKV, scope: Scope, managed: ManagedSource, allowApprovalPreviewRecovery = false) {
   if (![scope.sessionId, scope.project, managed.agentId].every(value => typeof value === "string" && value.length > 0 &&
     value.length <= 512 && value === value.trim() && value !== "*") || !managed.sourceRoot) throw Error("Exact managed Codex capture scope is required");
   const session = await kv.get<Session>(KV.sessions, scope.sessionId);
+  const approvalPreviewRecovery = allowApprovalPreviewRecovery && session?.captureExcluded !== true &&
+    session?.codexNativeCapture?.source.sessionId === scope.sessionId && isCodexApprovalReviewText(session?.firstPrompt);
   if (!session || session.id !== scope.sessionId || session.project !== scope.project || session.agentId !== managed.agentId ||
-      isExcludedCodexAmbientSession(session)) throw Error("Native capture requires a proven canonical session owner");
+      (isExcludedCodexAmbientSession(session) && !approvalPreviewRecovery)) throw Error("Native capture requires a proven canonical session owner");
   return session;
 }
 
 export async function initializeCodexSourceCapture(kv: StateKV,
-  input: Scope & { sourcePath: string; dryRun: boolean; expectedVersion?: string; reason?: string; reconcileDuplicates?: boolean; retainUnmatched?: boolean; reviewSourceHolds?: boolean },
+  input: Scope & { sourcePath: string; dryRun: boolean; expectedVersion?: string; reason?: string; reconcileDuplicates?: boolean; retainUnmatched?: boolean; reviewSourceHolds?: boolean; reconcileSourceCwd?: boolean; readTimeoutMilliseconds?: number },
   managed: ManagedSource, readWindow: typeof readCodexWindow = readCodexWindow,
 ) {
-  if ((input.reviewSourceHolds !== undefined && typeof input.reviewSourceHolds !== "boolean") || (input.retainUnmatched !== undefined && typeof input.retainUnmatched !== "boolean") || (input.reconcileDuplicates !== undefined && typeof input.reconcileDuplicates !== "boolean") || typeof input.dryRun !== "boolean" || (!input.dryRun && (!/^[a-f0-9]{64}$/.test(input.expectedVersion ?? "") ||
+  if (input.readTimeoutMilliseconds !== undefined && (!Number.isSafeInteger(input.readTimeoutMilliseconds) ||
+      input.readTimeoutMilliseconds < 30_000 || input.readTimeoutMilliseconds > 90_000)) throw Error("Invalid capture initialization read timeout");
+  if ((input.reconcileSourceCwd !== undefined && typeof input.reconcileSourceCwd !== "boolean") || (input.reviewSourceHolds !== undefined && typeof input.reviewSourceHolds !== "boolean") || (input.retainUnmatched !== undefined && typeof input.retainUnmatched !== "boolean") || (input.reconcileDuplicates !== undefined && typeof input.reconcileDuplicates !== "boolean") || typeof input.dryRun !== "boolean" || (!input.dryRun && (!/^[a-f0-9]{64}$/.test(input.expectedVersion ?? "") ||
     typeof input.reason !== "string" || !input.reason.trim() || input.reason.length > 512))) throw Error("Capture initialization requires an explicit preview or its expectedVersion and reason");
+  codexInventoryWindowBound({ maxWindows: managed.maxInventoryWindows });
+  if (readWindow !== readCodexWindow) return initializeCodexSourceCaptureWithReader(kv, input, managed, readWindow);
+  const budget = managed.readBudget ?? new CodexReadBudget({ maxMilliseconds: input.readTimeoutMilliseconds ?? 30_000 });
+  return withReadOnlyCodexSource(managed.sourceRoot, input.sourcePath, input.sessionId,
+    (source, file) => initializeCodexSourceCaptureWithReader(kv, input, { ...managed, readBudget: budget },
+      options => options.sourcePath === input.sourcePath && options.sessionId === input.sessionId
+        ? readCodexWindowFromFile(options, source, file)
+        : withReadOnlyCodexSource(managed.sourceRoot, options.sourcePath, options.sessionId,
+          (retainedSource, retainedFile) => readCodexWindowFromFile(options, retainedSource, retainedFile), budget),
+      readCodexWindow), budget);
+}
+
+async function initializeCodexSourceCaptureWithReader(kv: StateKV,
+  input: Scope & { sourcePath: string; dryRun: boolean; expectedVersion?: string; reason?: string; reconcileDuplicates?: boolean; retainUnmatched?: boolean; reviewSourceHolds?: boolean; reconcileSourceCwd?: boolean; readTimeoutMilliseconds?: number },
+  managed: ManagedSource, readWindow: typeof readCodexWindow = readCodexWindow,
+  retainedReader: typeof readCodexWindow = readWindow,
+) {
   return withObservationWrite(() => withKeyedLock(sessionLifecycleLockKey(input.sessionId), async () => {
-    const session = await scopedSession(kv, input, managed);
+    const session = await scopedSession(kv, input, managed, true);
     const observations = await kv.list<CompressedObservation>(KV.observations(session.id), { includeDeleted: true });
     const normalized = normalizedObservationView(observations, session, managed.agentId);
     const legacyDigests = new Set(normalized.observations.filter(row => row && row.codexSource === undefined && row.emptyDeletion === undefined &&
@@ -120,6 +142,7 @@ export async function initializeCodexSourceCapture(kv: StateKV,
       typeof row.narrative === "string" && row.narrative.length <= 400)
       .map(row => codexTextDigest(row.narrative)));
     const recoveryTexts = new Map<string, string>();
+    let firstSourcePrompt: { key: string; preview: string } | undefined;
     const imageDigests = new Set(normalized.observations.filter(row => row && row.codexSource === undefined && row.emptyDeletion === undefined &&
       row.title === "prompt_submit" && row.type === "conversation" && typeof row.narrative === "string")
       .map(row => codexTextDigest(row.narrative)));
@@ -127,6 +150,10 @@ export async function initializeCodexSourceCapture(kv: StateKV,
       sourcePath: input.sourcePath, sessionId: input.sessionId, includeExcludedMessages: true,
       sourceHolds: session.codexNativeCapture?.sourceHolds, discoverSourceHolds: input.reviewSourceHolds === true }, async options => {
         const window = await readWindow(options);
+        if (!firstSourcePrompt) {
+          const firstUser = window.messages.find(message => message.kind === "user" && message.text.trim());
+          if (firstUser) firstSourcePrompt = { key: firstUser.key, preview: firstUser.text.replace(/\s+/g, " ").trim().slice(0, 200) };
+        }
         for (const message of [...window.messages, ...(window.legacyMessages ?? [])]) {
           const digest = codexLegacySyntheticDigest(message);
           const prompt = codexLegacyPromptDigests(message);
@@ -143,14 +170,24 @@ export async function initializeCodexSourceCapture(kv: StateKV,
       }, { maxWindows: managed.maxInventoryWindows });
     let messages = [...normalMessages, ...legacyMessages];
     if (!last.caughtUp) throw Error("A complete supported native inventory is required before capture initialization");
+    if (isCodexApprovalReviewText(session.firstPrompt) && !firstSourcePrompt) throw Error("Approval preview recovery requires a normal user source message");
     const canonicalCwd = canonicalCodexCwd(session.cwd);
-    const captureCwd = canonicalCodexCwd(last.source.cwd) !== canonicalCwd ? canonicalCwd : undefined;
+    const previousSource = session.codexNativeCapture?.source;
+    const currentSourceCwd = last.cursor.parser.cwd ?? canonicalCodexCwd(last.source.cwd);
+    const reconcileSourceCwd = input.reconcileSourceCwd === true && currentSourceCwd !== canonicalCwd;
+    if (reconcileSourceCwd && (!previousSource || canonicalCodexCwd(session.codexNativeCapture?.captureCwd ?? previousSource.cwd) !== canonicalCwd ||
+        !isDeepStrictEqual({ ...previousSource, cwd: last.source.cwd, relativePath: last.source.relativePath }, last.source))) {
+      throw Error("Source cwd reconciliation requires the same source identity and complete matching current cwd");
+    }
+    const targetCwd = reconcileSourceCwd ? currentSourceCwd : canonicalCwd;
+    const captureCwd = canonicalCodexCwd(last.source.cwd) !== targetCwd ? targetCwd : undefined;
     if (captureCwd && last.cursor.parser.cwd !== captureCwd) throw Error("Native capture cwd does not match the canonical session");
     const exclusions = (await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions)).filter(row => row.sessionId === session.id);
     let decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId, completeNativeInventory: true, exclusions });
     const unmatched = new Set(unmatchedCodexCaptures(normalized.observations, decisions).map(row => row.observationId));
     const retained = await readCodexRetainedSources({ sourceRoot: managed.sourceRoot, sourcePath: input.sourcePath, sessionId: input.sessionId },
-      messages, normalized.observations.filter(row => unmatched.has(row.id)), readWindow);
+      messages, normalized.observations.filter(row => unmatched.has(row.id)), retainedReader,
+      { readBudget: managed.readBudget, maxInventoryWindows: managed.maxInventoryWindows });
     messages = [...messages, ...retained.messages];
     decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId,
       completeNativeInventory: true, exclusions, singlePhysicalSource: retained.singlePhysicalSource, sourceCreatedAt: last.source.createdAt });
@@ -175,7 +212,7 @@ export async function initializeCodexSourceCapture(kv: StateKV,
     const capturedAfter = exclusions.filter(row => row.match.kind === "session").map(row => row.forgottenAt)
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
     if (capturedAfter && await kv.get(KV.summaries, session.id)) throw Error("A surviving forgotten summary requires lifecycle reconciliation");
-    const expectedVersion = hash([last.source, last.cursor, sourceHolds, input.reviewSourceHolds === true, captureCwd, retained.sources, input.reconcileDuplicates === true, input.retainUnmatched === true, messages, observations.slice().sort((a, b) => a.id.localeCompare(b.id)),
+    const expectedVersion = hash([last.source, last.cursor, sourceHolds, input.readTimeoutMilliseconds ?? 30_000, input.reviewSourceHolds === true, captureCwd, retained.sources, input.reconcileSourceCwd === true, input.reconcileDuplicates === true, input.retainUnmatched === true, messages, observations.slice().sort((a, b) => a.id.localeCompare(b.id)),
       exclusions.slice().sort((a, b) => a.id.localeCompare(b.id)), session]);
     const byId = new Map(observations.map(row => [row.id, row]));
     const byKey = new Map(messages.map(message => [message.key, message]));
@@ -196,9 +233,12 @@ export async function initializeCodexSourceCapture(kv: StateKV,
     }
     const duplicateCaptures = decisions.filter(row => row.duplicateOfObservationId && (row.action === "adopt" || row.action === "present"))
       .map(row => ({ observationId: row.observationId!, duplicateOfObservationId: row.duplicateOfObservationId!, sourceKey: row.sourceKey }));
-    const counts = { sourceHoldCount: sourceHolds.length, sourceHolds, unresolvedCaptureCount: unresolvedCaptures.length, unresolvedCaptures: unresolvedCaptures.map(row => ({ observationId: row.observationId })), linkDuplicateCaptures: decisions.filter(row => row.action === "adopt" && row.duplicateOfObservationId).length, duplicateCaptures, adopt: decisions.filter(row => row.action === "adopt").length,
+    const repairApprovalPreview = !capturedAfter && firstSourcePrompt && isCodexApprovalReviewText(session.firstPrompt);
+    const counts = { ...(repairApprovalPreview ? { restoredFirstPromptSourceKey: firstSourcePrompt!.key, previousFirstPromptDigest: codexTextDigest(session.firstPrompt!) } : {}), ...(reconcileSourceCwd ? { previousCwd: session.cwd, reconciledSourceCwd: currentSourceCwd } : {}), sourceHoldCount: sourceHolds.length, sourceHolds, unresolvedCaptureCount: unresolvedCaptures.length, unresolvedCaptures: unresolvedCaptures.map(row => ({ observationId: row.observationId })), linkDuplicateCaptures: decisions.filter(row => row.action === "adopt" && row.duplicateOfObservationId).length, duplicateCaptures, adopt: decisions.filter(row => row.action === "adopt").length,
       ...(captureCwd ? { verifiedCurrentCwd: captureCwd } : {}),
       missing: decisions.filter(row => row.action === "insert").length, excluded: decisions.filter(row => row.action === "excluded").length,
+      historicalPrivacyPreserved: decisions.filter(row => row.historicalPrivacyPreserved).map(row => ({
+        observationId: row.observationId, sourceKey: row.sourceKey, ...row.historicalPrivacyPreserved })),
       recoverRaw: normalized.recovered.size,
       restoreTerminalLf: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_terminal_lf").length,
       retainedSourceMessageCount: retained.messages.length,
@@ -237,12 +277,20 @@ export async function initializeCodexSourceCapture(kv: StateKV,
     const initializedAt = new Date().toISOString();
     const indexPending = prepared.size > 0 || counts.linkDuplicateCaptures > 0 || decisions.some(row => row.action === "adopt" && byKey.get(row.sourceKey)?.retainedSourcePath) || session.codexNativeCapture?.indexPending === true;
     const activitySession = seedSourceSessionActivity(session, messages.filter(message => !message.legacyExcludedReason).map(message => message.timestamp), last.source.createdAt, initializedAt);
-    const next: Session = { ...activitySession, semanticGraphCompletionVersion: 1, semanticGraphStatus: "pending", codexNativeCapture: {
+    const oldCursor = session.codexNativeCapture?.cursor;
+    const fullyCapturedInventory = last.caughtUp && counts.missing === 0 && counts.adopt === 0 && counts.recoverRaw === 0 &&
+      unresolvedCaptures.length === 0 && sourceHolds.length === 0 && !captureCwd && !reconcileSourceCwd && !repairApprovalPreview;
+    const unchangedCompressedTail = oldCursor && counts.missing === 0 && last.caughtUp &&
+      (last.cursor.fileIdentity.startsWith("zstd:") !== oldCursor.fileIdentity.startsWith("zstd:")) && isDeepStrictEqual(last.source, session.codexNativeCapture?.source) &&
+      oldCursor.byteOffset === last.cursor.byteOffset && oldCursor.ordinal === last.cursor.ordinal &&
+      oldCursor.anchor === last.cursor.anchor && oldCursor.sourceIdentity === last.cursor.sourceIdentity &&
+      isDeepStrictEqual(oldCursor.parser, last.cursor.parser);
+    const next: Session = { ...activitySession, ...(repairApprovalPreview ? { firstPrompt: firstSourcePrompt!.preview } : {}), ...(reconcileSourceCwd ? { cwd: currentSourceCwd } : {}), semanticGraphCompletionVersion: 1, semanticGraphStatus: "pending", codexNativeCapture: {
       version: sourceHolds.length ? 2 : 1, ...(sourceHolds.length ? { sourceHolds } : {}), source: last.source, initializedAt, status: "pending", ...(capturedAfter ? { capturedAfter } : {}),
       ...(captureCwd ? { captureCwd } : {}),
       ...(unresolvedCaptures.length ? { unresolvedCaptures } : {}),
       ...(indexPending ? { indexPending: true } : {}),
-      cursor: { ...last.cursor, version: sourceHolds.length ? 2 : 1, byteOffset: 0, ordinal: 0,
+      cursor: fullyCapturedInventory || unchangedCompressedTail ? last.cursor : { ...last.cursor, version: sourceHolds.length ? 2 : 1, byteOffset: 0, ordinal: 0,
         anchor: createHash("sha256").update("").digest("hex"), parser: initialCodexParseState(Boolean(last.source.fork)) },
     }, updatedAt: initializedAt };
     if (capturedAfter) { delete next.firstPrompt; delete next.summary; }
@@ -272,7 +320,15 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
           canonicalCodexCwd(state.captureCwd ?? window.source.cwd) !== canonicalCodexCwd(session.cwd)) throw Error("Native capture source identity changed");
     } catch (error) {
       const missing = error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
-      await markUnknown(missing ? "native_source_missing" : "native_source_read_failed");
+      const invalidCursor = error instanceof Error && error.message === "Codex source cursor is invalid, replaced or truncated; reconciliation is required";
+      if (invalidCursor) await kv.set(KV.sessions, session.id, { ...session, codexNativeCapture: { ...state,
+        status: "reconcile_required", issue: "native_source_cursor_invalid",
+        cursorDiagnostic: error instanceof CodexCursorValidationError ? error.diagnostic : undefined,
+        checkedAt: new Date().toISOString() } });
+      else if (error instanceof CodexReadBudgetError) await kv.set(KV.sessions, session.id, { ...session,
+        codexNativeCapture: { ...state, status: "unknown", issue: "native_source_read_budget_exceeded",
+          readBudget: error.usage, checkedAt: new Date().toISOString() } });
+      else await markUnknown(missing ? "native_source_missing" : "native_source_read_failed");
       throw error;
     }
     const observations = await kv.list<CompressedObservation>(KV.observations(session.id), { includeDeleted: true });
@@ -322,9 +378,9 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
     const next: Session = { ...activitySession,
       observationCount: [...existing.values()].filter(row => row.emptyDeletion?.state !== "deleted").length,
       updatedAt: capturedAt, ...(rows.length ? { semanticGraphStatus: "pending" } : {}),
-      codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, indexPending, snapshotBytes: window.snapshotBytes },
+      codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, cursorDiagnostic: undefined, readBudget: undefined, lastFailure: undefined, indexPending, snapshotBytes: window.snapshotBytes },
     };
-    const unchangedCheckpoint = isDeepStrictEqual(activitySession, session) && rows.length === 0 && !indexPending && state.indexPending === false &&
+    const unchangedCheckpoint = isDeepStrictEqual(activitySession, session) && rows.length === 0 && !state.lastFailure && !indexPending && state.indexPending === false &&
       next.observationCount === session.observationCount && status === state.status &&
       window.issue?.reason === state.issue && window.snapshotBytes === state.snapshotBytes &&
       isDeepStrictEqual(window.cursor, state.cursor);

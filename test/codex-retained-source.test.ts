@@ -1,8 +1,12 @@
+import { readCodexRetainedSources } from "../src/functions/codex-retained-source.js";
+import { readCodexInventory } from "../src/replay/codex-inventory.js";
 import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { zstdCompressSync } from "node:zlib";
+import { CodexReadBudget } from "../src/replay/codex-read-budget.js";
 import { mockKV } from "./helpers/mocks.js";
 import { KV } from "../src/state/schema.js";
 import type { CompressedObservation, Session } from "../src/types.js";
@@ -37,6 +41,38 @@ async function fixture(paginated = true) {
     preview: () => initializeCodexSourceCapture(kv, { ...input, dryRun: true }, managed) };
 }
 describe("retained observations from a prior native source generation", () => {
+  it("streams a compressed retained inventory once under the shared decoded-byte budget", async () => {
+    const sample = await fixture(false);
+    const rows = sample.previous.trimEnd().split("\n");
+    const padding = JSON.stringify({ type: "event_msg", payload: { type: "token_count", padding: "x".repeat(1024 * 1024) } }) + "\n";
+    const raw = rows[0] + "\n" + padding.repeat(48) + rows.slice(1).join("\n") + "\n";
+    await writeFile(join(sample.root, sample.previousPath + ".zst"), zstdCompressSync(raw));
+    await rm(join(sample.root, sample.previousPath));
+    const budget = new CodexReadBudget({ maxDecodedBytes: 70 * 1024 * 1024 });
+    const plan = await initializeCodexSourceCapture(sample.kv, { ...sample.input, dryRun: true },
+      { ...sample.managed, readBudget: budget });
+    expect(plan).toMatchObject({ adoptRetainedSource: 1, retainedSourceMessageCount: 1 });
+    expect(budget.usage().decodedBytes).toBeGreaterThanOrEqual(Buffer.byteLength(raw));
+    expect(budget.usage().decodedBytes).toBeLessThan(70 * 1024 * 1024);
+    expect(await sample.kv.get(KV.observations("s"), sample.row.id)).toEqual(sample.row);
+    await expect(initializeCodexSourceCapture(sample.kv, { ...sample.input, dryRun: true },
+      { ...sample.managed, readBudget: new CodexReadBudget({ maxDecodedBytes: 1024 }) })).rejects.toThrow("read budget exceeded");
+    expect(await sample.kv.get(KV.observations("s"), sample.row.id)).toEqual(sample.row);
+  });
+  it("retains an explicitly referenced prior segment across same-time cwd relocation", async () => {
+    const sample = await fixture();
+    const current = (await readFile(join(sample.root, sample.sourcePath), "utf8")).trimEnd().split("\n");
+    const header = JSON.parse(current[0]); header.payload.timestamp = time(0); header.payload.cwd = "D:/relocated/p";
+    current[0] = JSON.stringify(header);
+    await writeFile(join(sample.root, sample.sourcePath), current.join("\n") + "\n");
+    const input = { sourceRoot: sample.root, sourcePath: sample.sourcePath, sessionId: "s" };
+    const inventory = await readCodexInventory(input);
+    const retained = await readCodexRetainedSources(input, inventory.messages, [sample.row]);
+    expect(retained.messages).toHaveLength(1);
+    expect(retained.messages[0]).toMatchObject({ kind: "user", retainedSourcePath: sample.previousPath });
+    expect(await sample.kv.get(KV.observations("s"), sample.row.id)).toEqual(sample.row);
+  });
+
   it("deduplicates an identical primary in one prior file while rejecting conflicting reuse outside the selected body", async () => {
     const sample = await fixture(false);
     const original = lines([user("old-request", 21, "previous request")]);

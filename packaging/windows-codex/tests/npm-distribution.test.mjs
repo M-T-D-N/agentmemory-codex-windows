@@ -79,6 +79,7 @@ async function fixture(dataContractVersion) {
   for (const name of ['hook-spec.json', 'mcp-launcher-environment.json']) await copyFile(path.join(packaging, 'config', name), path.join(release, 'payload/config', name));
   await mkdir(path.join(release, 'payload/scripts'));
   await copyFile(path.join(packaging, 'powershell/agentmemory-lifecycle.ps1'), path.join(release, 'payload/scripts/agentmemory-lifecycle.ps1'));
+  await copyFile(path.join(packaging, 'powershell/agentmemory-layout.ps1'), path.join(release, 'payload/scripts/agentmemory-layout.ps1'));
   const manifest = { schema_version: 1, product: 'AgentMemory for Codex on Windows', product_id: 'agentmemory-codex-windows',
     downstream_version: '0.1.0-preview.4', agentmemory_version: '0.9.29', release_revision: 'r84', source_commit: 'a'.repeat(40),
     package_relative_path: 'runtime/0.9.29-codex-r84/agentmemory', release_files: [], immutable_files: [] };
@@ -86,6 +87,7 @@ async function fixture(dataContractVersion) {
   for (const name of ['Install-WindowsCodex.ps1', 'Initialize-WindowsCodex.ps1']) manifest.release_files.push({ path: name, sha256: await sha256(path.join(release, name)) });
   for (const name of ['hook-spec.json', 'mcp-launcher-environment.json']) manifest.immutable_files.push({ path: `config/${name}`, sha256: await sha256(path.join(release, 'payload/config', name)) });
   manifest.immutable_files.push({ path: 'scripts/agentmemory-lifecycle.ps1', sha256: await sha256(path.join(release, 'payload/scripts/agentmemory-lifecycle.ps1')) });
+  manifest.immutable_files.push({ path: 'scripts/agentmemory-layout.ps1', sha256: await sha256(path.join(release, 'payload/scripts/agentmemory-layout.ps1')) });
   await writeFile(path.join(release, 'release-manifest.json'), JSON.stringify(manifest));
   return { dir, release, workspace, root };
 }
@@ -918,4 +920,77 @@ $process.Dispose()
     const source = await readFile(path.join(packaging,'powershell/agentmemory-daemon.ps1'),'utf8');
     assert.ok(source.indexOf('Save-RuntimeStallEvidence -LogsPath') < source.indexOf("$terminalReason = 'runtime_unresponsive'"));
   } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('managed local Qwen settings replace inherited endpoints and reject unsafe URLs', { skip: !windows }, async () => {
+  const f = await fixture();
+  try {
+    assert.equal(runInstaller(f.release, f.root, f.workspace, ['-Fresh', '-Execute']).status, 0);
+    const configPath = path.join(f.root, 'config/codex-workspace.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    const harness = path.join(f.dir, 'qwen-environment.ps1');
+    await writeFile(harness, `param($Script,$Root)\n$ErrorActionPreference='Stop'\n$env:AGENTMEMORY_LOCAL_QWEN_BASE_URL='https://outside.invalid'\n$env:AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT='C:\\untrusted.ps1'\n. $Script -Root $Root\n[ordered]@{endpoint=$env:AGENTMEMORY_LOCAL_QWEN_BASE_URL;launcher=$env:AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT;coordination=$env:AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR} | ConvertTo-Json`);
+    const run = () => spawnSync(ps, powershellArgs(harness, {Script:path.join(packaging,'powershell/agentmemory-env.ps1'),Root:f.root}), {encoding:'utf8',timeout:15000,windowsHide:true,env:powershellEnvironment()});
+    const first=run(); assert.equal(first.status,0,first.stderr); assert.equal(JSON.parse(first.stdout).endpoint,'http://127.0.0.1:8000');
+    for(const endpoint of ['http://127.0.0.1:8890','http://localhost:8890/v1','http://[::1]:8890']) {
+      await writeFile(configPath,JSON.stringify({...config,local_qwen:{base_url:endpoint}}));
+      const result=run(); assert.equal(result.status,0,result.stderr);
+      const value=JSON.parse(result.stdout); assert.equal(value.endpoint,endpoint); assert.ok(!value.launcher); assert.equal(value.coordination,path.join(f.root,'data/qwen-coordination'));
+    }
+    for(const endpoint of ['http://outside.invalid:8890','https://127.0.0.1:8890','http://name:secret@127.0.0.1:8890','http://127.0.0.1:8890?secret=x','http://127.0.0.1:8890#secret','http://127.0.0.1:8890/custom','http://127.0.0.1:70000']) {
+      await writeFile(configPath,JSON.stringify({...config,local_qwen:{base_url:endpoint}}));
+      const result=run(); assert.notEqual(result.status,0); assert.match(result.stderr,/Local Qwen requires/);
+    }
+  } finally { await rm(f.dir,{recursive:true,force:true}); }
+});
+
+test('managed local Qwen launcher must match the supported API and configured endpoint', { skip: !windows }, async () => {
+  const f=await fixture();
+  try {
+    assert.equal(runInstaller(f.release,f.root,f.workspace,['-Fresh','-Execute']).status,0);
+    const configPath=path.join(f.root,'config/codex-workspace.json'); const config=JSON.parse(await readFile(configPath,'utf8'));
+    const hostRoot=path.join(f.dir,'relocated-local-ai'); await mkdir(path.join(hostRoot,'scripts'),{recursive:true});
+    const launcher=path.join(hostRoot,'scripts/Invoke-LocalAI.ps1');
+    await writeFile(launcher,"param([ValidateSet('start-qwen','stop-qwen','status')][string]$Operation,[switch]$Background,[string]$ExpectedOwnerToken,[switch]$ReadOnly)\nthrow 'Do not execute this synthetic launcher'\n");
+    await writeFile(path.join(hostRoot,'scripts/LocalAI.Common.ps1'),'# synthetic API layout');
+    await writeFile(path.join(hostRoot,'config.json'),JSON.stringify({qwen:{api_base:'http://127.0.0.1:8890/v1'}}));
+    // This isolated installation declares its synthetic controller fingerprint; production uses the qualified real profile.
+    const profilePath=path.join(f.root,'config/third-party-inputs.json');
+    await writeFile(profilePath,JSON.stringify({supported_localai_lifecycle:{api:'localai-owned-qwen-v1',fingerprints:[{launcher_sha256:(await sha256(launcher)).toUpperCase(),common_sha256:(await sha256(path.join(hostRoot,'scripts/LocalAI.Common.ps1'))).toUpperCase()}]}}));
+    const settings={base_url:'http://127.0.0.1:8890',lifecycle_script:launcher};
+    await writeFile(configPath,JSON.stringify({...config,local_qwen:settings}));
+    const harness=path.join(f.dir,'launcher-settings.ps1');
+    await writeFile(harness,"param($Script,$Root)\n$ErrorActionPreference='Stop'\n. $Script -Root $Root\n[ordered]@{endpoint=$env:AGENTMEMORY_LOCAL_QWEN_BASE_URL;launcher=$env:AGENTMEMORY_LOCAL_QWEN_LIFECYCLE_SCRIPT} | ConvertTo-Json");
+    const run=()=>spawnSync(ps,powershellArgs(harness,{Script:path.join(packaging,'powershell/agentmemory-env.ps1'),Root:f.root}),{encoding:'utf8',timeout:15000,windowsHide:true,env:powershellEnvironment()});
+    let result=run(); assert.equal(result.status,0,result.stderr); assert.deepEqual(JSON.parse(result.stdout),{endpoint:settings.base_url,launcher});
+    await writeFile(configPath,JSON.stringify({...config,local_qwen:{...settings,base_url:'http://127.0.0.1:8891'}}));
+    result=run(); assert.notEqual(result.status,0); assert.match(result.stderr,/endpoint.*must match/);
+    await writeFile(configPath,JSON.stringify({...config,local_qwen:settings}));
+    await writeFile(launcher,(await readFile(launcher,'utf8'))+'# modified controller retaining the API\n');
+    result=run(); assert.notEqual(result.status,0); assert.match(result.stderr,/Unsupported LocalAI lifecycle implementation/);
+    await writeFile(configPath,JSON.stringify({...config,local_qwen:{...settings,lifecycle_script:path.join(hostRoot,'scripts/other.ps1')}}));
+    result=run(); assert.notEqual(result.status,0); assert.match(result.stderr,/Unsupported LocalAI lifecycle launcher/);
+  } finally { await rm(f.dir,{recursive:true,force:true}); }
+});
+
+test('update loads the verified candidate Qwen settings helper before touching predecessor state', { skip: !windows }, async () => {
+  const f=await fixture(5);
+  try {
+    assert.equal(runInstaller(f.release,f.root,f.workspace,['-Fresh','-Execute']).status,0);
+    const manifestPath=path.join(f.root,'config/install-manifest.json');
+    const installed=JSON.parse(await readFile(manifestPath,'utf8'));installed.installation_status='activated';
+    installed.source_hashes['bin\\agentmemory-hidden-launcher.exe']='';
+    const releasePath=path.join(f.release,'release-manifest.json');const release=JSON.parse(await readFile(releasePath,'utf8'));
+    release.adapter_source_hashes={hidden_launcher:'',hidden_launcher_normalized:''};await writeFile(releasePath,JSON.stringify(release));
+    await writeFile(manifestPath,JSON.stringify(installed));const manifestBefore=await readFile(manifestPath,'utf8');
+    const configPath=path.join(f.root,'config/codex-workspace.json');const config=JSON.parse(await readFile(configPath,'utf8'));
+    await writeFile(configPath,JSON.stringify({...config,local_qwen:{base_url:'http://127.0.0.1:8890'}}));
+    const before=await readFile(configPath,'utf8');const dry=runInstaller(f.release,f.root,f.workspace);
+    assert.equal(dry.status,0,dry.stderr+dry.stdout);assert.equal(await readFile(configPath,'utf8'),before);
+    assert.equal(await readFile(manifestPath,'utf8'),manifestBefore);
+    await writeFile(configPath,JSON.stringify({...config,local_qwen:{base_url:'http://outside.invalid'}}));
+    const invalidBefore=await readFile(configPath,'utf8');
+    for(const extra of [[],['-Execute']]){const bad=runInstaller(f.release,f.root,f.workspace,extra);assert.notEqual(bad.status,0);assert.match(bad.stderr,/Local Qwen requires/);assert.equal(await readFile(configPath,'utf8'),invalidBefore);assert.equal(await readFile(manifestPath,'utf8'),manifestBefore);}
+    await assert.rejects(readdir(path.join(f.root,'backups/releases')),{code:'ENOENT'});
+  } finally {await rm(f.dir,{recursive:true,force:true});}
 });

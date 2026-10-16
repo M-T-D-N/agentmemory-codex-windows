@@ -4,7 +4,7 @@
     "version": "0.22.1",
     "source": "https://github.com/iii-hq/iii/tree/e7de3820d1e558f3762edf95e4440552444d48d3",
     "source_commit": "e7de3820d1e558f3762edf95e4440552444d48d3",
-    "sha256": "CFE8569B35BFD4B04406FBC7E6C848A4BEF79579C70C07F3CD73D9BD422B367B",
+    "sha256": "33E897D106EC2B0112F348507163E90C9905909FAACB4AE1A43FBBFE6DD0FA60",
     "upstream_binary_sha256": "C7A1BE88F1BFCA9E92015C8742C4B2E9859F466DD1EFDAB838594C25FEB02722",
     "state_durability": "file-flush-v1",
     "patch": "patches/iii-0.22.1-state-flush.patch",
@@ -18,6 +18,35 @@
     "windows_sdk_version": "10.0.26100.0",
     "license": "Elastic-2.0",
     "license_source": "https://github.com/iii-hq/iii/blob/iii/v0.22.1/engine/LICENSE",
-    "license_sha256": "AA94DB7315D297192247F2254026CACBDB433A7742D841F27506A4D974C42C85"
+    "license_sha256": "AA94DB7315D297192247F2254026CACBDB433A7742D841F27506A4D974C42C85",
+    "cargo_lock_file": "patches/iii-0.22.1-Cargo.lock",
+    "upstream_cargo_lock_sha256": "3C2BC7F7F980D876E408442DD4812808D6A05FE39F47E8F85307074B2B5494F5",
+    "native_compiler": "clang-cl 22.1.8",
+    "native_compiler_sha256": "8BBE086DFB0F9543A41EC470EEFFFE42FE15A29D40E88D4BA5DD068B0A05C63D",
+    "path_remapping": {
+      "native_option": "/clang:-ffile-prefix-map",
+      "assertions": "unchanged",
+      "rust": [
+        "engine-source=/src/iii",
+        "scratch=/build/agentmemory",
+        "cargo-home=/cargo",
+        "rust-sysroot=/rust/toolchain",
+        "user-profile=/user"
+      ],
+      "native": [
+        "same source prefixes as Rust",
+        "MSVC-toolchain-parent=/msvc",
+        "LLVM-root=/llvm"
+      ]
+    }
+  },
+  "supported_localai_lifecycle": {
+    "api": "localai-owned-qwen-v1",
+    "fingerprints": [
+      {
+        "common_sha256": "B930643C9476BC1D8AB4D8081FF73AEA57C78E7EFC58A97C9BFC0FA9510990C7",
+        "launcher_sha256": "D84154130903B1C0E608BBA5EF89C5DE44FE6FB3259C24CFF9B246A31CBDD165"
+      }
+    ]
   }
 }

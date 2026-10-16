@@ -37,8 +37,18 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run build
       - run: pnpm test
-      - run: node --test packaging/windows-codex/tests/codex-turn.test.mjs packaging/windows-codex/tests/recall-first.test.mjs
-      - run: node --test packaging/windows-codex/tests/npm-distribution.test.mjs packaging/windows-codex/tests/build-validation.test.mjs packaging/windows-codex/tests/backup-closeout.test.mjs packaging/windows-codex/tests/installer-backup-retention.test.mjs packaging/windows-codex/tests/qualification-state.test.mjs
+      - name: Codex adapter synthetic regressions (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $suites = Get-Content -Encoding UTF8 -Raw packaging/windows-codex/test-suites.json | ConvertFrom-Json
+          node --test @($suites.adapter)
+          exit $LASTEXITCODE
+      - name: Packaging and evidence synthetic regressions (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $suites = Get-Content -Encoding UTF8 -Raw packaging/windows-codex/test-suites.json | ConvertFrom-Json
+          node --test @($suites.packaging)
+          exit $LASTEXITCODE
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}

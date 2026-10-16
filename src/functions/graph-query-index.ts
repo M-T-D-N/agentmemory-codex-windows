@@ -53,6 +53,7 @@ export interface GraphQueryIndexManifest {
   // carries exact session + observation provenance. Legacy v1 indexes remain
   // fully usable for reads but fail closed for provenance-aware forget.
   provenanceVersion?: 1;
+  reviewRetirementVersion?: 1;
   shardCount: number;
   totalNodes: number;
   totalEdges: number;
@@ -509,10 +510,16 @@ export async function readAllGraphQueryDocuments(
   return documents;
 }
 
+export const retiredGraphAdjacencyKey = (shard: number) => `review-retired:${queryIndexShardKey(shard)}`;
+export async function readGraphReviewRetiredEdgeRefs(kv: StateKV, nodeIds: Iterable<string>) {
+  return readGraphQueryEdgeRefs(kv, nodeIds, undefined, retiredGraphAdjacencyKey);
+}
+
 export async function readGraphQueryEdgeRefs(
   kv: StateKV,
   nodeIds: Iterable<string>,
   cache = new Map<number, Record<string, GraphQueryEdgeRef[]>>(),
+  shardKey: (shard: number) => string = queryIndexShardKey,
 ): Promise<{
   refs: GraphQueryEdgeRef[];
   cache: Map<number, Record<string, GraphQueryEdgeRef[]>>;
@@ -534,7 +541,7 @@ export async function readGraphQueryEdgeRefs(
       shardIds.map((shard) =>
         kv.get<Record<string, GraphQueryEdgeRef[]>>(
           KV.graphQueryAdjacency,
-          queryIndexShardKey(shard),
+          shardKey(shard),
         )
       ),
     );
