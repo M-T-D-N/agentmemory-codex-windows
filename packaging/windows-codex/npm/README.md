@@ -1,5 +1,5 @@
 # AgentMemory for Codex on Windows — preview.17 installer
-> Preview.17 is a qualified Windows technical preview. Run the version-pinned commands only when the matching release page contains the ZIP, TGZ, descriptor and checksums, and CI succeeded for the exact published source. See the [current operating/validation guide](../../../docs/PREVIEW_17.md). Keep historical preview.16 assets together.
+> Preview.17 is a qualified Windows technical preview. The matching published release contains the ZIP, TGZ, descriptor and checksums, and the exact tagged source passed Windows CI. Use the version-pinned commands below. See the [current operating/validation guide](../../../docs/PREVIEW_17.md). Keep historical preview.16 assets together.
 
 The independent downstream bundles AgentMemory 0.9.30 and the patched iii
 engine/SDK 0.22.1. You do not need to install upstream first. This launcher
@@ -29,7 +29,7 @@ npm 12 rejects remote TGZ packages by default. `--allow-remote=root` permits
 the explicitly selected launcher for this command; it changes no global npm
 settings. If a versioned guide or packaged README has an older command without
 this option, add it when using npm 12. The [npm policy](https://docs.npmjs.com/cli/install/#allow-remote)
-and the [planned preview.17 release instructions](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17)
+and the [published preview.17 release instructions](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17)
 explain the same compatibility requirement.
 
 ## New installation or managed update

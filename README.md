@@ -30,9 +30,9 @@ full disclosure](#ai-development-disclosure).
 
 ## Start here
 
-The preview.17 source candidate packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
+The published preview.17 release packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
 
-Preview.17 is a qualified Windows technical preview. Use its versioned commands only when the [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17) contains all four matching assets and successful CI for the tagged source. Until then publication is pending. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.17 operating and validation notes](docs/PREVIEW_17.md).
+Preview.17 is a qualified Windows technical preview. The [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17) contains all four verified assets, and the tagged source passed Windows CI. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.17 operating and validation notes](docs/PREVIEW_17.md).
 
 1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
 2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
@@ -193,7 +193,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream candidate | `0.1.0-preview.17` | Intended source tag and pinned installer distribution; unpublished |
+| Downstream release | `0.1.0-preview.17` | Published source tag and pinned installer distribution |
 | AgentMemory compatibility | `0.9.30` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.22.1` | Pinned patched native runtime input, verified by SHA-256 during the build |
@@ -203,7 +203,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 ## Install without building
 
-After preview.17 is published, use its GitHub release ZIP or version-pinned TGZ launcher with the
+Use the published preview.17 GitHub release ZIP or version-pinned TGZ launcher with the
 [pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
 It covers automatic empty-root installation, optional separate preparation/activation,
 managed updates, original upstream adoption, and offline hash verification. The GitHub TGZ can be run with npm without a
@@ -228,8 +228,7 @@ the pinned npm descriptor, ZIP SHA-256 and per-file manifest provide integrity c
 
 ## Build and evaluate from source
 
-Use the reviewed candidate checkout on Windows, then run the release builder from PowerShell.
-The version-tag clone command below applies only after preview.17 is published.
+Use the published version-tag checkout on Windows, then run the release builder from PowerShell.
 The output directory must not already exist.
 
 ```powershell

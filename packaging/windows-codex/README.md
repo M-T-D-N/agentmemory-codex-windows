@@ -11,9 +11,9 @@ Preview.17 qualification and release identities are summarized in [the operating
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
 
-Preview.17 is an unpublished source candidate. Its tag and download URLs in this guide are planned release paths, not currently available assets. The existing public preview.16 has its own immutable guide and assets.
+Preview.17 is published. Its version tag and four release assets are available at the [preview.17 release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17). Historical preview.16 retains its own immutable guide and assets. Current main documentation corrections do not replace the preview.17 tag, manifests or assets.
 
-This candidate version identifies the source and independently packaged downstream launcher. Each generated package and
+This release version identifies the source and independently packaged downstream launcher. Each generated package and
 installed runtime has its own qualification and installation evidence.
 Use an explicit new `-ReleaseRevision` and the exact source identity for each
 qualified build. Existing versioned installation targets are not replaced.
