@@ -1,5 +1,7 @@
 # Windows용 Codex AgentMemory
 
+> **Preview.18 candidate:** 현재는 다음 공개판 후보입니다. [버전 Release 주소](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18)는 공개 후 확인할 주소이며 자산 존재나 CI 성공을 미리 뜻하지 않습니다. 확정 공개 commit·해당 CI·payload source·해시는 게시 시 Release에 기록합니다.
+
 <p align="center">
   <img src="../assets/readme-banner.svg" alt="AgentMemory for Codex on Windows" width="1120" />
 </p>
@@ -12,7 +14,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [빌드 없이 설치](#빌드-없이-설치하기) · [운영 가이드](../packaging/windows-codex/README.md) · [검증 범위](#검색필터인덱스의-동작과-검증-범위) · [릴리스 변경](../CHANGELOG.md)
 
 > [!IMPORTANT]
-> 이 저장소는 독립 Technical Preview `0.1.0-preview.17`입니다.
+> 이 저장소는 독립 Technical Preview `0.1.0-preview.18`입니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -60,9 +62,9 @@ port 3111의 143 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 공개판 변경은 [변경 기록](../CHANGELOG.md)에 정리합니다. 소스 tag는 공개판을,
 각 빌드 manifest는 해당 산출물의 검증 개정을 식별합니다.
 
-## preview.17 검증 및 운영 안내
+## preview.18 검증 및 운영 안내
 
-preview.17은 AgentMemory 0.9.30과 패치된 iii 0.22.1을 묶은 Windows 기술 프리뷰입니다. 신규 설치·기존 설치 갱신·재시작·실패 복구와 실제 Codex 수집→검색→원문 연결→Qwen 자동 그래프 표본을 검증했습니다. 전체 로컬 검사 4,570건 통과와 기존 조건부 생략 38건을 구분합니다. 공개 태그의 정확한 GitHub CI와 자산 4개·체크섬도 함께 확인하세요. [설치·갱신·제거·복구·호환성·검증 범위 및 제한](../docs/PREVIEW_17.md)에 상세히 정리했습니다.
+preview.18은 검토된 r223 구현을 새 공개 버전으로 패키징합니다. r223 기준 검사는 4,618건 통과·기존 조건부 생략 38건이며, 신규 패키지의 정확한 소스·설치/운영 재검증·CI·자산 해시는 최종 Release에서 별도로 확인하세요. [설치·갱신·제거·복구·검증 범위와 제한](../docs/PREVIEW_18.md)을 따릅니다.
 
 ## preview.16의 변경점
 
@@ -134,7 +136,7 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 | 구분 | 값 | 의미 |
 |---|---:|---|
-| 다운스트림 공개 버전 | `0.1.0-preview.17` | 공개된 소스 tag와 버전 고정 설치 자산 |
+| 다운스트림 공개 버전 | `0.1.0-preview.18` | 버전 소스 tag와 고정 설치 자산 |
 | AgentMemory 호환 버전 | `0.9.30` | CLI, MCP, package, API, export, 설치 runtime 호환성 |
 | 검증 개정 | 빌드 manifest | 내부 빌드 provenance이며 공개 버전이 아님 |
 | iii engine | `0.22.1` | 빌드 중 SHA-256을 확인하는 고정 Windows 입력 |
@@ -144,11 +146,11 @@ Windows 어댑터는 Qwen이 꺼져 있고 기존 선택 기준상 처리할 obs
 
 ## 빌드 없이 설치하기
 
-preview.17은 공개되었으며 아래 버전 tag와 다운로드 명령을 사용할 수 있습니다.
+preview.18의 버전 tag·다운로드 자산·CI 결과는 해당 Release에서 확인하고, 네 자산이 모두 일치할 때만 설치하세요.
 과거 preview.16을 사용하는 경우에는 해당 공개판에 포함된 안내를 사용하고
 다른 버전의 실행기와 ZIP을 혼합하지 않습니다.
 
-공개된 preview.17 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
+일치하는 preview.18 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
 [npm/npx 설치 안내](../packaging/windows-codex/npm/README.md)를 사용합니다.
 Windows x64, Node.js 24 이상, Codex가 필요합니다. 업스트림을 먼저 설치할 필요는 없습니다.
 기본 명령은 dry-run이며 `--execute`로 빈 대상의 설치·활성화·서비스 확인을 진행합니다.
@@ -177,7 +179,7 @@ npm 실행기는 미리 빌드한 ZIP을 받습니다. 실행 파일에 Authenti
 공개된 버전 tag의 사본에서 Windows PowerShell로 실행합니다. 출력 폴더는 미리 존재하면 안 됩니다.
 
 ```powershell
-git clone --branch v0.1.0-preview.17 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.18 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
@@ -235,7 +237,7 @@ runtime을 덮어쓸 권한을 뜻하지 않습니다. 동일한 소유 설치 �
 | `upstream-source.json` | 정확한 upstream provenance |
 
 upstream 홍보 website, cloud 배포 예제, 그 밖의 upstream 언어 사본, 생성 build 산출물,
-개인 monorepo 이력은 첫 공개 저장소에 포함하지 않습니다. 과거 benchmark 자료는
+개인 monorepo 이력은 공개하지 않습니다. 단, 네 cloud 진입점 소스는 비밀 출력 회귀검사에 필요해 보존하며 cloud 운영 지원을 뜻하지 않습니다. 과거 benchmark 자료는
 재현 참고용으로만 남기며, 그 수치는 이 다운스트림 공개판의 성능 주장이 아닙니다.
 
 ## 개발 검증

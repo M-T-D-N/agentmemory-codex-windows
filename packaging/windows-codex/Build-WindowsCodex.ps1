@@ -248,6 +248,10 @@ try {
             Remove-Item -LiteralPath $modulesMetadata -Force
         }
     }
+    foreach ($metadataName in @('pnpm-lock.yaml', 'pnpm-workspace.yaml')) {
+        $metadata = Join-Path $runtimePackageRoot $metadataName
+        if (Test-Path -LiteralPath $metadata -PathType Leaf) { Remove-Item -LiteralPath $metadata -Force }
+    }
     & $node (Join-Path $PSScriptRoot 'tests\release-smoke.mjs') $runtimePackageRoot $sourceRoot
     if ($LASTEXITCODE -ne 0) { throw "release smoke failed with exit code $LASTEXITCODE" }
     }

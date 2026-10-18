@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, unlink, link, lstat, rm } from "node:fs/promises";
+import { invokeQwenCoordination } from "./local-qwen-coordination.js";
+import { mkdir, open, readFile, lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
@@ -19,6 +20,7 @@ interface LeaseRecord {
   owner: "agentmemory-background" | "qwen-foreground";
   pid: number;
   processStartUtc: string;
+  started_filetime_utc: string;
   token: string;
   createdAtUtc: string;
 }
@@ -128,10 +130,6 @@ function optionalPositiveInt(raw: string | undefined): number | null {
     throw new Error("AGENTMEMORY_LOCAL_QWEN_MAX_INPUT_TOKENS must be auto or a positive integer");
   }
   return parsed;
-}
-
-function processStartUtc(): string {
-  return new Date(Date.now() - process.uptime() * 1000).toISOString();
 }
 
 function loopbackBaseUrl(raw: string): URL {
@@ -246,7 +244,7 @@ async function activeMarker(path: string): Promise<boolean> {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ESRCH") return true;
-      await unlink(path).catch(() => {});
+      // Read-only foreground polling never reclaims a marker.
       return false;
     }
   } catch (error) {
@@ -521,14 +519,13 @@ export class LocalQwenProvider implements MemoryProvider {
     const leasePath = join(this.coordinationDir, "qwen-use.lock");
     if (this.pendingLeaseRelease) await this.retryPendingLease(leasePath);
     const foregroundPath = join(this.coordinationDir, "foreground-request.json");
-    if (await activeMarker(foregroundPath)) {
-      throw new Error("local_qwen_deferred:foreground_requested");
-    }
+    const identity = (await invokeQwenCoordination({ operation: "identity", pid: process.pid })).identity;
     const token = crypto.randomUUID();
     const record: LeaseRecord = {
       owner: "agentmemory-background",
       pid: process.pid,
-      processStartUtc: processStartUtc(),
+      processStartUtc: identity.processStartUtc,
+      started_filetime_utc: identity.started_filetime_utc,
       token,
       createdAtUtc: new Date().toISOString(),
     };
@@ -575,8 +572,8 @@ export class LocalQwenProvider implements MemoryProvider {
             prepared.birthtimeMs !== identity!.birthtimeMs || await readFile(candidate, "utf8") !== bytes) {
           throw new Error("local_qwen_lease_prepare_replaced");
         }
-        await link(candidate, path);
         published = true;
+        await invokeQwenCoordination({ operation: "publish", directory: this.coordinationDir, record, recordBytes: bytes });
         const installed = await lstat(path);
         if (installed.ino !== identity!.ino || installed.dev !== identity!.dev || await readFile(path, "utf8") !== bytes) {
           throw new Error("local_qwen_lease_prepare_replaced");
@@ -594,7 +591,7 @@ export class LocalQwenProvider implements MemoryProvider {
         }
       }
     } catch (error) {
-      if (published) {
+      if (published && !(error as { notPublished?: boolean }).notPublished) {
         try { await this.releaseLease(path, record); }
         catch (cleanupError) { throw requestAndCleanupError(error, cleanupError); }
       }
@@ -614,16 +611,13 @@ export class LocalQwenProvider implements MemoryProvider {
   }
 
   private async releaseLease(path: string, record: LeaseRecord): Promise<void> {
+    if (path !== join(this.coordinationDir, "qwen-use.lock")) throw Error("local_qwen_lease_invalid_path");
     const clearPending = () => {
       if (this.pendingLeaseRelease?.token === record.token) this.pendingLeaseRelease = null;
     };
     for (let attempt = 0; attempt < LEASE_RELEASE_ATTEMPTS; attempt++) {
       try {
-        const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<LeaseRecord>;
-        if (parsed.token === record.token && parsed.pid === record.pid &&
-          parsed.processStartUtc === record.processStartUtc && parsed.owner === record.owner) {
-          await unlink(path);
-        }
+        await invokeQwenCoordination({ operation: "release", directory: this.coordinationDir, record });
         clearPending();
         return;
       } catch (error) {

@@ -1,13 +1,14 @@
 import { withObservationWrite, withObservationRecovery } from "../src/state/observation-write.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runtimeDiagnosticPhase, attachRuntimeDiagnostics } from "../src/telemetry/runtime-diagnostics.js";
+import { pathToFileURL } from "node:url";
+import { runtimeDiagnosticPhase, attachRuntimeDiagnostics, executingPackageIdentity } from "../src/telemetry/runtime-diagnostics.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
-function fixture() {
+function fixture(packageIdentity?: ReturnType<typeof executingPackageIdentity>) {
   const directory = mkdtempSync(join(tmpdir(), "am-runtime-diag-"));
   const file = join(directory, "snapshot.json");
   const handlers = new Map<string, (input: unknown) => Promise<unknown>>();
@@ -17,7 +18,7 @@ function fixture() {
     registerFunction(id: string, handler: (input: unknown) => Promise<unknown>) { handlers.set(id, handler); return { id }; },
     trigger(request: { function_id: string; payload?: unknown }) { const handler=handlers.get(request.function_id); return request.function_id === "state::get" ? pending : handler ? handler(request.payload) : Promise.resolve("ok"); },
   };
-  const diag = attachRuntimeDiagnostics(sdk as never, { file, runId: "20260912T010000000Z" })!;
+  const diag = attachRuntimeDiagnostics(sdk as never, { file, runId: "20260912T010000000Z", packageIdentity })!;
   cleanups.push(async () => { release("done"); await diag.stop(); rmSync(directory, { recursive: true, force: true }); });
   return { sdk, file, handlers, release, diag };
 }
@@ -159,4 +160,27 @@ describe("bounded recovery admission", () => {
   await expect(withObservationRecovery(async()=>{throw Error("owned failure")},100)).rejects.toThrow("owned failure");
   await withObservationWrite(async()=>{});await withObservationRecovery(async()=>{});
  });
+});
+
+
+it("records the executing synthetic package instead of a different installation manifest or stale environment", async () => {
+  const root = mkdtempSync(join(tmpdir(), "am-package-identity-"));
+  const selected = join(root, "selected"), manifestPackage = join(root, "manifest-package");
+  for (const folder of [selected, manifestPackage]) mkdirSync(join(folder, "dist"), { recursive: true });
+  writeFileSync(join(selected, "package.json"), JSON.stringify({ agentmemoryDownstream: { dataContractVersion: 5 } }));
+  writeFileSync(join(manifestPackage, "package.json"), JSON.stringify({ agentmemoryDownstream: { dataContractVersion: 4 } }));
+  writeFileSync(join(root, "install-manifest.json"), JSON.stringify({ package_relative_path: "manifest-package", data_contract_version: 4 }));
+  const prior = process.env.AGENTMEMORY_DIAGNOSTICS_PACKAGE_ROOT;
+  process.env.AGENTMEMORY_DIAGNOSTICS_PACKAGE_ROOT = manifestPackage;
+  try {
+    const identity = executingPackageIdentity(pathToFileURL(join(selected, "dist", "index.mjs")).href);
+    expect(identity).toEqual({ packageRoot: selected, selectionSource: "executing-module", dataContract: 5 });
+    const f = fixture(identity);
+    expect((await snapshot(f.file)).packageIdentity).toEqual(identity);
+    expect(executingPackageIdentity("not-a-file-url")).toBeUndefined();
+  } finally {
+    if (prior === undefined) delete process.env.AGENTMEMORY_DIAGNOSTICS_PACKAGE_ROOT;
+    else process.env.AGENTMEMORY_DIAGNOSTICS_PACKAGE_ROOT = prior;
+    cleanups.push(async () => { rmSync(root, { recursive: true, force: true }); });
+  }
 });

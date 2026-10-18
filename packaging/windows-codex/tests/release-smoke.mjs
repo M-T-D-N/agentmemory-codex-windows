@@ -22,6 +22,13 @@ for (const metadata of [".modules.yaml", ".pnpm-workspace-state-v1.json"]) {
   assert.equal(existsSync(join(packageRoot, "node_modules", metadata)), false,
     `package manager installation metadata must not be shipped: ${metadata}`);
 }
+for (const metadata of ["pnpm-lock.yaml", "pnpm-workspace.yaml"]) {
+  assert.equal(existsSync(join(packageRoot, metadata)), false,
+    `source-only package manager metadata must not be shipped: ${metadata}`);
+}
+assert.deepEqual(readFileSync(join(dist, "local-qwen-coordination.ps1")),
+  readFileSync(join(sourceRoot, "src/providers/local-qwen-coordination.ps1")),
+  "deployed Qwen coordinator differs from tested source");
 const sourcePackage = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8"));
 for (const dependency of Object.keys({ ...sourcePackage.dependencies, ...sourcePackage.optionalDependencies })) {
   const sourceManifest = join(sourceRoot, "node_modules", dependency, "package.json");

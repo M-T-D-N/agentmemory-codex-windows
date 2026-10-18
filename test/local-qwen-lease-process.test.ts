@@ -5,11 +5,12 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 const source = fileURLToPath(new URL("../src/providers/local-qwen.ts", import.meta.url));
 const childCode = `
-import {readFileSync,existsSync} from 'node:fs';import {stripTypeScriptTypes} from 'node:module';import {SourceTextModule,SyntheticModule} from 'node:vm';import {join} from 'node:path';
+import {readFileSync,existsSync} from 'node:fs';import {stripTypeScriptTypes} from 'node:module';import {SourceTextModule,SyntheticModule} from 'node:vm';import {join,dirname} from 'node:path';import{pathToFileURL}from'node:url';
 const[source,root,mode]=process.argv.slice(1);process.env.AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR=root;
 let injected=false;
 const module=new SourceTextModule(stripTypeScriptTypes(readFileSync(source,'utf8'),{mode:'transform'}),{identifier:source});
 await module.link(async name=>{
+ if(name==='./local-qwen-coordination.js'){const actual=await import(pathToFileURL(join(dirname(source),'local-qwen-coordination.ts')));return new SyntheticModule(Object.keys(actual),function(){for(const[key,value]of Object.entries(actual))this.setExport(key,value);});}
  if(name==='../config.js')return new SyntheticModule(['getEnvVar'],function(){this.setExport('getEnvVar',key=>process.env[key]);});
  if(name==='./local-qwen-lifecycle.js')return new SyntheticModule(['localQwenBackgroundDeferral'],function(){this.setExport('localQwenBackgroundDeferral',()=>null);});
  const actual=await import(name),values={...actual};

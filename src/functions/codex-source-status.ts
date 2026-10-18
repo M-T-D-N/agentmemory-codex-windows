@@ -6,8 +6,8 @@ import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
 import { validateCodexSourceHolds } from "../replay/codex-source-hold.js";
 import { unresolvedCodexCapture } from "../replay/codex-unresolved-capture.js";
 
-const reasons = new Set(["native_source_missing", "native_source_read_failed", "native_source_cursor_invalid", "native_source_correspondence_changed",
-  "observation_too_large", "record_exceeds_supported_size", "invalid_jsonl_record",
+const reasons = new Set(["native_source_missing", "native_source_read_failed", "native_source_read_budget_exceeded", "native_capture_correspondence_changed", "native_observation_too_large", "native_source_cursor_invalid", "native_source_correspondence_changed",
+  "observation_too_large", "record_exceeds_supported_size", "invalid_jsonl_record", "unsupported_response_type", "unsupported_record_type", "invalid_additional_tools_payload",
   "fork_record_precedes_or_lacks_own_history_timestamp", "native_capture_rpc_failed", "returned_source_requires_reconciliation", "returned_source_identity_changed"]);
 const exact = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
   value.length <= 512 && value === value.trim() && value !== "*";
@@ -15,7 +15,7 @@ const publicId = (value: unknown): string | null => exact(value) && /^[\w.-]+$/.
 export interface NativeCaptureIssue {
   sessionId: string | null; project: string | null; observationId?: string | null;
   category: "capture_unknown" | "requires_reconciliation" | "capture_failed" | "legacy_review";
-  reason: string; observedAt: string | null;
+  reason: string; observedAt: string | null; record?: { ordinal: number; byteOffset: number; recordType?: string; payloadType?: string; itemType?: string }; action?: "update_adapter_and_retry_saved_cursor";
 }
 export interface NativeCaptureReport {
   readOnly: true; readAt: string; status: "checking" | "attention" | "unavailable" | "disabled";
@@ -64,6 +64,13 @@ export async function readCodexSourceStatus(kv: StateKV, owner: string, options:
     const add = (row: Session, category: NativeCaptureIssue["category"], reason: string, observationId?: string) => {
       affected.add(row.id);
       issues.push({ sessionId: publicId(row.id), project: publicId(row.project), category, reason,
+        ...(category === "capture_unknown" && row.codexNativeCapture?.recordDiagnostic && (() => {
+          const d = row.codexNativeCapture.recordDiagnostic;
+          if (!Number.isSafeInteger(d.ordinal) || d.ordinal < 1 || !Number.isSafeInteger(d.byteOffset) || d.byteOffset < 0) return {};
+          const safe = (v: unknown) => typeof v === "string" && /^[A-Za-z_]{1,64}$/.test(v) ? v : undefined;
+          return { record: { ordinal: d.ordinal, byteOffset: d.byteOffset, recordType: safe(d.recordType), payloadType: safe(d.payloadType), itemType: safe(d.itemType) },
+            action: "update_adapter_and_retry_saved_cursor" as const };
+        })()),
         observedAt: category === "capture_failed" && row.codexNativeCapture?.lastFailure
           ? row.codexNativeCapture.lastFailure.observedAt
           : typeof row.codexNativeCapture?.checkedAt === "string" && Number.isFinite(Date.parse(row.codexNativeCapture.checkedAt))

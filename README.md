@@ -1,5 +1,7 @@
 # AgentMemory for Codex on Windows
 
+> **Preview.18 candidate:** This source is prepared for the next release. The versioned [Release URL](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) is the address to use after publication, not proof that assets exist or CI has passed. The final Release records the actual public commit, its CI link, payload source and asset hashes.
+
 <p align="center">
   <img src="assets/readme-banner.svg" alt="AgentMemory — independent memory for Codex on Windows, with managed capture, project-scoped recall and provenance" width="1120" />
 </p>
@@ -30,9 +32,9 @@ full disclosure](#ai-development-disclosure).
 
 ## Start here
 
-The published preview.17 release packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
+The preview.18 release line packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
 
-Preview.17 is a qualified Windows technical preview. The [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17) contains all four verified assets, and the tagged source passed Windows CI. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.17 operating and validation notes](docs/PREVIEW_17.md).
+Preview.18 is a Windows technical preview based on the reviewed r223 implementation. The [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) records the four matching assets and actual CI result for its exact public source; install only after that record is complete. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.18 operating and validation notes](docs/PREVIEW_18.md).
 
 1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
 2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
@@ -79,12 +81,12 @@ only an explicit snapshot rebuild refreshes them.
 Release changes are recorded in [CHANGELOG.md](CHANGELOG.md). Source tags
 identify public releases; each build manifest records its own qualification.
 
-## Changes in preview.17
+## Changes in preview.18
 
-- Verify source, actual test logs, immutable payload, Windows installation scenarios and confirmed operating evidence before producing a distribution.
-- Preserve bounded sequential decompression under cache pressure, continue fully matched native inventories at their verified checkpoint, and recover simultaneous archive relocation and compression changes after full correspondence checks.
-- Keep authentication, historical redaction, canonical source links and exact project ownership intact. Avoid printing LocalAI lifecycle responses or first-boot cloud secrets.
-- See [qualification, installation/update/removal/recovery and limitations](docs/PREVIEW_17.md). Cloud files are retained only for non-supported first-boot security regression, not as deployment instructions.
+- Resume native capture across structurally validated `additional_tools` declarations; preserve conservative stops for unknown or malformed content.
+- Serialize Qwen lease lifecycle across processes, verify process-start identity and honor foreground ownership.
+- Remove development-only pnpm metadata from installed runtime inputs.
+- Carry the earlier bounded decompression/correspondence and evidence-bound distribution fixes. See [qualification, installation/update/removal/recovery and limits](docs/PREVIEW_18.md). The r223 baseline and new package qualification are reported separately.
 
 ## Changes in preview.16
 
@@ -193,7 +195,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.17` | Published source tag and pinned installer distribution |
+| Downstream release | `0.1.0-preview.18` | Versioned source tag and pinned installer distribution |
 | AgentMemory compatibility | `0.9.30` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.22.1` | Pinned patched native runtime input, verified by SHA-256 during the build |
@@ -203,7 +205,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 ## Install without building
 
-Use the published preview.17 GitHub release ZIP or version-pinned TGZ launcher with the
+Use the matching preview.18 GitHub release ZIP or version-pinned TGZ launcher with the
 [pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
 It covers automatic empty-root installation, optional separate preparation/activation,
 managed updates, original upstream adoption, and offline hash verification. The GitHub TGZ can be run with npm without a
@@ -232,7 +234,7 @@ Use the published version-tag checkout on Windows, then run the release builder 
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.17 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.18 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
@@ -276,7 +278,7 @@ migrations removed from this preview. See [the agent runbook](INSTALL_FOR_AGENTS
   supported profile.
 - The optional Qwen provider accepts only credential-free loopback HTTP and is
   capability-scoped to graph extraction.
-- The source tree contains no memory database, session transcript, user export,
+- The source tree contains no operating memory database, actual user transcript or user export,
   API key, generated installer, or private development history.
 - Security reports should use GitHub's private vulnerability reporting flow;
   see [`SECURITY.md`](SECURITY.md).

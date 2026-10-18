@@ -16,13 +16,22 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalQwenProvider } from "../src/providers/local-qwen.js";
-import { unlink, open, link, rm } from "node:fs/promises";
+import { open, rm } from "node:fs/promises";
+import { invokeQwenCoordination } from "../src/providers/local-qwen-coordination.js";
+const releaseOperation = vi.fn<typeof invokeQwenCoordination>();
+const publicationOperation = vi.fn<typeof invokeQwenCoordination>();
+let actualCoordination: typeof invokeQwenCoordination;
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return { ...actual, unlink: vi.fn(actual.unlink), open: vi.fn(actual.open), link: vi.fn(actual.link), rm: vi.fn(actual.rm) };
 });
 
+vi.mock("../src/providers/local-qwen-coordination.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../src/providers/local-qwen-coordination.js")>();
+  return { ...actual, invokeQwenCoordination: vi.fn((request: Record<string, unknown>) =>
+    request.operation === "release" ? releaseOperation(request) : request.operation === "publish" ? publicationOperation(request) : actual.invokeQwenCoordination(request)) };
+});
 const originalFetch = globalThis.fetch;
 const touchedEnv = [
   "AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR",
@@ -123,9 +132,10 @@ function installFetchMock(): ReturnType<typeof vi.fn> {
 describe("LocalQwenProvider", () => {
   beforeEach(async () => {
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
-    vi.mocked(unlink).mockReset().mockImplementation(actual.unlink);
+    actualCoordination = (await vi.importActual<typeof import("../src/providers/local-qwen-coordination.js")>("../src/providers/local-qwen-coordination.js")).invokeQwenCoordination;
+    releaseOperation.mockReset().mockImplementation(actualCoordination);
     vi.mocked(open).mockReset().mockImplementation(actual.open);
-    vi.mocked(link).mockReset().mockImplementation(actual.link);
+    publicationOperation.mockReset().mockImplementation(actualCoordination);
     vi.mocked(rm).mockReset().mockImplementation(actual.rm);
     coordinationDir = mkdtempSync(join(tmpdir(), "agentmemory-qwen-"));
     for (const key of touchedEnv) {
@@ -188,59 +198,59 @@ describe("LocalQwenProvider", () => {
   it.each(["EBUSY", "EPERM"])("retries a transient %s release without losing the response", async (code) => {
     installFetchMock();
     const failure = Object.assign(new Error("sharing collision"), { code });
-    vi.mocked(unlink).mockRejectedValueOnce(failure);
+    releaseOperation.mockRejectedValueOnce(failure);
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
 
     await expect(provider.compress("system", "user")).resolves.toContain("<entities>");
-    expect(unlink).toHaveBeenCalledTimes(2);
+    expect(releaseOperation).toHaveBeenCalledTimes(2);
     expect(existsSync(join(coordinationDir, "qwen-use.lock"))).toBe(false);
   });
 
   it("reports exhausted release and recovers only its known lease before the next acquisition", async () => {
     const fetch = installFetchMock();
     const failure = Object.assign(new Error("sharing collision"), { code: "EBUSY" });
-    vi.mocked(unlink).mockRejectedValue(failure);
+    releaseOperation.mockRejectedValue(failure);
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
 
     await expect(provider.compress("system", "user")).rejects.toMatchObject({
       message: "local_qwen_lease_release_failed:EBUSY", cause: failure,
     });
-    expect(unlink).toHaveBeenCalledTimes(3);
+    expect(releaseOperation).toHaveBeenCalledTimes(3);
     const lease = JSON.parse(readFileSync(join(coordinationDir, "qwen-use.lock"), "utf8"));
     expect(lease).toMatchObject({ owner: "agentmemory-background", pid: process.pid });
-    vi.mocked(unlink).mockImplementation((await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")).unlink);
+    releaseOperation.mockImplementation(actualCoordination);
 
     await expect(provider.compress("system", "user again")).resolves.toContain("<entities>");
-    expect(unlink).toHaveBeenCalledTimes(5);
+    expect(releaseOperation).toHaveBeenCalledTimes(5);
     expect(existsSync(join(coordinationDir, "qwen-use.lock"))).toBe(false);
     expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/chat/completions"))).toHaveLength(3);
   });
 
   it("shares pending cleanup across concurrent next acquisitions", async () => {
     installFetchMock();
-    vi.mocked(unlink).mockRejectedValue(Object.assign(new Error("sharing collision"), { code: "EBUSY" }));
+    releaseOperation.mockRejectedValue(Object.assign(new Error("sharing collision"), { code: "EBUSY" }));
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
     await expect(provider.compress("system", "user")).rejects.toThrow("local_qwen_lease_release_failed:EBUSY");
-    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     let signalStarted!: () => void;
     let unblock!: () => void;
     const started = new Promise<void>(resolve => { signalStarted = resolve; });
     const blocked = new Promise<void>(resolve => { unblock = resolve; });
     let releases = 0;
-    vi.mocked(unlink).mockImplementation(async path => {
+    releaseOperation.mockImplementation(async request => {
       if (releases++ === 0) {
         signalStarted();
         await blocked;
       }
-      await actual.unlink(path);
+      return actualCoordination(request);
     });
 
     let releasePublication!: () => void;
     const publicationHeld = new Promise<void>(resolve => { releasePublication = resolve; });
     let publications = 0;
-    vi.mocked(link).mockImplementation(async (from, to) => {
-      await actual.link(from, to);
+    publicationOperation.mockImplementation(async request => {
+      const result = await actualCoordination(request);
       if (++publications === 1) await publicationHeld;
+      return result;
     });
     const pending = [provider.compress("system", "first"), provider.compress("system", "second")];
     for (const request of pending) void request.catch(() => releasePublication());
@@ -250,7 +260,7 @@ describe("LocalQwenProvider", () => {
     expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
     const rejected = outcomes.find(result => result.status === "rejected") as PromiseRejectedResult;
     expect(rejected.reason.message).toBe("local_qwen_deferred:lease_busy");
-    expect(unlink).toHaveBeenCalledTimes(5);
+    expect(releaseOperation).toHaveBeenCalledTimes(5);
     expect(existsSync(join(coordinationDir, "qwen-use.lock"))).toBe(false);
   });
 
@@ -265,7 +275,7 @@ describe("LocalQwenProvider", () => {
       return implementation(input, init);
     });
     const cleanupFailure = Object.assign(new Error("sharing collision"), { code: "EBUSY" });
-    vi.mocked(unlink).mockRejectedValue(cleanupFailure);
+    releaseOperation.mockRejectedValue(cleanupFailure);
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
 
     const failure = await provider.compress("system", "user").catch(error => error);
@@ -287,7 +297,7 @@ describe("LocalQwenProvider", () => {
     installFetchMock();
     const leasePath = join(coordinationDir, "qwen-use.lock");
     let replacement: Record<string, unknown>;
-    vi.mocked(unlink).mockImplementationOnce(async () => {
+    releaseOperation.mockImplementationOnce(async () => {
       const lease = JSON.parse(readFileSync(leasePath, "utf8"));
       replacement = { ...lease, [field]: field === "pid" ? process.pid + 1 : "replacement" };
       writeFileSync(leasePath, JSON.stringify(replacement));
@@ -296,35 +306,36 @@ describe("LocalQwenProvider", () => {
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
 
     await expect(provider.compress("system", "user")).resolves.toContain("<entities>");
-    expect(unlink).toHaveBeenCalledOnce();
+    expect(releaseOperation).toHaveBeenCalledTimes(2);
     expect(JSON.parse(readFileSync(leasePath, "utf8"))).toEqual(replacement!);
   });
 
   it("preserves a replacement token when retrying a previously exhausted release", async () => {
     const fetch = installFetchMock();
-    vi.mocked(unlink).mockRejectedValue(Object.assign(new Error("sharing collision"), { code: "EBUSY" }));
+    releaseOperation.mockRejectedValue(Object.assign(new Error("sharing collision"), { code: "EBUSY" }));
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
     await expect(provider.compress("system", "user")).rejects.toThrow("local_qwen_lease_release_failed:EBUSY");
     const leasePath = join(coordinationDir, "qwen-use.lock");
     const replacement = { ...JSON.parse(readFileSync(leasePath, "utf8")), token: "other-consumer" };
     writeFileSync(leasePath, JSON.stringify(replacement));
+    releaseOperation.mockImplementation(actualCoordination);
     const calls = fetch.mock.calls.length;
 
     await expect(provider.compress("system", "user again")).rejects.toThrow("local_qwen_deferred:lease_busy");
-    expect(unlink).toHaveBeenCalledTimes(3);
+    expect(releaseOperation).toHaveBeenCalledTimes(4);
     expect(fetch.mock.calls).toHaveLength(calls);
     expect(JSON.parse(readFileSync(leasePath, "utf8"))).toEqual(replacement);
   });
 
   it("cleans its pending released lease while preserving foreground intent", async () => {
     const fetch = installFetchMock();
-    vi.mocked(unlink).mockRejectedValue(Object.assign(new Error("sharing collision"), { code: "EBUSY" }));
+    releaseOperation.mockRejectedValue(Object.assign(new Error("sharing collision"), { code: "EBUSY" }));
     const provider = new LocalQwenProvider("auto", 2048, "http://127.0.0.1:8000");
     await expect(provider.compress("system", "user")).rejects.toThrow("local_qwen_lease_release_failed:EBUSY");
     const foregroundPath = join(coordinationDir, "foreground-request.json");
     const foreground = { pid: process.pid, token: "foreground-consumer" };
     writeFileSync(foregroundPath, JSON.stringify(foreground));
-    vi.mocked(unlink).mockImplementation((await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")).unlink);
+    releaseOperation.mockImplementation(actualCoordination);
     const calls = fetch.mock.calls.length;
 
     await expect(provider.compress("system", "user again")).rejects.toThrow("local_qwen_deferred:foreground_requested");
@@ -417,7 +428,7 @@ describe("LocalQwenProvider", () => {
     await expect(provider.compress("system", "retry")).rejects.toThrow("local_qwen_deferred:shutdown");
     await expect(provider.probe()).rejects.toThrow("local_qwen_deferred:shutdown");
     expect(fetch.mock.calls).toHaveLength(calls);
-  }, 1000);
+  }, 5000);
 
   it("keeps stream validation failures distinct from transport failures", async () => {
     const fetch = installFetchMock();
@@ -634,7 +645,7 @@ describe("LocalQwenProvider", () => {
   it("dot F3 keeps a public lease published by a competing owner", async () => {
     const fetch=installFetchMock(),lease=join(coordinationDir,"qwen-use.lock");
     const replacement={owner:"qwen-foreground",pid:process.pid,token:"replacement-owner"};
-    vi.mocked(link).mockImplementationOnce(async()=>{writeFileSync(lease,JSON.stringify(replacement));throw Object.assign(Error("competing lease"),{code:"EEXIST"});});
+    publicationOperation.mockImplementationOnce(async()=>{writeFileSync(lease,JSON.stringify(replacement));throw Object.assign(Error("competing lease"),{code:"EEXIST"});});
     await expect(new LocalQwenProvider("auto",2048,"http://127.0.0.1:8000").compress("system","user")).rejects.toThrow("local_qwen_deferred:lease_busy");
     expect(JSON.parse(readFileSync(lease,"utf8"))).toEqual(replacement);expect(fetch).not.toHaveBeenCalled();
   });

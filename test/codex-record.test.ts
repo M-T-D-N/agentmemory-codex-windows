@@ -19,6 +19,26 @@ function harness() {
 }
 
 describe("canonical native Codex conversation records", () => {
+  it("excludes validated AdditionalTools declarations without changing conversation state", () => {
+    const parse = harness(); parse(turn);
+    const first = parse(record("user", "before-tools", "Keep the first requirement"));
+    const tools = parse({ type: "response_item", timestamp: at, payload: { type: "additional_tools", id: "at_test", role: "developer",
+      tools: [{ type: "namespace", name: "synthetic", tools: [{ type: "function", name: "check", parameters: { type: "object", properties: {} } }] }] } });
+    expect(tools).toMatchObject({ status: "excluded", reason: "tool_definitions", state: first.state });
+    expect(parse(record("user", "after-tools", "Keep the next requirement"))).toMatchObject({ status: "message", message: { nativeMessageId: "after-tools" } });
+  });
+  it.each([
+    { role: "developer", tools: "invalid" },
+    { role: "user", tools: [] },
+    { role: "developer", tools: [], content: [{ type: "input_text", text: "Never lose this input" }] },
+    { role: "developer", tools: [null] },
+    { role: "developer", tools: [{ type: "namespace", name: "ns", tools: "invalid" }] },
+    { role: "developer", tools: [{ type: "message", role: "user", content: [] }] },
+  ])("retains malformed or conversational AdditionalTools variants at the boundary: %j", payload => {
+    const parse = harness(); parse(turn); const before = parse(record("user", "before", "Retain me"));
+    expect(parse({ type: "response_item", payload: { type: "additional_tools", ...payload } }))
+      .toMatchObject({ status: "unknown", reason: "invalid_additional_tools_payload", state: before.state });
+  });
   it("excludes an older evaluator request and its fresh internal final", () => {
     const supportedEfforts = ["medium", "high", "xhigh", "max"];
     const text = JSON.stringify({

@@ -1,5 +1,8 @@
-# AgentMemory for Codex on Windows — preview.17 installer
-> Preview.17 is a qualified Windows technical preview. The matching published release contains the ZIP, TGZ, descriptor and checksums, and the exact tagged source passed Windows CI. Use the version-pinned commands below. See the [current operating/validation guide](../../../docs/PREVIEW_17.md). Keep historical preview.16 assets together.
+# AgentMemory for Codex on Windows — preview.18 installer
+
+> **Preview.18 candidate installer:** Download commands below refer to the versioned Release after publication. Do not infer asset availability or CI success from this source. The final Release records the public commit/CI and exact payload-source/artifact hashes.
+
+> Preview.18 is a Windows technical preview based on the reviewed r223 implementation. Use the matching ZIP, TGZ, descriptor and checksums from the release record; that record reports the exact public commit and actual CI result. Use the version-pinned commands below. See the [current operating/validation guide](../../../docs/PREVIEW_18.md). Keep historical preview.16 assets together.
 
 The independent downstream bundles AgentMemory 0.9.30 and the patched iii
 engine/SDK 0.22.1. You do not need to install upstream first. This launcher
@@ -14,7 +17,7 @@ ProgramData may require elevation as that same user.
 
 ## Choose your installation path
 
-| Current state | What preview.17 does |
+| Current state | What preview.18 does |
 |---|---|
 | Empty or absent target | Default `--execute` prepares, activates and validates the service |
 | Owned managed installation | Updates that same root and preserves canonical data, authentication and task identity |
@@ -29,7 +32,7 @@ npm 12 rejects remote TGZ packages by default. `--allow-remote=root` permits
 the explicitly selected launcher for this command; it changes no global npm
 settings. If a versioned guide or packaged README has an older command without
 this option, add it when using npm 12. The [npm policy](https://docs.npmjs.com/cli/install/#allow-remote)
-and the [published preview.17 release instructions](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17)
+and the [versioned preview.18 release instructions](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18)
 explain the same compatibility requirement.
 
 ## New installation or managed update
@@ -39,7 +42,7 @@ target; for an update use the existing owned root. Do not create a second root
 to update an existing service.
 
 ```powershell
-npm exec --yes --allow-remote=root --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.17/agentmemory-codex-windows-0.1.0-preview.17.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
+npm exec --yes --allow-remote=root --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.18/agentmemory-codex-windows-0.1.0-preview.18.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json"
 ```
 
 `projects.json` is your project registry within that workspace. A minimal
@@ -64,7 +67,7 @@ prepared payload; it rolls back only the registrations/requirements it created.
 Managed updates retain existing operational settings and a predecessor
 code/config backup. Data-contract changes can prevent automatic binary rollback:
 a code/config archive alone does not restore data. Follow the
-[operating recovery guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.17/packaging/windows-codex/README.md#existing-install-cutover).
+[operating recovery guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/README.md#existing-install-cutover).
 
 ## Adopt an existing original upstream installation
 
@@ -74,7 +77,7 @@ separate from every source directory. Do not combine these options with
 `--fresh` or `--activate-prepared`.
 
 ```powershell
-npm exec --yes --allow-remote=root --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.17/agentmemory-codex-windows-0.1.0-preview.17.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json" --upstream-package-root "D:\OriginalAgentMemory\package" --upstream-data-dir "D:\OriginalAgentMemory\data" --upstream-home "C:\Users\YourName\.agentmemory"
+npm exec --yes --allow-remote=root --package="https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.18/agentmemory-codex-windows-0.1.0-preview.18.tgz" -- agentmemory-codex-windows --install-root "C:\AgentMemoryCodex" --workspace-root "D:\Work" --project-registry "D:\Work\projects.json" --upstream-package-root "D:\OriginalAgentMemory\package" --upstream-data-dir "D:\OriginalAgentMemory\data" --upstream-home "C:\Users\YourName\.agentmemory"
 ```
 
 If instance lifecycle metadata lives elsewhere, also pass
@@ -103,19 +106,19 @@ Local Qwen is optional and is not installed by this package. A configured
 existing Windows LocalAI integration may receive conditional startup requests
 for graph backlog. Other LLM features remain disabled in this profile. See
 [Codex MCP documentation](https://developers.openai.com/codex/mcp) and the
-[full operating guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.17/packaging/windows-codex/README.md) for provider scope, privacy and recovery.
+[full operating guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/README.md) for provider scope, privacy and recovery.
 
 ## Offline use and verification limits
 
-`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.17-win32-x64.zip"`
+`--archive "D:\Downloads\agentmemory-codex-windows-0.1.0-preview.18-win32-x64.zip"`
 uses an existing ZIP with the same version-pinned hash check. `--help` reads
 options without downloading. Release assets also include `release.json` and
 `SHA256SUMS.txt` for inspection. No mutable latest-download URL is used.
 
 The launcher/adapter use Apache-2.0; iii engine uses Elastic License 2.0.
-See [third-party notices](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.17/packaging/windows-codex/licenses/THIRD-PARTY-NOTICES.md) and
-[the engine license](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.17/packaging/windows-codex/licenses/iii-LICENSE_ELv2). Binaries remain unsigned.
+See [third-party notices](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/licenses/THIRD-PARTY-NOTICES.md) and
+[the engine license](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/licenses/iii-LICENSE_ELv2). Binaries remain unsigned.
 SHA-256 verifies integrity, not Authenticode signing or independent audit.
 Most downstream changes were generated with OpenAI Codex. Validation consists
 of automated checks and selected real flows on the owner's Windows host;
-see [release qualification and limits](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.17/CHANGELOG.md#qualification-and-limits).
+see [release qualification and limits](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/docs/PREVIEW_18.md#changes-and-evidence-boundary).

@@ -25,6 +25,29 @@ async function fixture(content = jsonl([header, start, user("u1"), user("u2")]))
 }
 
 describe("bounded restartable native Codex reads", () => {
+  it("resumes across a partial AdditionalTools line, append, restart and repeated cursor without duplicates", async () => {
+    const tool = JSON.stringify({ type: "response_item", payload: { type: "additional_tools", role: "developer", tools: [{ type: "function", name: "check", parameters: {} }] } });
+    const { input, path } = await fixture(jsonl([header, start, user("before-tools")]) + tool.slice(0, 40));
+    const first = await readCodexWindow(input); expect(first.messages.map(x => x.nativeMessageId)).toEqual(["before-tools"]);
+    expect(first.incompleteTail).toBe(true);
+    await appendFile(path, tool.slice(40) + "\n" + jsonl([user("after-tools")]));
+    const next = await readCodexWindow({ ...input, cursor: first.cursor });
+    expect(next.messages.map(x => x.nativeMessageId)).toEqual(["after-tools"]); expect(next.excluded.tool_definitions).toBe(1);
+    expect(next.issue).toBeNull(); expect(next.caughtUp).toBe(true);
+    const retry = await readCodexWindow({ ...input, cursor: first.cursor }); expect(retry.messages).toEqual(next.messages); expect(retry.cursor).toEqual(next.cursor);
+    const restarted = await readCodexWindow({ ...input, cursor: JSON.parse(JSON.stringify(next.cursor)) });
+    expect(restarted.messages).toEqual([]); expect(restarted.cursor).toEqual(next.cursor);
+  });
+  it.each([
+    [{ type: "additional_tools", role: "developer", tools: false }, "invalid_additional_tools_payload"],
+    [{ type: "future_unknown", content: [{ type: "input_text", text: "Preserve future input" }] }, "unsupported_response_type"],
+  ])("does not advance across unknown or malformed payloads: %j", async (payload, reason) => {
+    const prefix = jsonl([header, start, user("before-block")]);
+    const { input } = await fixture(prefix + jsonl([{ type: "response_item", payload }, user("after-block")]));
+    const result = await readCodexWindow(input); expect(result.messages.map(x => x.nativeMessageId)).toEqual(["before-block"]);
+    expect(result.cursor.byteOffset).toBe(Buffer.byteLength(prefix)); expect(result.issue).toMatchObject({ reason, byteOffset: Buffer.byteLength(prefix), payloadType: payload.type });
+    const retried = await readCodexWindow({ ...input, cursor: result.cursor }); expect(retried.messages).toEqual([]); expect(retried.cursor).toEqual(result.cursor); expect(retried.issue).toEqual(result.issue);
+  });
   it("applies the total physical budget before metadata and window parsing", async () => {
     const { input } = await fixture();
     const budget = new CodexReadBudget({ maxPhysicalBytes: 4 });

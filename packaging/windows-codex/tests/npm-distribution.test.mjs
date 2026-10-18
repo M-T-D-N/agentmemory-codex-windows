@@ -78,16 +78,15 @@ async function fixture(dataContractVersion) {
   for (const name of ['Install-WindowsCodex.ps1', 'Initialize-WindowsCodex.ps1']) await copyFile(path.join(packaging, name), path.join(release, name));
   for (const name of ['hook-spec.json', 'mcp-launcher-environment.json']) await copyFile(path.join(packaging, 'config', name), path.join(release, 'payload/config', name));
   await mkdir(path.join(release, 'payload/scripts'));
-  await copyFile(path.join(packaging, 'powershell/agentmemory-lifecycle.ps1'), path.join(release, 'payload/scripts/agentmemory-lifecycle.ps1'));
-  await copyFile(path.join(packaging, 'powershell/agentmemory-layout.ps1'), path.join(release, 'payload/scripts/agentmemory-layout.ps1'));
+  const updateHelpers = ['agentmemory-lifecycle.ps1', 'agentmemory-layout.ps1', 'agentmemory-upgrade-retention.ps1'];
+  for (const name of updateHelpers) await copyFile(path.join(packaging, 'powershell', name), path.join(release, 'payload/scripts', name));
   const manifest = { schema_version: 1, product: 'AgentMemory for Codex on Windows', product_id: 'agentmemory-codex-windows',
     downstream_version: '0.1.0-preview.4', agentmemory_version: '0.9.29', release_revision: 'r84', source_commit: 'a'.repeat(40),
     package_relative_path: 'runtime/0.9.29-codex-r84/agentmemory', release_files: [], immutable_files: [] };
   if (dataContractVersion !== undefined) manifest.data_contract_version = dataContractVersion;
   for (const name of ['Install-WindowsCodex.ps1', 'Initialize-WindowsCodex.ps1']) manifest.release_files.push({ path: name, sha256: await sha256(path.join(release, name)) });
   for (const name of ['hook-spec.json', 'mcp-launcher-environment.json']) manifest.immutable_files.push({ path: `config/${name}`, sha256: await sha256(path.join(release, 'payload/config', name)) });
-  manifest.immutable_files.push({ path: 'scripts/agentmemory-lifecycle.ps1', sha256: await sha256(path.join(release, 'payload/scripts/agentmemory-lifecycle.ps1')) });
-  manifest.immutable_files.push({ path: 'scripts/agentmemory-layout.ps1', sha256: await sha256(path.join(release, 'payload/scripts/agentmemory-layout.ps1')) });
+  for (const name of updateHelpers) manifest.immutable_files.push({ path: `scripts/${name}`, sha256: await sha256(path.join(release, 'payload/scripts', name)) });
   await writeFile(path.join(release, 'release-manifest.json'), JSON.stringify(manifest));
   return { dir, release, workspace, root };
 }

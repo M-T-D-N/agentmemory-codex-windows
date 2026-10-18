@@ -309,7 +309,7 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
     const sourceHolds = validateCodexSourceHolds(state.sourceHolds, session.id);
     if ((state.version === 2) !== (sourceHolds.length > 0) || state.cursor.version !== state.version) throw Error("Native source hold state requires reconciliation");
     const markUnknown = async (issue: string) => kv.set(KV.sessions, session.id, { ...session,
-      codexNativeCapture: { ...state, status: "unknown", issue, checkedAt: new Date().toISOString() },
+      codexNativeCapture: { ...state, status: "unknown", issue, recordDiagnostic: undefined, checkedAt: new Date().toISOString() },
     });
     let window: Awaited<ReturnType<typeof readCodexWindow>>;
     try {
@@ -322,11 +322,11 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
       const missing = error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
       const invalidCursor = error instanceof Error && error.message === "Codex source cursor is invalid, replaced or truncated; reconciliation is required";
       if (invalidCursor) await kv.set(KV.sessions, session.id, { ...session, codexNativeCapture: { ...state,
-        status: "reconcile_required", issue: "native_source_cursor_invalid",
+        status: "reconcile_required", issue: "native_source_cursor_invalid", recordDiagnostic: undefined,
         cursorDiagnostic: error instanceof CodexCursorValidationError ? error.diagnostic : undefined,
         checkedAt: new Date().toISOString() } });
       else if (error instanceof CodexReadBudgetError) await kv.set(KV.sessions, session.id, { ...session,
-        codexNativeCapture: { ...state, status: "unknown", issue: "native_source_read_budget_exceeded",
+        codexNativeCapture: { ...state, status: "unknown", issue: "native_source_read_budget_exceeded", recordDiagnostic: undefined,
           readBudget: error.usage, checkedAt: new Date().toISOString() } });
       else await markUnknown(missing ? "native_source_missing" : "native_source_read_failed");
       throw error;
@@ -378,12 +378,12 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
     const next: Session = { ...activitySession,
       observationCount: [...existing.values()].filter(row => row.emptyDeletion?.state !== "deleted").length,
       updatedAt: capturedAt, ...(rows.length ? { semanticGraphStatus: "pending" } : {}),
-      codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, cursorDiagnostic: undefined, readBudget: undefined, lastFailure: undefined, indexPending, snapshotBytes: window.snapshotBytes },
+      codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, recordDiagnostic: window.issue ? { ordinal: window.issue.ordinal, byteOffset: window.issue.byteOffset, recordType: window.issue.recordType, payloadType: window.issue.payloadType, itemType: window.issue.itemType } : undefined, cursorDiagnostic: undefined, readBudget: undefined, lastFailure: undefined, indexPending, snapshotBytes: window.snapshotBytes },
     };
     const unchangedCheckpoint = isDeepStrictEqual(activitySession, session) && rows.length === 0 && !state.lastFailure && !indexPending && state.indexPending === false &&
       next.observationCount === session.observationCount && status === state.status &&
       window.issue?.reason === state.issue && window.snapshotBytes === state.snapshotBytes &&
-      isDeepStrictEqual(window.cursor, state.cursor);
+      isDeepStrictEqual(window.cursor, state.cursor) && isDeepStrictEqual(next.codexNativeCapture!.recordDiagnostic, state.recordDiagnostic);
     if (!unchangedCheckpoint) await kv.set(KV.sessions, session.id, next);
     if (options.publish && indexPending) {
       try { await options.publish(indexRows, state.indexPending ? indexRows : rows); indexPending = false; } catch { /* Retry publication from canonical rows, without rewinding capture. */ }
