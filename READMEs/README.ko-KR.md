@@ -1,6 +1,6 @@
 # Windows용 Codex AgentMemory
 
-> **Preview.18 candidate:** 현재는 다음 공개판 후보입니다. [버전 Release 주소](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18)는 공개 후 확인할 주소이며 자산 존재나 CI 성공을 미리 뜻하지 않습니다. 확정 공개 commit·해당 CI·payload source·해시는 게시 시 Release에 기록합니다.
+> **Preview.18/r225 공개 완료:** [고정 Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18)에서 검증한 네 자산·해시·설치 안내를 확인하세요. 배포 tag는 `6359546a`, payload source는 `3632849b`입니다. 현재 main의 공개 후 문서 커밋과 해당 CI는 별도이며 기존 바이너리의 빌드 원본을 바꾸지 않습니다.
 
 <p align="center">
   <img src="../assets/readme-banner.svg" alt="AgentMemory for Codex on Windows" width="1120" />
@@ -64,7 +64,7 @@ port 3111의 143 REST endpoints, 12 portable hooks, 17 skills가 있습니다.
 
 ## preview.18 검증 및 운영 안내
 
-preview.18은 검토된 r223 구현을 새 공개 버전으로 패키징합니다. r223 기준 검사는 4,618건 통과·기존 조건부 생략 38건이며, 신규 패키지의 정확한 소스·설치/운영 재검증·CI·자산 해시는 최종 Release에서 별도로 확인하세요. [설치·갱신·제거·복구·검증 범위와 제한](../docs/PREVIEW_18.md)을 따릅니다.
+preview.18/r225는 검토된 r223 구현을 포함해 공개됐습니다. r223 기준 검사는 4,618건 통과·기존 조건부 생략 38건이며, 신규 패키지의 정확한 소스·설치/운영 재검증·CI·자산 해시는 최종 Release에서 별도로 확인하세요. [설치·갱신·제거·복구·검증 범위와 제한](../docs/PREVIEW_18.md)을 따릅니다.
 
 ## preview.16의 변경점
 

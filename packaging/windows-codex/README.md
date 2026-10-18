@@ -1,6 +1,6 @@
 # AgentMemory for Codex on Windows
 
-> **Preview.18 candidate:** The [versioned Release URL](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) is for use after publication. Asset availability and exact-commit CI are not established by these candidate instructions; use the final Release record for actual results and source/payload correspondence.
+> **Published preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
 
 Preview.18 qualification and release identities are summarized in [the operating and validation notes](../../docs/PREVIEW_18.md). The detailed lifecycle commands below remain the authority for installation, cutover, data preservation and recovery.
 
