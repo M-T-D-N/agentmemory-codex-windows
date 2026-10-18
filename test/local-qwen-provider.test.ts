@@ -129,7 +129,9 @@ function installFetchMock(): ReturnType<typeof vi.fn> {
   return mock;
 }
 
-describe("LocalQwenProvider", () => {
+// Several real Windows helper launches each have a 10s process bound.
+// The suite deadline must cover those calls before cleanup restores shared mocks.
+describe("LocalQwenProvider", { timeout: 60_000 }, () => {
   beforeEach(async () => {
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     actualCoordination = (await vi.importActual<typeof import("../src/providers/local-qwen-coordination.js")>("../src/providers/local-qwen-coordination.js")).invokeQwenCoordination;
