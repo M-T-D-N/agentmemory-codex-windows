@@ -1,10 +1,10 @@
 # Windows向け Codex AgentMemory
 
-> **Preview.18 candidate:** 現在は次の公開候補です。[versioned Release URL](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) は公開後の確認先であり、資産の存在やCI成功の証拠ではありません。公開commit・対応するCI・payload source・hashは最終Releaseに記録します。
+> **Preview.18/r225 公開済み:** [固定 Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) に検証済みの4資産・hash・インストール案内があります。配布tagは `6359546a`、payload sourceは `3632849b` です。公開後のmain文書commitとそのCIは別であり、既存バイナリのbuild sourceは変更しません。
 
 ## Preview.18: operating and validation notes
 
-See the [preview.18 guide](../docs/PREVIEW_18.md) for supported installation paths, update/removal/recovery, exact qualification scope, checksums and limitations. The reviewed r223 baseline has 4,618 passes and 38 existing skips. New preview.18 source/Windows/operating results and hashes must be read from its final Release, separately from that baseline. Check CI for the exact published source and all four matching release assets.
+See the [preview.18 guide](../docs/PREVIEW_18.md) for supported installation paths, update/removal/recovery, exact qualification scope, checksums and limitations. The reviewed r223 baseline has 4,618 passes and 38 existing skips. Published preview.18/r225 source, Windows/operating results and hashes are recorded in its fixed Release, separately from that baseline. Check CI for the exact published source and all four matching release assets.
 
 
 

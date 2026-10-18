@@ -1,6 +1,6 @@
 # AgentMemory for Codex on Windows — preview.18 installer
 
-> **Preview.18 candidate installer:** Download commands below refer to the versioned Release after publication. Do not infer asset availability or CI success from this source. The final Release records the public commit/CI and exact payload-source/artifact hashes.
+> **Published preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
 
 > Preview.18 is a Windows technical preview based on the reviewed r223 implementation. Use the matching ZIP, TGZ, descriptor and checksums from the release record; that record reports the exact public commit and actual CI result. Use the version-pinned commands below. See the [current operating/validation guide](../../../docs/PREVIEW_18.md). Keep historical preview.16 assets together.
 

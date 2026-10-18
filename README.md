@@ -1,6 +1,6 @@
 # AgentMemory for Codex on Windows
 
-> **Preview.18 candidate:** This source is prepared for the next release. The versioned [Release URL](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) is the address to use after publication, not proof that assets exist or CI has passed. The final Release records the actual public commit, its CI link, payload source and asset hashes.
+> **Published preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
 
 <p align="center">
   <img src="assets/readme-banner.svg" alt="AgentMemory — independent memory for Codex on Windows, with managed capture, project-scoped recall and provenance" width="1120" />
@@ -34,7 +34,7 @@ full disclosure](#ai-development-disclosure).
 
 The preview.18 release line packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
 
-Preview.18 is a Windows technical preview based on the reviewed r223 implementation. The [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) records the four matching assets and actual CI result for its exact public source; install only after that record is complete. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.18 operating and validation notes](docs/PREVIEW_18.md).
+Preview.18 is a Windows technical preview based on the reviewed r223 implementation. The [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) records the four matching assets and actual CI result for its exact public source; the publication and public-download hash checks are complete. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.18 operating and validation notes](docs/PREVIEW_18.md).
 
 1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
 2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
