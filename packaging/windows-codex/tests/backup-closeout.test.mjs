@@ -189,3 +189,19 @@ function Send-CompletedBackupToRecycleBin([string]$Path){if($Path -eq ${q(f.path
     assert.ok((await readFile(result.recycled[0].recycle_path)).length>0);
   } finally {await cleanup(f);}
 });
+
+
+test('actual runtime producer prevents ZIP-only closeout from reporting all artifact work complete', {skip:!windows},async()=>{
+  const f=await fixture();
+  try {
+    const runtime=path.join(f.root,'runtime','0.9.30-codex-r1','agentmemory');
+    await mkdir(runtime,{recursive:true});await writeFile(path.join(runtime,'package.json'),JSON.stringify({version:'0.9.30',agentmemoryDownstream:{dataContractVersion:5}}));
+    const r=run(f,`$review=Get-ReleaseBackupRetentionReview -InstallRoot $root -CurrentManifest $current -PreviousManifest $previous; $result=Complete-ReleaseBackupReview -InstallRoot $root -Review $review; $result|ConvertTo-Json -Depth 10 -Compress`);
+    assert.equal(r.status,0,r.stderr);const result=JSON.parse(r.stdout);
+    assert.equal(result.runtime_packages.status,'needs_identity_review');
+    assert.equal(result.runtime_packages.unresolved.length,1);assert.equal(result.recycled.length,0);
+    const noZip=run(f,`$empty=Join-Path $root 'empty-install';New-Item -ItemType Directory -Path (Join-Path $empty 'runtime/0.9.30-codex-r1/agentmemory') -Force|Out-Null; $review=Get-ReleaseBackupRetentionReview -InstallRoot $empty -CurrentManifest $current -PreviousManifest $previous;Complete-ReleaseBackupReview -InstallRoot $empty -Review $review|ConvertTo-Json -Depth 10 -Compress`);
+    assert.equal(noZip.status,0,noZip.stderr);assert.equal(JSON.parse(noZip.stdout).status,'needs_identity_review');
+    assert.ok((await readFile(path.join(runtime,'package.json'))).length>0);
+  }finally{await cleanup(f);}
+});

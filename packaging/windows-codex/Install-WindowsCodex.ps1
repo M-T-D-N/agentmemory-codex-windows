@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)][string]$ReleaseRoot,
     [Parameter(Mandatory = $true)][string]$InstallRoot,
     [Parameter(Mandatory = $true)][string]$WorkspaceRoot,
@@ -192,7 +192,9 @@ function Get-ReleaseBackupRetentionReview {
     param([Parameter(Mandatory)][string]$InstallRoot,
           [Parameter(Mandatory)]$CurrentManifest,
           [Parameter(Mandatory)]$PreviousManifest,
-          [ValidateRange(1, 1000)][int]$Limit = 100)
+          [ValidateRange(1, 1000)][int]$Limit = 100,
+          [string[]]$RecoveryPackagePins = @(),
+          [switch]$RecoveryPinsReviewed)
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     function Assert-ReviewPath {
@@ -202,6 +204,54 @@ function Get-ReleaseBackupRetentionReview {
             if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse path is protected.' }
             $cursor = if ($cursor -is [IO.DirectoryInfo]) { $cursor.Parent } else { $cursor.Directory }
         }
+    }
+    function Get-RuntimePackageReview {
+        $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'runtime'))
+        $runtime = [ordered]@{ automatic_delete = $false; root = $runtimeRoot; entries = @(); omitted_count = 0; recovery_pins_reviewed = [bool]$RecoveryPinsReviewed }
+        try {
+            if (-not (Test-Path -LiteralPath $runtimeRoot)) { return [pscustomobject]$runtime }
+            Assert-ReviewPath -Path $runtimeRoot
+            $items = @(Get-ChildItem -LiteralPath $runtimeRoot -Force | Sort-Object Name)
+            $runtime.omitted_count = [Math]::Max(0, $items.Count - $Limit)
+            $known = @($current, $previous) + @($review.entries | Where-Object { $null -eq $_.error } | ForEach-Object metadata)
+            foreach ($item in @($items | Select-Object -First $Limit)) {
+                $entry = [ordered]@{ path = $item.FullName; package_path = $null; disposition = 'protected_unknown'; metadata = $null; error = $null }
+                try {
+                    Assert-ReviewPath -Path $item.FullName
+                    if (-not $item.PSIsContainer -or $item.Name -notmatch '^\d+\.\d+\.\d+-codex-r\d+$') { throw 'Unrecognized runtime entry.' }
+                    $package = Join-Path $item.FullName 'agentmemory'
+                    $entry.package_path = $package
+                    Assert-ReviewPath -Path $package
+                    $relative = 'runtime/' + $item.Name + '/agentmemory'
+                    $identities = @($known | Where-Object { $null -ne $_ -and $_.source_package.Replace('\','/') -ceq $relative })
+                    if ($identities.Count -eq 0) { throw 'Runtime release identity is unproven; directory names do not certify legacy packages.' }
+                    $metadata = $identities[0]
+                    foreach ($identity in $identities) { if (-not (Test-SameBackupRelease -Left $identity -Right $metadata)) { throw 'Conflicting runtime release identities.' } }
+                    $packageJson = Join-Path $package 'package.json'
+                    Assert-ReviewPath -Path $packageJson
+                    if ((Get-Item -LiteralPath $packageJson).Length -gt 1MB) { throw 'Runtime package metadata exceeds review limit.' }
+                    $packageMetadata = Get-Content -Encoding UTF8 -Raw -LiteralPath $packageJson | ConvertFrom-Json
+                    $contract = if ($packageMetadata.PSObject.Properties['agentmemoryDownstream']) { $packageMetadata.agentmemoryDownstream.dataContractVersion } else { 1 }
+                    if (($contract -isnot [int] -and $contract -isnot [long]) -or $contract -lt 1 -or $contract -ne $metadata.data_contract_version -or [string]$packageMetadata.version -cne ($item.Name -replace '-codex-r\d+$','')) { throw 'Runtime package compatibility or data contract conflicts with release identity.' }
+                    $entry.metadata = $metadata
+                    if (Test-SameBackupRelease -Left $metadata -Right $current) { $entry.disposition = 'protect_current_release' }
+                    elseif ($predecessorKnown -and (Test-SameBackupRelease -Left $metadata -Right $previous)) { $entry.disposition = 'protect_immediate_predecessor' }
+                    else {
+                        $pinned = $false
+                        foreach ($pin in $RecoveryPackagePins) {
+                            $protected = [IO.Path]::GetFullPath($pin).TrimEnd('\')
+                            if ($package -ieq $protected -or $package.StartsWith($protected + '\', [StringComparison]::OrdinalIgnoreCase) -or $protected.StartsWith($item.FullName + '\', [StringComparison]::OrdinalIgnoreCase)) { $pinned = $true }
+                        }
+                        if ($pinned) { $entry.disposition = 'protect_recovery_pin' }
+                        elseif (-not $predecessorKnown) { $entry.disposition = 'distinct_candidate_predecessor_unknown' }
+                        elseif (-not $RecoveryPinsReviewed) { $entry.disposition = 'protect_recovery_scope_unknown' }
+                        else { $entry.disposition = 'older_distinct_maintenance_candidate' }
+                    }
+                } catch { $entry.error = $_.Exception.Message }
+                $runtime.entries += [pscustomobject]$entry
+            }
+        } catch { $runtime.error = $_.Exception.Message; $runtime.status = 'protected_unknown' }
+        return [pscustomobject]$runtime
     }
     function Get-BackupReleaseMetadata {
         param($Manifest)
@@ -246,7 +296,7 @@ function Get-ReleaseBackupRetentionReview {
         omitted_count = 0
     }
     try {
-        if (-not (Test-Path -LiteralPath $root)) { return [pscustomobject]$review }
+        if (-not (Test-Path -LiteralPath $root)) { $review.runtime_packages = Get-RuntimePackageReview; return [pscustomobject]$review }
         Assert-ReviewPath -Path $root
         $items = @(Get-ChildItem -LiteralPath $root -Force | Sort-Object Name -Descending)
         $review.omitted_count = [Math]::Max(0, $items.Count - $Limit)
@@ -294,6 +344,7 @@ function Get-ReleaseBackupRetentionReview {
         if ($review.omitted_count -gt 0) { $review.omitted_disposition = 'protected_unreviewed' }
     }
     catch { $review.error = $_.Exception.Message; $review.status = 'protected_unknown' }
+    $review.runtime_packages = Get-RuntimePackageReview
     return [pscustomobject]$review
 }
 
@@ -656,6 +707,7 @@ if ($Fresh -or $ActivatePrepared -or $automaticFresh) {
 
 . (Join-Path $payload 'scripts\agentmemory-lifecycle.ps1')
 . (Join-Path $payload 'scripts\agentmemory-layout.ps1')
+. (Join-Path $payload 'scripts\agentmemory-upgrade-retention.ps1')
 if ($UpstreamPackageRoot) { throw 'The target is already managed; update it without upstream adoption arguments.' }
 
 $owner = Get-Content -Encoding UTF8 -Raw -LiteralPath $ownerPath | ConvertFrom-Json
@@ -766,36 +818,30 @@ if (-not $Execute) {
 }
 
 $previousReleaseManifest = ($installed | ConvertTo-Json -Depth 12 | ConvertFrom-Json)
+$resumeUpgrade = $false
+$recoveryBackupRoot = $null
+if ($installed.PSObject.Properties['pending_upgrade_recovery'] -and $null -ne $installed.pending_upgrade_recovery) {
+    $pending = $installed.pending_upgrade_recovery
+    $recoveryBackupRoot = [IO.Path]::GetFullPath([string]$pending.backup_root)
+    if ((Split-Path -Parent $recoveryBackupRoot) -ine (Join-Path $root 'backups/releases') -or
+        (Split-Path -Leaf $recoveryBackupRoot) -notmatch '^[0-9]{8}T[0-9]{9}Z$') { throw 'Pending recovery root is not an owned direct release backup.' }
+    $previousReleaseManifest = Read-AgentMemoryColdRecoveryDirectory -Path $recoveryBackupRoot -Nonce $installed.install_nonce
+    if ($previousReleaseManifest.release_revision -cne $pending.release_revision) { throw 'Pending predecessor revision changed.' }
+    $resumeUpgrade = $true
+}
 $backupId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $backupRoot = Join-Path $root "backups\releases\$backupId"
 if (Test-Path -LiteralPath $backupRoot) { throw 'Release backup destination already exists.' }
 [void][System.IO.Directory]::CreateDirectory($backupRoot)
 $backupCreationTicks = (Get-Item -LiteralPath $backupRoot -Force).CreationTimeUtc.Ticks
-$copyRoots = @('scripts', 'bin', 'src', 'licenses')
-foreach ($relative in $copyRoots) {
-    $current = Join-Path $root $relative
-    if (Test-Path -LiteralPath $current) {
-        Copy-Item -Recurse -LiteralPath $current -Destination (Join-Path $backupRoot $relative)
-    }
-}
-foreach ($relative in @('config\iii-config.yaml', 'config\hook-spec.json', 'config\third-party-inputs.json', 'config\upstream-source.json', 'config\mcp-launcher-environment.json', 'config\codex-workspace.json', 'config\codex-hooks.json', 'config\managed-requirements.toml', 'config\install-manifest.json', 'config\install-state.json')) {
-    $current = Join-Path $root $relative
-    if (Test-Path -LiteralPath $current -PathType Leaf) {
-        $backup = Join-Path $backupRoot $relative
-        [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $backup))
-        Copy-Item -LiteralPath $current -Destination $backup
-    }
-}
-if (Test-Path -LiteralPath $managedRequirements -PathType Leaf) {
-    Copy-Item -LiteralPath $managedRequirements -Destination (Join-Path $backupRoot 'requirements.toml')
-}
-
+$distinctRevision = [string]$previousReleaseManifest.release_revision -cne [string]$releaseManifest.release_revision
 $cutoverLock = $null
 $cutoverTouched = $false
 $candidateStartAttempted = $false
 try {
     $cutoverLock = [IO.File]::Open((Join-Path $root 'data\startup.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     Stop-OwnedRuntimeForCutover -Root $root -Registrations $taskRegistrations
+    New-AgentMemoryColdRecovery -InstallRoot $root -BackupRoot $backupRoot -PreviousManifest $installed -IncludeData:($distinctRevision -and -not $resumeUpgrade) -ManagedRequirementsPath $managedRequirements
     $runtimeStatePath = Join-Path $root 'data\runtime-state.json'
     $previousRunId = $null
     try {
@@ -804,6 +850,10 @@ try {
     }
     catch {}
 
+    if ($distinctRevision) {
+        if (-not $resumeUpgrade) { $recoveryBackupRoot = $backupRoot }
+        Set-ObjectProperty -Object $installed -Name 'pending_upgrade_recovery' -Value ([pscustomobject]@{ backup_root = $recoveryBackupRoot; release_revision = $previousReleaseManifest.release_revision })
+    }
     $cutoverTouched = $true
     Set-ObjectProperty -Object $installed -Name 'data_contract_version' -Value $targetDataContract
     Set-ObjectProperty -Object $installed -Name 'installation_status' -Value 'cutover'
@@ -992,31 +1042,63 @@ finally {
     if ($cutoverLock) { $cutoverLock.Dispose() }
 }
 
-# A completed backup is inactive; compaction failure must not roll back a healthy install.
+# Retirement runs only after candidate readiness and independently of rollback.
 $summary.backup_archive = $null
 $summary.backup_compacted = $false
 $summary.backup_archive_reused = $false
 $summary.backup_archive_created = $false
-try {
-    $compaction = Compress-CompletedReleaseBackup -InstallRoot $root -BackupRoot $backupRoot -CreationTicks $backupCreationTicks
-    $summary.backup_archive = $compaction.archive
-    $summary.backup_compacted = $compaction.compacted
-    $summary.backup_archive_reused = $compaction.reused_archive
-    $summary.backup_archive_created = $compaction.created_archive
-    if ($compaction.compacted) { $summary.backup_root = $null }
-    else { $summary.backup_compaction_error = $compaction.error }
-} catch {
-    $summary.backup_compaction_error = $_.Exception.Message
-}
-$summary.release_backup_retention_review = Get-ReleaseBackupRetentionReview -InstallRoot $root -CurrentManifest $installed -PreviousManifest $previousReleaseManifest
-$maintenanceHelper = Join-Path $PSScriptRoot 'payload\scripts\Complete-ReleaseBackupReview.ps1'
-if (-not (Test-Path -LiteralPath $maintenanceHelper -PathType Leaf)) {
-    $maintenanceHelper = Join-Path $PSScriptRoot 'powershell\Complete-ReleaseBackupReview.ps1'
-}
+$summary.release_backup_closeout = [ordered]@{ status = 'incomplete'; recycled = @() }
+$maintenanceHelper = Join-Path $payload 'scripts\Complete-ReleaseBackupReview.ps1'
 try {
     . $maintenanceHelper
-    $summary.release_backup_closeout = Complete-ReleaseBackupReview -InstallRoot $root -Review $summary.release_backup_retention_review -DecisionPath $MaintenancePlanPath -Execute
+    if ($distinctRevision) {
+        $compaction = Compress-CompletedReleaseBackup -InstallRoot $root -BackupRoot $recoveryBackupRoot -CreationTicks (Get-Item -LiteralPath $recoveryBackupRoot -Force).CreationTimeUtc.Ticks
+        $summary.backup_archive = $compaction.archive
+        $summary.backup_compacted = $compaction.compacted
+        $summary.backup_archive_reused = $compaction.reused_archive
+        $summary.backup_archive_created = $compaction.created_archive
+        if (-not $compaction.compacted) { throw $compaction.error }
+        [void](Read-AgentMemoryRecoveryArchive -Path $compaction.archive -Nonce $installed.install_nonce -RequireComplete)
+        $retention = [pscustomobject]@{
+            schema_version = 1
+            immediate_predecessor = [pscustomobject]@{
+                release_revision = $previousReleaseManifest.release_revision
+                data_contract_version = $previousReleaseManifest.data_contract_version
+                package_relative_path = $previousReleaseManifest.package_relative_path
+            }
+            recovery_archive = $compaction.archive
+            recovery_sha256 = (Get-FileHash -LiteralPath $compaction.archive -Algorithm SHA256).Hash
+        }
+        if ($installed.PSObject.Properties['upgrade_retention'] -and $installed.upgrade_retention.PSObject.Properties['pinned_paths']) {
+            $retention | Add-Member -NotePropertyName 'pinned_paths' -NotePropertyValue @($installed.upgrade_retention.pinned_paths)
+        }
+        Set-ObjectProperty -Object $installed -Name 'upgrade_retention' -Value $retention
+        $installed.PSObject.Properties.Remove('pending_upgrade_recovery')
+        Write-Utf8NoBom -Path $installManifestPath -Content ($installed | ConvertTo-Json -Depth 12)
+        $summary.backup_root = if (Test-Path -LiteralPath $backupRoot) { $backupRoot } else { $null }
+    }
+    if ($installed.PSObject.Properties['upgrade_retention']) {
+        $previousForReview = $installed.upgrade_retention.immediate_predecessor
+        $summary.release_backup_retention_review = Get-ReleaseBackupRetentionReview -InstallRoot $root -CurrentManifest $installed -PreviousManifest $previousForReview
+        if ($MaintenancePlanPath) {
+            $summary.release_backup_closeout = Complete-ReleaseBackupReview -InstallRoot $root -Review $summary.release_backup_retention_review -DecisionPath $MaintenancePlanPath -Execute
+        } else {
+            $summary.release_backup_closeout = Complete-AgentMemoryAutomaticRetention -InstallRoot $root -CurrentManifest $installed -TransientBackup:$(if ($distinctRevision -and -not $resumeUpgrade) { '' } else { $backupRoot })
+            if ($summary.release_backup_closeout.status -eq 'disposed') {
+                $reviewPins = @()
+                if ($installed.upgrade_retention.PSObject.Properties['pinned_paths']) { $reviewPins = @($installed.upgrade_retention.pinned_paths) }
+                $summary.release_backup_retention_review = Get-ReleaseBackupRetentionReview -InstallRoot $root -CurrentManifest $installed -PreviousManifest $previousForReview -RecoveryPackagePins $reviewPins -RecoveryPinsReviewed
+            }
+        }
+        if ((-not $distinctRevision -or $resumeUpgrade) -and -not (Test-Path -LiteralPath $backupRoot)) { $summary.backup_root = $null }
+    } else {
+        # A same-revision reinstall before the first upgrade has no predecessor to infer.
+        $protected = @((Join-Path $root 'data'),(Join-Path $root 'config'),(Split-Path -Parent $newPackageRoot))
+        $recycled = Invoke-AgentMemoryRetentionRecycle -Path $backupRoot -ProtectedPaths $protected
+        $summary.backup_root = $null
+        $summary.release_backup_closeout = [ordered]@{ status = 'protected_only'; recycled = @($recycled); retained = $protected; unresolved = @() }
+    }
 } catch {
     $summary.release_backup_closeout = [ordered]@{ status = 'incomplete'; error = $_.Exception.Message; recycled = @() }
 }
-$summary | ConvertTo-Json -Depth 8
+$summary | ConvertTo-Json -Depth 10

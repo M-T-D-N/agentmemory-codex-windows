@@ -22,6 +22,30 @@ async function fixture(body = "한글 원문🙂\n".repeat(100_000)) {
 }
 
 describe("compressed Codex original transport", () => {
+  it("preserves small verified checkpoint reads across unrelated streaming cache pressure", async () => {
+    const { root } = await fixture();
+    const raw = randomBytes(6 * 1024 * 1024), noise = randomBytes(36 * 1024 * 1024);
+    const path = join(root, "checkpoint.zst"), otherPath = join(root, "pressure.zst");
+    await writeFile(path, zstdCompressSync(raw)); await writeFile(otherPath, zstdCompressSync(noise));
+    const physical = await open(path, "r"), other = await open(otherPath, "r"); let bytes = 0;
+    const measured = { stat: () => physical.stat(), read: async (...args: [Buffer, number, number, number]) => {
+      const result = await physical.read(...args); bytes += result.bytesRead; return result;
+    } } as unknown as FileHandle;
+    const check = () => withCodexCompressedFile(measured, path, async file => {
+      for (const position of [0, raw.length - 64]) {
+        const output = Buffer.alloc(64); await file.read(output, 0, output.length, position);
+        expect(output).toEqual(raw.subarray(position, position + 64));
+      }
+    });
+    try {
+      await check();
+      await withCodexCompressedFile(other, otherPath, async file => {
+        const output = Buffer.alloc(noise.length); await file.read(output, 0, output.length, 0);
+        expect(output.equals(noise)).toBe(true);
+      });
+      const before = bytes; await check(); expect(bytes).toBe(before);
+    } finally { await physical.close(); await other.close(); }
+  }, 30_000);
   it("continues a sequential reader after another archive evicts its shared prefetch", async () => {
     const { root } = await fixture();
     const raw = randomBytes(6 * 1024 * 1024), noise = randomBytes(36 * 1024 * 1024);

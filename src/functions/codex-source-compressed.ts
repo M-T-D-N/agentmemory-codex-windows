@@ -9,17 +9,26 @@ async function* decodedChunks(physical: CodexSourceFile, size: number, budget?: 
   }
 }
 
-const reads = new Map<string, { file: string; start: number; bytes: Buffer }>();
+const reads = new Map<string, { file: string; start: number; bytes: Buffer; checkpoint: boolean }>();
 let cachedBytes = 0;
+let checkpointBytes = 0;
 const maximumCachedBytes = 32 * 1024 * 1024;
 const prefetchBytes = 4 * 1024 * 1024;
 const maximumRetainedBytes = prefetchBytes + 256 * 1024;
-function remember(key: string, file: string, start: number, bytes: Buffer) {
+function remember(key: string, file: string, start: number, bytes: Buffer, checkpoint = false) {
   if (bytes.length > maximumCachedBytes) return;
-  const old = reads.get(key); if (old) { cachedBytes -= old.bytes.length; reads.delete(key); }
-  const saved = Buffer.from(bytes); reads.set(key, { file, start, bytes: saved }); cachedBytes += saved.length;
-  while (cachedBytes > maximumCachedBytes || reads.size > 1024) {
-    const first = reads.keys().next().value!; cachedBytes -= reads.get(first)!.bytes.length; reads.delete(first);
+  const discard = (id: string) => {
+    const row = reads.get(id)!; cachedBytes -= row.bytes.length;
+    if (row.checkpoint) checkpointBytes -= row.bytes.length;
+    reads.delete(id);
+  };
+  if (reads.has(key)) discard(key);
+  checkpoint = checkpoint && bytes.length <= 64 * 1024;
+  const saved = Buffer.from(bytes); reads.set(key, { file, start, bytes: saved, checkpoint }); cachedBytes += saved.length;
+  if (checkpoint) checkpointBytes += saved.length;
+  while (cachedBytes > maximumCachedBytes || reads.size > 1024 || checkpointBytes > 8 * 1024 * 1024) {
+    const victim = [...reads.entries()].find(([, row]) => checkpointBytes > 8 * 1024 * 1024 ? row.checkpoint : !row.checkpoint);
+    discard(victim?.[0] ?? reads.keys().next().value!);
   }
 }
 
@@ -111,14 +120,14 @@ export async function withCodexCompressedFile<T>(physical: CodexSourceFile, path
         const prefetchEnd = Math.min(originalSize, position + count + prefetchBytes);
         while (!done && (through < prefetchEnd || prefetchEnd === originalSize)) await next();
         await verify();
-        remember(cacheKey, key, position, buffer.subarray(offset, offset + copied));
+        remember(cacheKey, key, position, buffer.subarray(offset, offset + copied), true);
         return { bytesRead: copied, buffer };
       },
     });
   } catch (error) {
     sizes.delete(key);
     for (const [cacheId, range] of reads) if (range.file === key) {
-      cachedBytes -= range.bytes.length; reads.delete(cacheId);
+      cachedBytes -= range.bytes.length; if (range.checkpoint) checkpointBytes -= range.bytes.length; reads.delete(cacheId);
     }
     throw error;
   } finally { await stop(); }

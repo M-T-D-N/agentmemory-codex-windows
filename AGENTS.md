@@ -50,7 +50,7 @@ other hosts. The supported Windows/Codex build in
   Review task-owned intermediates as well as caches; record actual cleanup or exact retained/unresolved paths and reasons in the existing build/qualification record. Canonical installation data and required recovery/evidence remain protected. Missing cleanup review means the work is not closed.
 
 - Before reporting a successful cutover complete, apply that retention review to existing backups against the current release, actual immediate predecessor, matching code/data snapshot pairs and current consumers.
-  Preserve compatible code/data recovery sets and required archive/audit evidence; report protected unknowns and explicit maintenance candidates. ZIP compaction alone does not complete this review. Use the existing workspace storage/approval policy for maintenance; do not automatically delete older archives.
+  Successful managed upgrades must finish backup and installed-runtime closeout in the same operation: preserve the current runtime and actual distinct immediate predecessor plus one verified complete cold code/config/auth/data recovery set. Apply the installer's owned-set recycle-only retention after readiness; same-version reinstall preserves that predecessor. Preserve required audit evidence and unknown, foreign, pinned or active sets, and report any incomplete closeout explicitly. ZIP compaction or candidate classification alone is not completion. See packaging/windows-codex/README.md for the exact lifecycle.
 
 ## Consistency Rules
 

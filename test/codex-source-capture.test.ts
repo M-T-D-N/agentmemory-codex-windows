@@ -18,6 +18,16 @@ import { codexSessionForTransfer } from "../src/replay/codex-capture-state.js";
 import { retainCodexForgetExclusions, codexExclusionId } from "../src/functions/codex-capture-exclusion.js";
 
 describe("native source capture checkpoints", () => {
+  it("stores an unknown boundary diagnostic and preserves repeated unknown boundaries without duplicate rows", async () => {
+    await initialize(); await capture(); const before = await kv.list(KV.observations("s"));
+    await appendFile(join(root, sourcePath), JSON.stringify({ type: "response_item", payload: { type: "future_type" } }) + "\n");
+    const blocked = await capture(); expect(blocked.status).toBe("unknown");
+    const current = await kv.get<Session>(KV.sessions, "s");
+    expect(current!.codexNativeCapture!.recordDiagnostic).toMatchObject({ payloadType: "future_type", recordType: "response_item" });
+    delete current!.codexNativeCapture!.recordDiagnostic; await kv.set(KV.sessions, "s", current); await capture();
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.recordDiagnostic?.payloadType).toBe("future_type");
+    expect(await capture()).toMatchObject({ inserted: 0, status: "unknown" }); expect(await kv.list(KV.observations("s"))).toEqual(before);
+  });
   it("previews historical privacy correspondence without changing canonical content, source metadata or archive state", async () => {
     const raw = "identifier_sk-" + "a".repeat(32);
     await appendFile(join(root, sourcePath), JSON.stringify(assistantMessage("historical-final", 25, raw)) + "\n");

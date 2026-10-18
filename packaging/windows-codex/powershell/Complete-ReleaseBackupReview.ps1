@@ -12,11 +12,23 @@ function Complete-ReleaseBackupReview {
     foreach ($entry in @($Review.entries | Where-Object disposition -ne 'older_distinct_maintenance_candidate')) {
         $result.retained += [pscustomobject]@{ path = $entry.path; reason = $entry.disposition }
     }
+    function Add-RuntimeCloseout {
+        $property = $Review.PSObject.Properties['runtime_packages']
+        if ($null -eq $property) { return [pscustomobject]$result }
+        $runtime = $property.Value
+        $pending = @($runtime.entries | Where-Object disposition -eq 'older_distinct_maintenance_candidate' | ForEach-Object package_path)
+        $unknown = @($runtime.entries | Where-Object { $_.disposition -in @('protected_unknown', 'protect_recovery_scope_unknown', 'distinct_candidate_predecessor_unknown') } | ForEach-Object path)
+        $hasError = $null -ne $runtime.PSObject.Properties['error']
+        $status = if ($hasError -or $unknown.Count -gt 0 -or $runtime.omitted_count -gt 0) { 'needs_identity_review' } elseif ($pending.Count -gt 0) { 'needs_disposition' } else { 'protected_only' }
+        $result.runtime_packages = [pscustomobject]@{ status = $status; automatic_delete = $false; pending = $pending; unresolved = $unknown; omitted_protected = $runtime.omitted_count }
+        if ($result.status -in @('protected_only', 'disposed') -and $status -ne 'protected_only') { $result.status = $status }
+        return [pscustomobject]$result
+    }
     if (-not $DecisionPath) {
         $result.pending = @($candidates | ForEach-Object path)
         if ($identityIncomplete) { $result.status = 'needs_identity_review' }
         elseif ($candidates.Count -eq 0 -and $Review.omitted_count -eq 0) { $result.status = 'protected_only' }
-        return [pscustomobject]$result
+        return (Add-RuntimeCloseout)
     }
     $handles = @()
     $lock = $null
@@ -137,7 +149,7 @@ function Complete-ReleaseBackupReview {
         if ($lock) { $lock.Dispose() }
         foreach ($handle in $handles) { $handle.Dispose() }
     }
-    return [pscustomobject]$result
+    return (Add-RuntimeCloseout)
 }
 
 function Send-CompletedBackupToRecycleBin {
@@ -197,7 +209,7 @@ namespace AgentMemory {
    try {
     Guid iid=typeof(IShellItem).GUID; SHCreateItemFromParsingName(path,IntPtr.Zero,ref iid,out item);
     op=(IFileOperation)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("3ad05575-8857-4850-9277-11b85bdb8e09")));
-    var sink=new RecycleSink(); op.SetOperationFlags(0x80000|0x100000|0x400|0x10|0x4);
+    var sink=new RecycleSink(); op.SetOperationFlags(0x80000|0x100000|0x1000|0x400|0x10|0x4);
     op.DeleteItem(item,sink); op.PerformOperations(); bool aborted; op.GetAnyOperationsAborted(out aborted);
     if(aborted || sink.Result<0 || String.IsNullOrEmpty(sink.Destination)) throw new InvalidOperationException("Recycle-only operation failed or was refused.");
     return sink.Destination;

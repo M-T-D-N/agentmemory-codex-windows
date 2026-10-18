@@ -29,6 +29,21 @@ async function closed(kv: ReturnType<typeof mockKV>, id: string) {
   return observation;
 }
 describe("read-only native capture reporting", () => {
+  it("reports unsupported record type and boundary without source text or private paths", async () => {
+    const kv = mockKV(), row = session("schema-stop");
+    row.codexNativeCapture!.status = "unknown"; row.codexNativeCapture!.issue = "unsupported_response_type";
+    row.codexNativeCapture!.recordDiagnostic = { ordinal: 12, byteOffset: 4096, recordType: "response_item", payloadType: "future_type", itemType: "private/path" };
+    await kv.set(KV.sessions, row.id, row); const before = structuredClone(kv.store);
+    const report = await readCodexSourceStatus(kv as never, "mine");
+    expect(report.issues[0]).toMatchObject({ reason: "unsupported_response_type", record: { ordinal: 12, byteOffset: 4096, payloadType: "future_type" }, action: "update_adapter_and_retry_saved_cursor" });
+    expect(JSON.stringify(report)).not.toContain("private/path"); expect(kv.store).toEqual(before);
+  });
+  it.each(["native_source_read_budget_exceeded", "native_capture_correspondence_changed", "native_observation_too_large"])("retains the precise capture reason %s", async issue => {
+    const kv = mockKV(), row = session("precise");
+    row.codexNativeCapture!.status = "unknown"; row.codexNativeCapture!.issue = issue;
+    await kv.set(KV.sessions, row.id, row);
+    expect((await readCodexSourceStatus(kv as never, "mine")).issues).toContainEqual(expect.objectContaining({ reason: issue }));
+  });
   it("counts a stored source error and its failed RPC wrapper at the same time as one event", async () => {
     const kv = mockKV(), failed = session("same-event");
     failed.codexNativeCapture!.status = "unknown"; failed.codexNativeCapture!.issue = "native_source_read_failed";

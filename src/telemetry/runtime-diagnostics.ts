@@ -1,8 +1,20 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { IIIClient } from "iii-sdk";
 import { isAutoCompressEnabled } from "../config.js";
+export function executingPackageIdentity(moduleUrl: string) {
+  try {
+    const packageUrl = new URL("../package.json", moduleUrl);
+    const metadata = JSON.parse(readFileSync(packageUrl, "utf8"));
+    const dataContract = metadata.agentmemoryDownstream?.dataContractVersion ?? 1;
+    if (!Number.isSafeInteger(dataContract) || dataContract < 1) return undefined;
+    return { packageRoot: dirname(fileURLToPath(packageUrl)), selectionSource: "executing-module" as const, dataContract };
+  } catch { return undefined; }
+}
+
 const requestFunctions = new Set(["mem::graph-query", "mem::import", "mem::archive", "mem::forget", "mem::slot-create", "mem::remember", "mem::capture", "mem::observe"]);
 
 const phaseOwner = new AsyncLocalStorage<{ id: number; emit: (event: Record<string, unknown>) => boolean }>();
@@ -44,7 +56,7 @@ parentPort.on('message', message => {
 const temporary = workerData.file + '.tmp';
 function flush() {
   const now = Date.now();
-  const snapshot = { schema: 1, runId: workerData.runId, pid: workerData.pid, observedAt: now,
+  const snapshot = { schema: 1, runId: workerData.runId, pid: workerData.pid, packageIdentity: workerData.packageIdentity ?? null, observedAt: now,
     heartbeatAt: heartbeat?.at ?? null, heartbeatAgeMs: heartbeat ? now-heartbeat.at : null,
     memory: heartbeat?.memory ?? null, droppedEvents: Atomics.load(credits, 1), droppedActive: droppedActive + Atomics.load(credits, 2),
     active: [...active.values()].map(({id,parent,kind,name,at,requestId,phases,counts})=>({id,parent,kind,name,startedAt:at,ageMs:now-at,...(requestId?{requestId,phases:phases??{},counts:counts??{},serverCompleted:false}:{})})), recent, requests };
@@ -59,9 +71,9 @@ flush();
 
 export function attachRuntimeDiagnostics(
   sdk: IIIClient,
-  options: { file?: string; runId?: string },
+  options: { file?: string; runId?: string; packageIdentity?: ReturnType<typeof executingPackageIdentity> },
 ): { stop: () => Promise<void> } | undefined {
-  const { file, runId } = options;
+  const { file, runId, packageIdentity } = options;
   if (!file || !isAbsolute(file) || !runId || !/^\d{8}T\d{9}Z$/.test(runId)) return;
   const credits = new Int32Array(new SharedArrayBuffer(12));
   let warned = false;
@@ -73,7 +85,7 @@ export function attachRuntimeDiagnostics(
   let worker: Worker;
   try {
     worker = new Worker(collectorSource, {
-      eval: true, workerData: { file, runId, pid: process.pid, credits: credits.buffer },
+      eval: true, workerData: { file, runId, pid: process.pid, packageIdentity, credits: credits.buffer },
     });
   } catch { warnUnavailable(); return; }
   let enabled = true;

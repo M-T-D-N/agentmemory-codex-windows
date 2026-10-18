@@ -295,3 +295,14 @@ $request.watcher_started_at_utc=$watchdogStartedAtUtc;$request.token='invalid';S
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 }
+
+for (const metadata of ['pnpm-lock.yaml', 'pnpm-workspace.yaml']) test(`release smoke rejects source-only ${metadata}`, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'am-smoke-metadata-'));
+  try {
+    await mkdir(path.join(root, 'dist'));
+    for (const name of ['cli.mjs','standalone.mjs','index.mjs','index.mjs.map']) await writeFile(path.join(root,'dist',name),'');
+    await writeFile(path.join(root,metadata),'patchedDependencies: private-build-path');
+    const result=spawnSync(process.execPath,[fileURLToPath(new URL('./release-smoke.mjs',import.meta.url)),root,root],{encoding:'utf8',windowsHide:true,timeout:10000});
+    assert.equal(result.status,1);assert(result.stderr.includes(`source-only package manager metadata must not be shipped: ${metadata}`));
+  } finally { await rm(root,{recursive:true,force:true}); }
+});

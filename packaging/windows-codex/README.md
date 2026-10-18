@@ -1,17 +1,19 @@
 # AgentMemory for Codex on Windows
 
-Preview.17 qualification and release identities are summarized in [the operating and validation notes](../../docs/PREVIEW_17.md). The detailed lifecycle commands below remain the authority for installation, cutover, data preservation and recovery.
+> **Preview.18 candidate:** The [versioned Release URL](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) is for use after publication. Asset availability and exact-commit CI are not established by these candidate instructions; use the final Release record for actual results and source/payload correspondence.
+
+Preview.18 qualification and release identities are summarized in [the operating and validation notes](../../docs/PREVIEW_18.md). The detailed lifecycle commands below remain the authority for installation, cutover, data preservation and recovery.
 
 [English](README.md) | [한국어 안내](../../READMEs/README.ko-KR.md) | [日本語案内](../../READMEs/README.ja-JP.md)
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.17`, based on upstream AgentMemory `v0.9.30`. It is not the
+> Preview `0.1.0-preview.18`, based on upstream AgentMemory `v0.9.30`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
 
-Preview.17 is published. Its version tag and four release assets are available at the [preview.17 release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.17). Historical preview.16 retains its own immutable guide and assets. Current main documentation corrections do not replace the preview.17 tag, manifests or assets.
+The matching preview.18 tag and four release assets are identified by the [preview.18 release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18). Historical preview.16 retains its own immutable guide and assets. Current main documentation corrections do not replace the preview.18 tag, manifests or assets.
 
 This release version identifies the source and independently packaged downstream launcher. Each generated package and
 installed runtime has its own qualification and installation evidence.
@@ -111,7 +113,7 @@ from installed qualification and preserves the current engine/data contracts.
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.17`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.18`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.30` and the `agentmemory` identifier. These are not the
@@ -204,8 +206,8 @@ commit run:
 
 ```powershell
 & .\packaging\windows-codex\Build-NpmDistribution.ps1 `
-  -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.17 `
-  -OutputDirectory D:\staging\npm-preview17 `
+  -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.18 `
+  -OutputDirectory D:\staging\npm-preview18 `
   -QualificationPath D:\staging\build\qualification.json
 ```
 
@@ -282,8 +284,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.17\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.17 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.18\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.18 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `
@@ -319,7 +321,7 @@ automatically restore predecessor binaries against possibly newer data. An
 unconfirmed stop also prevents file rollback. Complete or repair a compatible
 release; a partial package copy may require review before retry. Reverting to a
 legacy runtime requires a matching pre-upgrade **data** backup as well as its
-code/config; the installer's code/config backup alone is insufficient.
+code/config. Successful managed upgrades retain this complete cold recovery set.
 
 These are protections in the supported installer and worker entry points. An
 old installer or an independently launched old upstream binary cannot learn this
@@ -1342,6 +1344,19 @@ normal user session.
 
 Local revision r144 applies the shared visibility policy to native reasoning-effort evaluator requests, including the stored first-prompt prefix. Internal sessions remain canonical but are excluded from capture, ordinary recall and semantic backlog scheduling. Graph query, snapshot fallback, traversal and retrieval exclude records whose session provenance is entirely internal; mixed or unknown provenance is retained. Exact edge pagination includes the source-visibility revision and rechecks it. Snapshot statistics report `countsScope: "canonical_storage"`; their counts include retained internal sources and differ from scoped visible query totals.
 
+Qwen lease publication, stale reclamation and release use the same exclusive
+`qwen-use.lock.lifecycle.lock` file handle as the supported Windows Qwen host.
+The OS releases this handle when a coordinator exits; the guard file is retained.
+A lease contains the actual process start FILETIME as well as its PID and token.
+Unknown identity, inaccessible markers and near-time ambiguous legacy identities
+remain deferred. A fully written, closed temporary file is published by a Windows
+hard link inside the guard. The packaged PowerShell helper uses the existing
+Windows runtime; compiler intermediates use the coordination directory and are
+removed by the runtime. It never logs ownership records. Read-only foreground
+polling may cancel active background inference, but only the guarded coordinator
+reclaims stale files. Every participant must use this host protocol; arbitrary
+external programs that overwrite marker files are outside its mutual exclusion.
+
 Qwen lease cleanup retries transient Windows sharing failures with exact owner/token checks. An exhausted own release remains recoverable on the next call, with concurrent recovery serialized; cleanup errors preserve the original request failure. Stream interruptions retain transport cause/address. Daemon startup now reports an exited engine or worker immediately with its exit code and run log paths, preserving the cold-load bounds and owned-process cleanup. The historical Windows 10013 bind cause remains undetermined.
 
 ## Source validation without a release payload
@@ -1429,43 +1444,53 @@ its disposition.
 
 ## Release retention and cleanup
 
-After a successful update and readiness confirmation, the installer compacts only
-the newly created code/config backup. It first checks timestamped sibling ZIPs
-for the exact file and directory set, including empty directories, and SHA-256
-of every file. An exact match is reused; matching release/version metadata alone
-is insufficient. Unreadable, corrupt, differing and reparse archives are left
-untouched. Otherwise it creates one new sibling ZIP without replacing any file.
-The selected archive remains open against writes/replacement and is checked
-unchanged before removing only this installation's expanded copy. Failed updates
-retain the expanded backup used for rollback. A compaction failure preserves the
-backup and reports backup_compaction_error without undoing a healthy installation.
-Successful compaction reports backup_archive, backup_archive_reused and
-backup_archive_created, and clears backup_root.
-For manual recovery, extract the archive into a new empty recovery directory
-before inspecting or restoring its predecessor files; never extract over live data.
-Superseded backup archives still follow the explicit maintenance rules below.
+A successful distinct revision update keeps the installed runtime, its actual
+immediate predecessor runtime, and one complete pre-upgrade recovery ZIP. After
+stopping the owned runtime under the existing startup lock, the installer copies
+and hashes code, all configuration and authentication files, owner metadata,
+canonical data, and home state. The held `data/startup.lock` is excluded. It
+checks the copied bytes and unchanged sources before touching installation data.
+`recovery-set.json` records the exact revision, data contract, owner nonce and
+file hashes. After candidate readiness, the existing ZIP compactor verifies all
+archive bytes, and the installation manifest records `upgrade_retention` with the
+actual predecessor, archive path and SHA-256. Restoring a data contract requires
+the matching code and cold data together in a reviewed recovery operation;
+extract recovery ZIPs into an empty directory, never over live data.
 
-The successful install summary includes release_backup_retention_review with
-exact backup paths and bounded manifest metadata (release revision, data contract
-and source package). The captured pre-cutover installed revision identifies the
-actual distinct immediate predecessor; revision names and timestamps do not
-establish rollback order. Repeated installation of the current revision reports
-predecessor_known=false rather than guessing. Current and predecessor backups
-are protected; older distinct entries are explicit maintenance candidates.
-Unknown, unreadable and omitted entries remain protected. This review never
-deletes backups or determines data-snapshot pins or active consumers.
+Only then does automatic retention inspect installed runtimes and backups. It
+verifies ownership from the installation nonce and archived manifests, verifies
+older runtime bytes, rejects external package junctions, and checks process,
+scheduled-task and configuration consumers plus explicit
+`upgrade_retention.pinned_paths`. Owned package-internal junctions remain valid.
+It recognizes the prior cold-snapshot descriptor format only after checking its
+owner, revision, complete recorded file inventory and every byte. The legacy producer may keep the owner marker outside its file list; only that exact marker is accepted separately after independent nonce validation. Unknown,
+foreign, unreadable or pinned sets preserve all retirement candidates and report
+`release_backup_closeout.status=incomplete`. Historical audit and published source
+artifacts remain outside automatic retention.
 
-Before reporting a cutover complete, disposition existing backups against the
-current release, actual immediate predecessor, matching code/data snapshot pairs
-and current consumers. Retain compatible code plus data recovery sets and required
-archive/audit evidence even when they are older. Report unresolved pairings,
-protected paths and maintenance candidates explicitly; successful ZIP compaction
-alone does not finish retention review. Code/config alone is not a data restore.
-Perform any approved maintenance using the workspace storage/approval policy and
-the exact-path checks below, without adding an automatic expiry or runtime gate.
+Eligible inactive older installed runtimes and recovery copies go through the
+existing Windows recycle-only operation, with no permanent-delete fallback.
+The shell operation recycles each selected top-level directory as a whole,
+preserving its nested package content and internal junctions. Each
+operation verifies the original path's absence, surviving parent and protected
+paths and matching recycle receipt; archive disposal also checks recovered bytes; uncertainty stops
+subsequent operations and reports actual attempts and partial results. A normal
+managed update converges to two runtimes and one complete recovery ZIP. Fresh
+installation has no predecessor. Reinstalling the same revision preserves its
+recorded distinct predecessor and recovery ZIP and recycles only its transient
+rollback copy, without creating another lasting archive. Failed cutovers retire
+nothing and retain recovery material. Pending transition metadata keeps the
+original cold predecessor set for a retry; a data-contract transition or candidate
+start still prevents silent automatic data rollback.
 
-The installer accepts `-MaintenancePlanPath` (npm `--maintenance-plan`) to apply
-explicit backup decisions in this same successful update. The JSON input uses
+The bounded read-only `release_backup_retention_review` and explicit manual
+maintenance interface remain available. They do not grant deletion permission to
+unknown sets or imply that an incomplete automatic closeout succeeded. A healthy
+service remains running when retention cannot finish; the returned closeout is
+explicitly incomplete.
+
+The installer accepts `-MaintenancePlanPath` (npm `--maintenance-plan`) to select
+the existing explicit maintenance path instead of automatic retirement. The JSON input uses
 `schema_version: 1`, exact `current_release` and `immediate_predecessor` identities
 (`release_revision`, `data_contract_version`, `source_package`), completed
 `code_data_recovery` and `consumers_and_publication` reviews, each with an existing
@@ -1484,6 +1509,16 @@ results. A healthy update remains healthy if maintenance cannot finish, but its
 artifact closeout is incomplete. Record the returned actual result in the
 existing qualification record; do not create a second cleanup report or ZIP.
 
+The manual closeout's `runtime_packages` remains a bounded, read-only review.
+Automatic retirement results are reported separately in
+`release_backup_closeout.attempted`, `recycled`, `retained`, and `unresolved`.
+
+Worker diagnostic snapshots now include the executing module's package root and
+data contract, with `selectionSource: executing-module`; this is independent of
+the installation manifest and inherited diagnostic variables. Older installed
+workers lack this field until a separately qualified update; source changes do
+not activate a runtime or prove an older worker's selected package.
+
 Keep the active package, the immediately preceding rollback package, the
 pristine upstream source archive, and the final qualification artifact for the
 active and rollback revisions. Keep canonical `data/`, current `logs/`,
@@ -1493,9 +1528,8 @@ independently of release cleanup.
 Older packages, duplicate release backups, failed staging artifacts, and
 superseded inactive capture candidates may be removed only after resolving each
 exact path, rejecting reparse targets, and confirming that the active manifest,
-task commands, and owned processes do not reference them. Cleanup is an
-explicit maintenance action, not a new runtime gate or a reason to rewrite
-canonical data.
+task commands, and owned processes do not reference them. The successful installer applies the automatic owned-set policy above;
+other cleanup remains explicit maintenance. Canonical data is preserved.
 
 ### Runtime responsiveness recovery
 
@@ -1940,7 +1974,7 @@ Approval-preview recovery in explicit source initialization validates the entire
 The Windows source reader also follows a missing logical `.jsonl` source to its
 exact `.jsonl.zst` sibling. Node's Zstandard streaming decoder reads the original
 byte offsets without expanding archives onto disk; shared cached read ranges are bounded
-to 32 MiB in process memory. Each open decoder also retains at most 4.25 MiB
+to 32 MiB in process memory. Within that existing bound, at most 8 MiB is reserved for requested ranges of 64 KiB or less (metadata and cursor anchors), so unrelated streaming decodes cannot evict every verified checkpoint. The same file identity and source/cursor validation still apply. Read-budget exhaustion, correspondence changes and oversized native observations retain their precise diagnostic reason. Each open decoder also retains at most 4.25 MiB
 of chunk data so other readers evicting shared ranges cannot restart its
 sequential prefetch. This buffer is released with the decoder. Decoded ranges
 may prefetch up to the existing
@@ -2009,3 +2043,7 @@ identity fails the whole execution. A scheduler completion timestamp is accepted
 only on that same worker and after this execution began. Operating qualification
 checks preserved canonical identities/authentication and actual graph lookup
 with original observation links; an old extraction is never labelled fresh.
+
+### Codex additional tool declarations
+
+The parser validates the current Codex AdditionalTools shape (type/id/role/tools) before excluding developer/system tool declarations. Conversation-bearing, malformed or unrecognized variants stop at their original boundary. No unknown-type blanket skip is used. A supported adapter update retries the saved cursor through the normal source-capture path; never edit originals or jump cursors. Unsupported diagnostics expose only a sanitized record/payload type, ordinal/byte offset and update-and-retry guidance; no tool definitions or message bodies are exposed.

@@ -1,4 +1,4 @@
-import { attachRuntimeDiagnostics } from "./telemetry/runtime-diagnostics.js";
+import { attachRuntimeDiagnostics, executingPackageIdentity } from "./telemetry/runtime-diagnostics.js";
 import { registerArchiveFunctions } from "./functions/archive-tools.js";
 import { startCodexSourceScheduler } from "./functions/codex-source-backlog.js";
 import { resumeGraphWritePlan } from "./state/graph-write-plan.js";
@@ -287,6 +287,7 @@ async function main() {
   const runtimeDiagnostics = attachRuntimeDiagnostics(sdk, {
     file: process.env.AGENTMEMORY_DIAGNOSTICS_FILE,
     runId: process.env.AGENTMEMORY_DIAGNOSTICS_RUN_ID,
+    packageIdentity: executingPackageIdentity(import.meta.url),
   });
   writeWorkerPidfile();
 

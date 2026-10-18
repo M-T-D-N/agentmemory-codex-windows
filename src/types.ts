@@ -107,6 +107,7 @@ export interface Session {
     initializedAt: string;
     checkedAt?: string;
     issue?: string;
+    recordDiagnostic?: { ordinal: number; byteOffset: number; recordType?: string; payloadType?: string; itemType?: string };
     capturedAfter?: string;
     indexPending?: boolean;
     snapshotBytes?: number;

@@ -238,6 +238,27 @@ export function parseCodexRecord(
     return unknown("unsupported_event_representation");
   }
   if (row.type !== "response_item") return unknown("unsupported_record_type");
+  if (payload.type === "additional_tools") {
+    const toolDeclaration = (value: unknown): boolean => {
+      const pending = [value];
+      while (pending.length) {
+        const tool = asRecord(pending.pop());
+        if (!tool || typeof tool.type !== "string" || !/^[a-z_]{1,64}$/.test(tool.type) ||
+            ["message", "input_text", "output_text"].includes(tool.type) ||
+            ["role", "content", "text", "user_input"].some(key => Object.hasOwn(tool, key))) return false;
+        if (tool.type === "namespace") {
+          if (!identity(tool.name) || !Array.isArray(tool.tools)) return false;
+          for (const item of tool.tools) pending.push(item);
+        }
+      }
+      return true;
+    };
+    if (Object.keys(payload).some(key => !["type", "id", "role", "tools"].includes(key)) ||
+        payload.id !== undefined && payload.id !== null && !identity(payload.id) ||
+        !["developer", "system"].includes(String(payload.role)) || !Array.isArray(payload.tools) ||
+        !payload.tools.every(tool => toolDeclaration(tool))) return unknown("invalid_additional_tools_payload");
+    return excluded("tool_definitions");
+  }
   if (ignoredResponseTypes.has(String(payload.type))) {
     if (payload.type === "function_call" && typeof payload.name === "string" &&
         /(?:^|\.)request_user_input(?:_async)?$/.test(payload.name) && identity(payload.call_id)) {

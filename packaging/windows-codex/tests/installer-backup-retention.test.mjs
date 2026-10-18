@@ -270,3 +270,57 @@ test('pre-engine startup failure is fresh and does not overwrite a live recorded
     await protectedData(f);
   } finally { await cleanup(f); }
 });
+
+const runtimeManifest = revision => ({ release_revision: revision, data_contract_version: 5,
+  package_relative_path: `runtime/0.9.30-codex-${revision}/agentmemory` });
+async function runtimePackage(f, revision) {
+  const directory = path.join(f.root, 'runtime', `0.9.30-codex-${revision}`, 'agentmemory');
+  await mkdir(directory, {recursive:true});
+  await writeFile(path.join(directory,'package.json'),JSON.stringify({version:'0.9.30',agentmemoryDownstream:{dataContractVersion:5}}));
+  return directory;
+}
+function runtimeReview(f, extra='', current='r5', previous='r4') {
+  const r=run(f, `$review=Get-ReleaseBackupRetentionReview -InstallRoot $root -CurrentManifest (${quote(JSON.stringify(runtimeManifest(current)))}|ConvertFrom-Json) -PreviousManifest (${quote(JSON.stringify(runtimeManifest(previous)))}|ConvertFrom-Json) ${extra}; $review|ConvertTo-Json -Depth 10 -Compress`);
+  assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout);
+}
+test('runtime producer protects actual current/predecessor/recovery and unproven legacy identity without deleting packages', {skip:!windows},async()=>{
+  const f=await fixture();
+  try {
+    for(const rev of ['r5','r4','r3','r2','r1']) await runtimePackage(f,rev);
+    for(const [i,rev] of ['r3','r2'].entries()) await backup(f,i+1,runtimeManifest(rev));
+    const pin=path.join(f.root,'runtime','0.9.30-codex-r3','agentmemory');
+    const before=await readdir(path.join(f.root,'runtime'));
+    const review=runtimeReview(f,`-RecoveryPinsReviewed -RecoveryPackagePins @(${quote(pin)})`);
+    const byRevision=new Map(review.runtime_packages.entries.map(e=>[path.basename(e.path),e]));
+    assert.equal(byRevision.get('0.9.30-codex-r5').disposition,'protect_current_release');
+    assert.equal(byRevision.get('0.9.30-codex-r4').disposition,'protect_immediate_predecessor');
+    assert.equal(byRevision.get('0.9.30-codex-r3').disposition,'protect_recovery_pin');
+    assert.equal(byRevision.get('0.9.30-codex-r2').disposition,'older_distinct_maintenance_candidate');
+    assert.equal(byRevision.get('0.9.30-codex-r1').disposition,'protected_unknown');
+    assert.match(byRevision.get('0.9.30-codex-r1').error,/unproven/);
+    assert.equal(review.runtime_packages.automatic_delete,false);
+    assert.deepEqual(await readdir(path.join(f.root,'runtime')),before);
+    await protectedData(f);
+  } finally {await cleanup(f);}
+});
+test('runtime producer leaves unreviewed recovery scope and unknown predecessor protected', {skip:!windows},async()=>{
+  const f=await fixture();
+  try {
+    await runtimePackage(f,'r2');await backup(f,1,runtimeManifest('r2'));
+    assert.equal(runtimeReview(f).runtime_packages.entries[0].disposition,'protect_recovery_scope_unknown');
+    assert.equal(runtimeReview(f,'-RecoveryPinsReviewed','r5','r5').runtime_packages.entries[0].disposition,'distinct_candidate_predecessor_unknown');
+  } finally {await cleanup(f);}
+});
+test('runtime producer protects junction entries and explicitly reports omitted scope even without backup roots', {skip:!windows},async()=>{
+  const f=await fixture();
+  try {
+    await runtimePackage(f,'r5');await runtimePackage(f,'r4');
+    const limited=runtimeReview(f,'-Limit 1');assert.equal(limited.runtime_packages.entries.length,1);assert.equal(limited.runtime_packages.omitted_count,1);
+    const target=path.join(f.temp,'outside-package');await mkdir(target);
+    const link=path.join(f.root,'runtime','0.9.30-codex-r1');
+    const made=run(f,`New-Item -ItemType Junction -Path ${quote(link)} -Target ${quote(target)} | Out-Null`);assert.equal(made.status,0,made.stderr);
+    const entry=runtimeReview(f).runtime_packages.entries.find(e=>e.path.toLowerCase()===link.toLowerCase());
+    assert.equal(entry.disposition,'protected_unknown');assert.match(entry.error,/Reparse/);
+    assert.ok((await readdir(f.temp)).includes('outside-package'));
+  } finally {await cleanup(f);}
+});

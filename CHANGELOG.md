@@ -4,13 +4,21 @@ This file records public releases and unreleased source changes of **AgentMemory
 The upstream AgentMemory release history remains in the
 [upstream repository](https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md).
 
+## 0.1.0-preview.18
+
+- Carry the reviewed r223 implementation with a new public identity; preserve existing preview.17/r216 assets.
+- Support structurally validated Codex additional_tools declarations without skipping unknown or malformed records.
+- Protect Qwen lease lifecycle with cross-process locking, process-start identity and foreground priority.
+- Remove development-only pnpm metadata from installed runtime inputs.
+- Publish updated installation/update/recovery requirements and bounded qualification claims. See [preview.18 instructions](docs/PREVIEW_18.md) and the versioned Release for new exact source/manifest/asset identities and actual verification results. Initial failed runs remain failed history.
+
 ## Unreleased
 
 - Separate development/diagnostic builds from release candidates. Reject release `SkipTests`; bind distribution to matching source inputs, manifest/payload, suite logs, Windows matrix results and confirmed native operating evidence. These release-readiness edits are still undergoing qualification.
 - Share the Windows packaging test inventory between CI and the builder, including the native capture/evidence and PowerShell 5.1 junction regressions.
 - Preserve a structured cursor rejection reason and comparison digests. Account for physical reads and decompression before window parsing, with cooperative time checks and an explicit decoder window bound. Existing cursor/data recovery still requires a proved correspondence plan.
 - Remove generated-secret values from the four unsupported cloud example entrypoints; synthetic first-boot/restart checks do not expand the supported Windows platform matrix.
-- Align current installer instructions with the unpublished preview.17 candidate and distinguish planned asset URLs from the existing public release.
+- Historical preview.17/r216 is published and preserved; current installation instructions use only the matching new preview.18 asset set.
 
 - Resolve legacy server-hook project-mismatch jobs only after matching their exact native turn/content/source and an already stored canonical observation. Keep original project identities and preserve prior error, attempt count and native source linkage in the existing completed-event history; unavailable, missing or conflicting originals stay unresolved.
 - Keep a native session with proved normal user history visible when its retained first-prompt preview is an approval-review delta. Full source initialization repairs that stale preview from the first actual user request and audits the old preview digest/source key; explicit capture exclusions remain authoritative.
