@@ -80,13 +80,13 @@
     "url": "https://github.com/M-T-D-N/agentmemory-codex-windows/issues"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.292",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.309",
     "@anthropic-ai/sdk": "^0.133.0",
     "@clack/prompts": "^1.8.1",
-    "@iii-dev/helpers": "0.22.1",
+    "@iii-dev/helpers": "0.25.0",
     "iii-sdk": "0.22.1",
     "picocolors": "^1.1.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^4.3.1",
@@ -95,10 +95,10 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "tsdown": "^0.21.10",
+    "tsdown": "^0.23.1",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.3",
+    "vitest": "^5.0.5",
     "ws": "8.22.0"
   },
   "overrides": {
