@@ -84,7 +84,7 @@
     "url": "https://github.com/M-T-D-N/agentmemory-codex-windows/issues"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.133.0",
+    "@anthropic-ai/sdk": "^1.3.0",
     "@clack/prompts": "^1.8.1",
     "@iii-dev/helpers": "0.22.1",
     "iii-sdk": "0.22.1",
