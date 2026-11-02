@@ -1,12 +1,6 @@
 # Evaluate AgentMemory for Codex on Windows (agent runbook)
 
-This runbook is for coding agents evaluating the independent
-Technical Preview `0.1.0-preview.19` candidate on native Windows. This candidate
-is unpublished. The exact r269 Windows assets have passed local distribution
-qualification; public-source review, exact-public-commit CI and Release download
-verification remain pending. Published preview.18/r225
-remains available with its fixed instructions; see the
-[candidate status and verification limits](docs/PREVIEW_19.md).
+**Published preview.19/r269.** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) contains four assets whose public downloads were verified by size and SHA-256. Payload build source: `7e66cd75702222aece989ac1c6be4c73aa004e7d`; tag source: `0d9ec592c127eb4c93479452d191b67b0baf3576` with [successful Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290). This subsequent documentation-only main update and its own CI are separate; see the Release for the separate follow-up commit and CI status. The frozen tag and payload are not rebuilt. See [identities and limits](docs/PREVIEW_19.md).
 
 > [!IMPORTANT]
 > Do not install `@agentmemory/*` from npm, run an upstream `npx` command, use
@@ -31,7 +25,7 @@ remains available with its fixed instructions; see the
 
 Run on Windows with PowerShell 5.1 or newer, Node.js 24 or newer, and pnpm
 `11.25.0`, plus Python 3 on PATH for the HTTP regression tests (CI uses 3.12).
-For a published prebuilt installation use the [fixed preview.18 launcher guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md); upstream installation is not a prerequisite.
+For a published prebuilt installation use the [fixed preview.19 launcher guide](packaging/windows-codex/npm/README.md); upstream installation is not a prerequisite.
 For npm 12 remote-TGZ execution, include the command-scoped `--allow-remote=root`
 option shown in the current launcher guide; do not change global npm policy.
 Source builders must use the downstream-patched iii engine `0.22.1`, rebuilt with the pinned patch and toolchain described in the [operating guide](packaging/windows-codex/README.md#storage-acknowledgement-and-crash-qualification). The unmodified upstream binary does not match the required hash.
@@ -47,12 +41,7 @@ deployment then use pnpm `--offline`; missing cached packages fail without
 downloading or updating dependencies. All quality checks still run. A generated
 candidate remains unqualified until Windows and native operating evidence pass.
 
-For this candidate, record the exact clean source commit with `git rev-parse HEAD`
-and use its matching manifest and evidence. No preview.19 tag, asset availability
-or exact-commit CI success is claimed here. For the published product, use the
-[preview.18 release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18)
-and its fixed launcher guide above. Historical tags and assets, including
-preview.17, remain immutable and do not qualify a newer checkout.
+For a new build, record its exact clean source commit with `git rev-parse HEAD` and matching manifest/evidence. [Published preview.19](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) is tied to payload source `7e66cd75` and tag `0d9ec592`, not a later main checkout. Historical tags/assets do not qualify a new build.
 From the repository root:
 
 ```powershell

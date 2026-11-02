@@ -1,6 +1,6 @@
 # Submission verification gates
 
-> **Current local result (2026-11-02):** r269 from `7e66cd75` completed the exact Windows/native/v2/real-Qwen/distribution checks and bounded artifact review. [Final identities, hashes and limits](../../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02) supersede only those unfinished items in the historical checkpoint below. Public source review/CI and publication remain pending. This documentation follow-up is not a rebuild or new approval.
+> **Published result (2026-11-02):** r269 from `7e66cd75` completed the exact Windows/native/v2/real-Qwen/distribution checks and bounded artifact review. [Final identities, hashes and limits](../../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02) supersede only those unfinished items in the historical checkpoint below. Public source review, [exact tag-source CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290), [Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) and four downloaded-asset hashes are confirmed. This later documentation-only follow-up has separate commit/CI evidence in the Release; it is not a rebuild or new approval.
 
 ## Historical pre-r269 qualification checkpoint
 

@@ -1,8 +1,8 @@
 # AgentMemory for Codex on Windows
 
-> **Preview.19/r269 candidate — locally qualified, not published.** The exact Windows payload was built from `7e66cd75702222aece989ac1c6be4c73aa004e7d`; the public-source documentation below is a later overlay, not a new binary build. See [the final local evidence and limits](docs/PREVIEW_19.md#r269-local-qualification-2026-11-02). The [versioned preview.19 Release target](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) is reserved for publication; its existence and exact-public-commit CI success are not yet claimed.
+> **Published preview.19/r269.** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) contains four assets whose public downloads were verified by size and SHA-256. Payload build source: `7e66cd75702222aece989ac1c6be4c73aa004e7d`; tag source: `0d9ec592c127eb4c93479452d191b67b0baf3576` with [successful Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290). This subsequent documentation-only main update and its own CI are separate; see the Release for the separate follow-up commit and CI status. The frozen tag and payload are not rebuilt.
 
-> **Published preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
+> **Historical preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
 
 <p align="center">
   <img src="assets/readme-banner.svg" alt="AgentMemory — independent memory for Codex on Windows, with managed capture, project-scoped recall and provenance" width="1120" />
@@ -32,21 +32,20 @@ and Codex CLI.
 Development note: this downstream is AI-generated and user-tested; [read the
 full disclosure](#ai-development-disclosure).
 
-## Candidate preview.19 (unpublished)
+## Published preview.19 / r269
 
-Current source prepares `0.1.0-preview.19`; qualified local r269 assets exist,
-but public availability and exact-public-commit CI are not claimed. Compatibility remains AgentMemory 0.9.30 / engine and SDK 0.22.1 /
-data contract 5. See [candidate changes, installation/update/recovery and open
-qualification](docs/PREVIEW_19.md). The published preview.18 assets above remain
-unchanged; use their version-pinned guide for an existing public installation.
+The fixed Release supplies the matched ZIP, TGZ launcher, descriptor and checksums.
+Compatibility remains AgentMemory 0.9.30 / engine and SDK 0.22.1 / data contract 5.
+See [changes, installation, update, recovery and bounded qualification](docs/PREVIEW_19.md).
+Historical preview.18 and earlier tags/assets remain unchanged.
 
 ## Start here
 
-The preview.18 release line packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
+The preview.19 release line packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
 
-Preview.18 is a Windows technical preview based on the reviewed r223 implementation. The [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) records the four matching assets and actual CI result for its exact public source; the publication and public-download hash checks are complete. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.18 operating and validation notes](docs/PREVIEW_18.md).
+Preview.19 is the published r269 Windows technical preview. The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) records exact source identities, successful CI, download hashes and limits. Use only its matching launcher and ZIP; previous releases retain their own guides.
 
-1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
+1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
 2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
 3. If a step fails, use [support and recovery guidance](SUPPORT.md). Report the release and failing phase with a short redacted error; do not attach memory databases or credentials.
 
@@ -91,7 +90,7 @@ only an explicit snapshot rebuild refreshes them.
 Release changes are recorded in [CHANGELOG.md](CHANGELOG.md). Source tags
 identify public releases; each build manifest records its own qualification.
 
-## Changes in preview.18
+## Historical changes in preview.18
 
 - Resume native capture across structurally validated `additional_tools` declarations; preserve conservative stops for unknown or malformed content.
 - Serialize Qwen lease lifecycle across processes, verify process-start identity and honor foreground ownership.
@@ -205,7 +204,7 @@ coordination, cursor recovery, and provider limits.
 
 | Identity | Value | Meaning |
 |---|---:|---|
-| Downstream release | `0.1.0-preview.18` | Versioned source tag and pinned installer distribution |
+| Downstream release | `0.1.0-preview.19` | Versioned source tag and pinned installer distribution |
 | AgentMemory compatibility | `0.9.30` | CLI, MCP, package, API, export, and installed-runtime compatibility |
 | Qualification revision | Build manifest | Internal build provenance, not a public version line |
 | iii engine | `0.22.1` | Pinned patched native runtime input, verified by SHA-256 during the build |
@@ -215,8 +214,8 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 
 ## Install without building
 
-Use the matching preview.18 GitHub release ZIP or version-pinned TGZ launcher with the
-[pinned npm/npx installation guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md).
+Use the matching preview.19 GitHub release ZIP or version-pinned TGZ launcher with the
+[pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
 It covers automatic empty-root installation, optional separate preparation/activation,
 managed updates, original upstream adoption, and offline hash verification. The GitHub TGZ can be run with npm without a
 separate npm-registry publication. Users need Windows x64, Node.js 24+, and Codex;
@@ -244,7 +243,7 @@ Use the published version-tag checkout on Windows, then run the release builder 
 The output directory must not already exist.
 
 ```powershell
-git clone --branch v0.1.0-preview.18 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.19 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

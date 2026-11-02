@@ -1,27 +1,23 @@
 # AgentMemory for Codex on Windows
 
-> **Preview.19/r269 candidate — locally qualified, not published.** The exact Windows payload was built from `7e66cd75702222aece989ac1c6be4c73aa004e7d`; the public-source documentation below is a later overlay, not a new binary build. See [the final local evidence and limits](../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02). The [versioned preview.19 Release target](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) is reserved for publication; its existence and exact-public-commit CI success are not yet claimed.
+> **Published preview.19/r269.** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) contains four assets whose public downloads were verified by size and SHA-256. Payload build source: `7e66cd75702222aece989ac1c6be4c73aa004e7d`; tag source: `0d9ec592c127eb4c93479452d191b67b0baf3576` with [successful Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290). This subsequent documentation-only main update and its own CI are separate; see the Release for the separate follow-up commit and CI status. The frozen tag and payload are not rebuilt.
 
-> **Published preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
+> **Historical preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
 
-Current source prepares unpublished `0.1.0-preview.19`. The exact r269 local
-Windows/native/Qwen/distribution checks are complete within the recorded scope;
-public-source review, CI and publication remain pending. See [candidate evidence
-and remaining publication steps](../../docs/PREVIEW_19.md). Published preview.18 remains available through
-its fixed tag and matching assets; do not substitute a development build for it.
+Published preview.19/r269 completed the recorded Windows/native/v2/Qwen/distribution checks, source review, exact-tag-commit CI and public-download hash verification. See [evidence and limits](../../docs/PREVIEW_19.md). Later main documents do not replace frozen assets.
 
-Preview.18 qualification and release identities are summarized in [the operating and validation notes](../../docs/PREVIEW_18.md). The detailed lifecycle commands below remain the authority for installation, cutover, data preservation and recovery.
+Historical preview.18 qualification and release identities are summarized in [the operating and validation notes](../../docs/PREVIEW_18.md). The detailed lifecycle commands below remain the authority for installation, cutover, data preservation and recovery.
 
 [English](README.md) | [한국어 안내](../../READMEs/README.ko-KR.md) | [日本語案内](../../READMEs/README.ja-JP.md)
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview candidate `0.1.0-preview.19`, based on upstream AgentMemory `v0.9.30`. It is not the
+> Preview `0.1.0-preview.19`, based on upstream AgentMemory `v0.9.30`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
 
-The matching preview.18 tag and four release assets are identified by the [preview.18 release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18). Historical preview.16 retains its own immutable guide and assets. Current main documentation corrections do not replace the preview.18 tag, manifests or assets.
+The matching preview.19 tag and four release assets are identified by the [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19). Historical preview.18 and earlier releases retain their immutable guides and assets. This later main documentation does not replace the preview.19 tag, manifest or payload.
 
 This release version identifies the source and independently packaged downstream launcher. Each generated package and
 installed runtime has its own qualification and installation evidence.
@@ -230,14 +226,14 @@ The earlier Windows Library materialization failed while applying xattrs; that
 failure remains in the investigation history. Source assembly alone did not
 qualify a distribution. The later r269 descriptor, manifest and final ZIP now bind
 the exact archive below, with recipient paths and bounded audit reviewed.
-r260 remains fixed and is not relabelled; public availability is still pending.
+r260 remains fixed and is not relabelled. The exact v4 source archive below is included in the published preview.19/r269 Windows ZIP; earlier archives remain unchanged.
 
 ### Current recipient-source input (2026-11-02)
 
 The new partial source archive contains 859 files, 95,754,646 bytes,
 SHA-256 `feb32a6ee7f17de11c9eb9bb6cbf38ff497d9d55a6cc3927e911ddbfabb7029d`.
-Its descriptor pins these bytes inside the locally qualified r269 Windows ZIP.
-It is not yet published. The earlier v2/v3 archives and r267 candidate are unchanged.
+Its descriptor pins these bytes inside the published preview.19/r269 Windows ZIP.
+The earlier v2/v3 archives and r267 candidate remain unchanged.
 
 The archive retains 855 source/notice files byte-for-byte, including the nine
 component archives, GVDB, 167 base and 17 conditional AVIF Rust crates. It keeps
@@ -276,7 +272,7 @@ The r269 Windows payload's GUID exclusion and exact source archive were checked
 separately; this native source archive contains no guid-typescript. The final
 local Windows/native/Qwen and distribution evidence is recorded in
 [the r269 qualification](../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02).
-Public-source CI and recipient access through a published Release remain pending.
+Tag source `0d9ec592` passed Windows CI `41381747290` and preview.19 is published. This later documentation follow-up has separate commit/CI evidence in the Release.
 
 ### Recipient reconstruction needs complete build repositories
 
@@ -401,7 +397,7 @@ from installed qualification and preserves the current engine/data contracts.
 The preview is intentionally narrow:
 
 - The public downstream release identity is **AgentMemory for Codex on Windows
-  `0.1.0-preview.18`**; `agentmemory-codex-windows` is the intended repository
+  `0.1.0-preview.19`**; `agentmemory-codex-windows` is the intended repository
   name.
 - Package, API, export, CLI, and MCP compatibility continue to use upstream
   AgentMemory `0.9.30` and the `agentmemory` identifier. These are not the
@@ -502,8 +498,8 @@ commit run:
 
 ```powershell
 & .\packaging\windows-codex\Build-NpmDistribution.ps1 `
-  -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.18 `
-  -OutputDirectory D:\staging\npm-preview18 `
+  -ReleaseRoot D:\staging\build\agentmemory-codex-windows-0.1.0-preview.19 `
+  -OutputDirectory D:\staging\npm-preview19 `
   -QualificationPath D:\staging\build\qualification.json
 ```
 
@@ -683,8 +679,9 @@ Later WINDOWS35 and NATIVE56 separately established fixed r267's Windows
 four-scenario and isolated native/v2 results, including owned-resource cleanup;
 see the [current candidate evidence](../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02).
 The later exact r269 candidate also passed its separately recorded Windows,
-native/v2, real operating/Qwen and distribution checks. Public-source review,
-exact-public-commit CI and publication remain pending. No default installer
+native/v2, real operating/Qwen and distribution checks. Tag source `0d9ec592`
+passed Windows CI `41381747290` and preview.19 is published. This later documentation
+follow-up has separate commit/CI evidence. No default installer
 failure seam was added, and the synthetic coordinator itself does not execute
 real installation or cleanup actions.
 
@@ -791,8 +788,8 @@ the directory holding the project registry is not necessarily that root. Existin
 hosts without LocalAI and fresh installations may still omit this integration.
 
 ```powershell
-& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.18\Install-WindowsCodex.ps1 `
-  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.18 `
+& D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.19\Install-WindowsCodex.ps1 `
+  -ReleaseRoot D:\staging\agentmemory-codex\agentmemory-codex-windows-0.1.0-preview.19 `
   -InstallRoot D:\services\AgentMemoryCodex `
   -WorkspaceRoot D:\workspaces\example `
   -ProjectRegistry D:\workspaces\example\.workspace\config\project-repositories.json `

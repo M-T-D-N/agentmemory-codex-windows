@@ -1,9 +1,6 @@
-# Preview.19 candidate: identity, use and qualification
+# Preview.19 / r269: identity, use and qualification
 
-**Status: unpublished candidate.** Source prepares `0.1.0-preview.19`; no new
-GitHub tag, release or downloadable asset is claimed; qualified local assets are listed below. Published preview.18/r225 and its
-[fixed instructions](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md)
-remain unchanged. Do not combine historical assets with this candidate.
+**Published preview.19/r269.** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) contains four assets whose public downloads were verified by size and SHA-256. Payload build source: `7e66cd75702222aece989ac1c6be4c73aa004e7d`; tag source: `0d9ec592c127eb4c93479452d191b67b0baf3576` with [successful Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290). This subsequent documentation-only main update and its own CI are separate; see the Release for the separate follow-up commit and CI status. The frozen tag and payload are not rebuilt.
 
 ## Identity and changes
 
@@ -88,11 +85,13 @@ the Windows account that runs Codex. This remains an unsigned Technical Preview.
 Local Qwen is optional, separately installed and loopback-only; other LLM
 capabilities and external fallbacks remain disabled in the supported profile.
 
-Once all release gates below pass, use only the matching four assets:
+Use only the four matching published preview.19 assets listed below:
 `agentmemory-codex-windows-0.1.0-preview.19-win32-x64.zip`,
 `agentmemory-codex-windows-0.1.0-preview.19.tgz`, `release.json`, and `SHA256SUMS.txt`.
-The [candidate launcher guide](../packaging/windows-codex/npm/README.md) contains
-version-pinned commands. Its future download URLs are not evidence of publication.
+Follow the [launcher guide](../packaging/windows-codex/npm/README.md) and verify
+their hashes before execution. Its TGZ/ZIP URLs remain version-pinned. Any new
+source build requires its own exact-source qualification; these published results
+do not qualify changed bytes.
 
 Preview the exact operation first. For an empty target, the qualified installer
 prepares, activates and validates. For an owned managed update, use the same root
@@ -120,11 +119,9 @@ rewrite arbitrary observations, or a data-recovery command.
 
 ## r269 local qualification (2026-11-02)
 
-This is a locally qualified, **unpublished** Windows technical preview. Public
-source review, exact-public-commit Windows CI, the tag/Release and download-hash
-verification remain pending. Existing preview.18 and earlier assets are preserved.
-The future versioned Release will record those public identities and CI links
-only after they exist. A source or documentation commit is not a new binary build.
+Published [preview.19](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) tag `0d9ec592` passed [Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290): source 4,524 passed/31 skipped, adapter 7 passed, packaging 526 passed, typecheck/build passed. This CI uses synthetic services and is distinct from actual Windows/native/Qwen evidence below.
+
+Public snapshot `a4e9aba67d3db75e3fe584d01f68881589f1c932` had [failed CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41377263454): source 4,511 passed/3 failed/31 skipped; adapter/packaging did not run. The tag adds three test-file changes for tracked fixture teardown and Windows helper time budgets. Local regression passed 75/75 with typecheck. The original remote canary failure sequence remains unconfirmed. Subsequent main documentation has separate commit/CI evidence in the Release; neither follow-up rebuilds the payload.
 
 | Identity | Fixed value |
 |---|---|
@@ -137,7 +134,7 @@ only after they exist. A source or documentation commit is not a new binary buil
 The public repository has separate history. Its source snapshot matches that
 workspace commit for included product files; this later documentation overlay
 reports completed qualification without replacing the immutable candidate's
-build-time records. The final public commit and its CI must be recorded separately.
+build-time records. The tag includes the test-only repair; later main documentation has separate CI.
 
 Actual checks on one Windows x64 host, using Node.js 24.22.2:
 
@@ -170,14 +167,14 @@ Actual checks on one Windows x64 host, using Node.js 24.22.2:
   source. Earlier native/discovery/encoding/execution-policy failures likewise
   retain their original outcomes rather than being relabeled successful.
 
-Local assets (future Release URLs are not yet verified downloads):
+Published assets (all four downloaded sizes and SHA-256 values verified on 2026-11-02):
 
 | Asset | Bytes | SHA-256 |
 |---|---:|---|
-| `agentmemory-codex-windows-0.1.0-preview.19-win32-x64.zip` | 277941639 | `e188f74f2880055927eb1fd5fb2a694fb3c72c38ba5d53e6fc9edd9fa63fd977` |
-| `agentmemory-codex-windows-0.1.0-preview.19.tgz` | 66854 | `1c12cbe9491e44822b6a94c29595190525920bc9a128358bff4fbf5981f58d8c` |
-| `release.json` | 564 | `9c1d50daebe86c4033b61c1371e94bfcd067b4aaa845f2d2739f16249d94d144` |
-| `SHA256SUMS.txt` | 315 | `c7f51fdee0b352b02839a6cd92db662b1bfc37ada9d1a0d65fa3d29d35cf96c8` |
+| [agentmemory-codex-windows-0.1.0-preview.19-win32-x64.zip](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.19/agentmemory-codex-windows-0.1.0-preview.19-win32-x64.zip) | 277941639 | `e188f74f2880055927eb1fd5fb2a694fb3c72c38ba5d53e6fc9edd9fa63fd977` |
+| [agentmemory-codex-windows-0.1.0-preview.19.tgz](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.19/agentmemory-codex-windows-0.1.0-preview.19.tgz) | 66854 | `1c12cbe9491e44822b6a94c29595190525920bc9a128358bff4fbf5981f58d8c` |
+| [release.json](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.19/release.json) | 564 | `9c1d50daebe86c4033b61c1371e94bfcd067b4aaa845f2d2739f16249d94d144` |
+| [SHA256SUMS.txt](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/download/v0.1.0-preview.19/SHA256SUMS.txt) | 315 | `c7f51fdee0b352b02839a6cd92db662b1bfc37ada9d1a0d65fa3d29d35cf96c8` |
 
 All 11,272 Windows ZIP files matched the fixed manifest and previously reviewed
 exact bytes. All ZIP entry types passed the installer's type mask. The nine-file
@@ -347,11 +344,7 @@ new observation and source key. Mocks or historical operating results cannot
 replace any of those records. The distributor must remain closed when they are
 missing or stale; do not set synthetic success fields or skip mandatory tests.
 
-**Current local result:** the exact r269 Windows matrix, native/v2 check,
-real-Qwen operating receipt and final distribution assets are qualified within
-the [recorded scope](#r269-local-qualification-2026-11-02). Public-source final
-review, exact-public-commit CI, tag/Release and downloaded-asset verification
-remain pending. This is not a claim that publication has occurred.
+**Current result:** The r269 Windows/native/v2/Qwen/distribution evidence, source review, exact-tag-commit CI, Release and public-download checks are complete within the [recorded scope](#r269-local-qualification-2026-11-02). Later documentation and its CI do not replace payload qualification.
 
 The independent synthetic suites and payload import smoke retain their narrower
 scope; they do not claim equivalence to removed historical tests. Removed files

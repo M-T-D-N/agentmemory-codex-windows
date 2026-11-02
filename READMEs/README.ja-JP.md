@@ -1,13 +1,13 @@
 # Windows向け Codex AgentMemory
 
-> **Preview.19/r269 候補 — ローカル検証済み、未公開。** Windows payload の build source は `7e66cd75702222aece989ac1c6be4c73aa004e7d` です。この公開ソースの文書修正は後続変更であり、同じバイナリの新しい build source ではありません。[実測結果・hash・制限](../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02)をご確認ください。[preview.19 Release の固定URL](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19)は公開予定先で、資産の公開や公開commitのCI成功はまだ確認されていません。
+> **Preview.19/r269 公開済み。** [固定 Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19)の4資産を取得し、サイズと SHA-256 を確認しました。Payload build source は `7e66cd75702222aece989ac1c6be4c73aa004e7d`、公開tag source は `0d9ec592c127eb4c93479452d191b67b0baf3576`で、[対応する Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290)は成功しています。後続のmain文書専用commitとCIは別に扱い、確定結果はReleaseに記録します。固定tagとバイナリは再ビルドしません。[検証範囲と制限](../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02)をご確認ください。
 
-> **Preview.18/r225 公開済み:** [固定 Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) に検証済みの4資産・hash・インストール案内があります。配布tagは `6359546a`、payload sourceは `3632849b` です。公開後のmain文書commitとそのCIは別であり、既存バイナリのbuild sourceは変更しません。
+> **過去の preview.18/r225:** [固定 Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) に検証済みの4資産・hash・インストール案内があります。配布tagは `6359546a`、payload sourceは `3632849b` です。公開後のmain文書commitとそのCIは別であり、既存バイナリのbuild sourceは変更しません。
 
 
-> **未公開 preview.19 候補:** 現在のソースは `0.1.0-preview.19` を準備しています。r269 のローカル配布物は検証済みですが、GitHub公開は未完了です。互換性 0.9.30 / engine・SDK 0.22.1 / data contract 5 は維持します。[候補の変更・導入・更新・復旧・未検証範囲](../docs/PREVIEW_19.md)を確認してください。公開済み preview.18 の固定ガイドは保持します。
+> **公開版 preview.19:** 互換性 0.9.30 / engine・SDK 0.22.1 / data contract 5 は維持します。[変更・導入・更新・復旧・検証範囲](../docs/PREVIEW_19.md)をご確認ください。過去の公開版は固定ガイドとともに保持します。
 
-## Preview.18: operating and validation notes
+## Historical preview.18: operating and validation notes
 
 See the [preview.18 guide](../docs/PREVIEW_18.md) for supported installation paths, update/removal/recovery, exact qualification scope, checksums and limitations. The reviewed r223 baseline has 4,618 passes and 38 existing skips. Published preview.18/r225 source, Windows/operating results and hashes are recorded in its fixed Release, separately from that baseline. Check CI for the exact published source and all four matching release assets.
 
@@ -22,11 +22,11 @@ AgentMemory ダウンストリームです。
 
 [English](../README.md) | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md)
 
-[インストールガイド](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md) · [運用ガイド](../packaging/windows-codex/README.md) · [検証範囲](#検索フィルタインデックスと検証範囲) · [リリース変更](../CHANGELOG.md)
+[インストールガイド](../packaging/windows-codex/npm/README.md) · [運用ガイド](../packaging/windows-codex/README.md) · [検証範囲](#検索フィルタインデックスと検証範囲) · [リリース変更](../CHANGELOG.md)
 
 > [!IMPORTANT]
 > このリポジトリは、独立した Technical Preview
-> 未公開候補 `0.1.0-preview.19` のソースです。
+> 公開版 `0.1.0-preview.19` のソースです。
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30` を基に
 > していますが、公式アップストリームリポジトリでも、`@agentmemory/*` の
 > npm リリースでもなく、アップストリームによるサポートを約束するものでも
@@ -39,7 +39,7 @@ AgentMemory ダウンストリームです。
 
 ## はじめに
 
-1. Windows x64、Node.js 24+、Windows PowerShell 5.1、Codex desktop を確認し、[固定バージョンのインストールガイド](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md)に従ってください。ビルド済みランタイムを配布しており、ソースビルドは任意です。
+1. Windows x64、Node.js 24+、Windows PowerShell 5.1、Codex desktop を確認し、[固定バージョンのインストールガイド](../packaging/windows-codex/npm/README.md)に従ってください。ビルド済みランタイムを配布しており、ソースビルドは任意です。
 2. dry-run で対象を確認し、`--execute` で適用します。空の対象は既定の経路で準備・有効化・サービス確認まで進みます。`--fresh` と `--activate-prepared` で段階を分けることもできます。確認後に Codex MCP を接続します。
 3. 失敗した場合は[サポート案内](../SUPPORT.md)に従い、バージョン・失敗した段階・機密情報を除いた短いエラーを報告してください。メモリデータベースや認証情報は添付しないでください。
 
@@ -143,7 +143,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 
 | 区分 | 値 | 意味 |
 |---|---:|---|
-| ダウンストリーム公開版 | `0.1.0-preview.18` | 公開済みソース tag とバージョン固定のインストール資産 |
+| ダウンストリーム公開版 | `0.1.0-preview.19` | 公開済みソース tag とバージョン固定のインストール資産 |
 | AgentMemory 互換版 | `0.9.30` | CLI、MCP、package、API、export、インストール済み runtime の互換性 |
 | 検証リビジョン | Build manifest | 内部 build provenance。公開バージョン系列ではありません |
 | iii engine | `0.22.1` | ビルド時に SHA-256 を検証する固定 Windows 入力 |
@@ -160,7 +160,7 @@ policy や汎用 GPU/RAM 閾値を配布しません。provider 不要の手動 
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)
   の SHA-256 と一致する、ダウンストリーム修正済み iii engine `0.22.1` Windows 実行ファイル
 
-対応する preview.18 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md)からビルドなしで導入できます。対応する tag、全4資産、チェックサムと実際のCI結果をReleaseで確認してから導入してください。既存の公開 preview.16 は、その版に付属するガイドを使い、異なる版のランチャーと ZIP を混在させないでください。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
+対応する preview.19 の GitHub Release の ZIP またはバージョン固定 TGZ を使い、[npm/npx インストール案内](../packaging/windows-codex/npm/README.md)からビルドなしで導入できます。対応する tag、全4資産、チェックサムと実際のCI結果をReleaseで確認してから導入してください。既存の公開 preview.16 は、その版に付属するガイドを使い、異なる版のランチャーと ZIP を混在させないでください。GitHub TGZ は npm レジストリへの別途公開なしで npm から実行できます。Windows x64 と Node.js 24 以上が必要です。バイナリは Authenticode 署名されておらず、固定 SHA-256 と manifest で整合性を確認します。
 
 npm 12 はリモート TGZ を既定で拒否します。インストールコマンドの
 `--allow-remote=root` は指定したランチャーをその呼び出しで許可し、
@@ -172,7 +172,7 @@ npm 12 はリモート TGZ を既定で拒否します。インストールコ�
 いけません。
 
 ```powershell
-git clone --branch v0.1.0-preview.18 https://github.com/M-T-D-N/agentmemory-codex-windows.git
+git clone --branch v0.1.0-preview.19 https://github.com/M-T-D-N/agentmemory-codex-windows.git
 Set-Location agentmemory-codex-windows
 
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `

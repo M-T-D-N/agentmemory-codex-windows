@@ -1,12 +1,7 @@
-# AgentMemory for Codex on Windows — preview.19 candidate installer
+# AgentMemory for Codex on Windows — preview.19 installer
 
-> **Unpublished candidate:** These are instructions for the matching preview.19
-> launcher after its ZIP, TGZ, descriptor and checksums pass distribution
-> qualification. No preview.19 assets are currently claimed. Until publication,
-> use the [fixed preview.18 guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md)
-> for its existing assets. See [candidate qualification and limits](../../../docs/PREVIEW_19.md).
-> This guide is a documentation follow-up. The immutable TGZ retains its build-time
-> candidate guide; payload source `7e66cd75` and its artifact hashes remain unchanged.
+> **Published preview.19/r269.** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) contains four assets whose public downloads were verified by size and SHA-256. Payload build source: `7e66cd75702222aece989ac1c6be4c73aa004e7d`; tag source: `0d9ec592c127eb4c93479452d191b67b0baf3576` with [successful Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290). This subsequent documentation-only main update and its own CI are separate; see the Release for the separate follow-up commit and CI status. The frozen tag and payload are not rebuilt.
+> The immutable TGZ retains its build-time candidate guide. Historical preview.18 retains its fixed guide. See [qualification and limits](../../../docs/PREVIEW_19.md).
 
 The independent downstream bundles AgentMemory 0.9.30 and the patched iii
 engine/SDK 0.22.1. You do not need to install upstream first. This launcher
@@ -71,7 +66,7 @@ prepared payload; it rolls back only the registrations/requirements it created.
 Managed updates retain existing operational settings and a predecessor
 code/config backup. Data-contract changes can prevent automatic binary rollback:
 a code/config archive alone does not restore data. Follow the
-[operating recovery guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.19/packaging/windows-codex/README.md#existing-install-cutover).
+[operating recovery guide](../README.md#existing-install-cutover).
 
 ## Adopt an existing original upstream installation
 
@@ -110,7 +105,7 @@ Local Qwen is optional and is not installed by this package. A configured
 existing Windows LocalAI integration may receive conditional startup requests
 for graph backlog. Other LLM features remain disabled in this profile. See
 [Codex MCP documentation](https://developers.openai.com/codex/mcp) and the
-[full operating guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.19/packaging/windows-codex/README.md) for provider scope, privacy and recovery.
+[full operating guide](../README.md) for provider scope, privacy and recovery.
 
 ## Offline use and verification limits
 
@@ -125,4 +120,4 @@ See [third-party notices](https://github.com/M-T-D-N/agentmemory-codex-windows/b
 SHA-256 verifies integrity, not Authenticode signing or independent audit.
 Most downstream changes were generated with OpenAI Codex. Validation consists
 of automated checks and selected real flows on the owner's Windows host;
-see [release qualification and limits](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.19/docs/PREVIEW_19.md#evidence-required-before-distribution).
+see [release qualification and limits](../../../docs/PREVIEW_19.md#evidence-required-before-distribution).

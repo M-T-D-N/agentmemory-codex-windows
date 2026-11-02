@@ -12,9 +12,9 @@ The upstream AgentMemory release history remains in the
 - Remove development-only pnpm metadata from installed runtime inputs.
 - Publish updated installation/update/recovery requirements and bounded qualification claims. See [preview.18 instructions](docs/PREVIEW_18.md) and the versioned Release for new exact source/manifest/asset identities and actual verification results. Initial failed runs remain failed history.
 
-## Unreleased — preview.19/r269 candidate
+## 0.1.0-preview.19 / r269 — 2026-11-02
 
-- Locally qualified r269 is built from workspace source `7e66cd75702222aece989ac1c6be4c73aa004e7d`. This public documentation overlay is separate from the immutable payload source; public commit CI, tag/Release and downloaded asset hashes remain pending.
+- **Published preview.19/r269.** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) contains four assets whose public downloads were verified by size and SHA-256. Payload build source: `7e66cd75702222aece989ac1c6be4c73aa004e7d`; tag source: `0d9ec592c127eb4c93479452d191b67b0baf3576` with [successful Windows CI](https://github.com/M-T-D-N/agentmemory-codex-windows/actions/runs/41381747290). This subsequent documentation-only main update and its own CI are separate; see the Release for the separate follow-up commit and CI status. The frozen tag and payload are not rebuilt.
 - Exact Windows fresh installation, managed update, normal restart and fixed pre-start I/O failure recovery passed with synthetic preservation. Native/v2 and actual Qwen automatic capture/search/graph/source checks passed separately; the seven-stage operating result has a confirmed receipt and official consume.
 - The final distribution verifier and bounded source/payload/archive audit passed. Initial failed executions, 35 source-suite skips, partial native-source reconstruction and small-sample limits remain explicit. Full identities, four asset hashes and recovery limits are in [r269 local qualification](docs/PREVIEW_19.md#r269-local-qualification-2026-11-02).
 
@@ -60,7 +60,7 @@ The upstream AgentMemory release history remains in the
 
 - Expose allowlisted cursor diagnostics in read-only status and retain safe native discovery failure categories without source text or paths. Keep cursor protection and explicit correspondence verification unchanged. Add synthetic identity/content/truncation/retry regressions and an isolated host-lifecycle → graph extraction → idle-release test. See [verification scope](docs/CURSOR_AND_QWEN_VERIFICATION.md).
 
-- Separate development/diagnostic builds from release candidates. Reject release `SkipTests`; bind distribution to matching source inputs, manifest/payload, suite logs, Windows matrix results and confirmed native operating evidence. Their fixed r269 local qualification is recorded above; public CI and publication remain separate pending steps.
+- Separate development/diagnostic builds from release candidates. Reject release `SkipTests`; bind distribution to matching source inputs, manifest/payload, suite logs, Windows matrix results and confirmed native operating evidence. Their fixed r269 local qualification is recorded above; public CI and downloaded-asset verification are separately recorded in the Release.
 - Share the Windows packaging test inventory between CI and the builder, including the native capture/evidence and PowerShell 5.1 junction regressions.
 - Preserve a structured cursor rejection reason and comparison digests. Account for physical reads and decompression before window parsing, with cooperative time checks and an explicit decoder window bound. Existing cursor/data recovery still requires a proved correspondence plan.
 - Remove generated-secret values from the four unsupported cloud example entrypoints; synthetic first-boot/restart checks do not expand the supported Windows platform matrix.
