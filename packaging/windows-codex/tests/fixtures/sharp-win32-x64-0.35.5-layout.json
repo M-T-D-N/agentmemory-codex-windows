@@ -1,0 +1,20 @@
+{
+  "revision": "r254",
+  "manifest_sha256": "86625a2bd94361b806c1e567a0da0831ad5521609c84d05932fc47c9baa82d73",
+  "package_json": {
+    "text": "{\r\n  \"name\": \"@img/sharp-win32-x64\",\r\n  \"version\": \"0.35.5\",\r\n  \"description\": \"Prebuilt sharp for use with Windows x64\",\r\n  \"author\": \"Lovell Fuller <npm@lovell.info>\",\r\n  \"homepage\": \"https://sharp.pixelplumbing.com\",\r\n  \"repository\": {\r\n    \"type\": \"git\",\r\n    \"url\": \"git+https://github.com/lovell/sharp.git\",\r\n    \"directory\": \"npm/win32-x64\"\r\n  },\r\n  \"license\": \"Apache-2.0 AND LGPL-3.0-or-later\",\r\n  \"funding\": {\r\n    \"url\": \"https://opencollective.com/libvips\"\r\n  },\r\n  \"preferUnplugged\": true,\r\n  \"files\": [\r\n    \"index.cjs\",\r\n    \"lib\",\r\n    \"versions.json\"\r\n  ],\r\n  \"publishConfig\": {\r\n    \"access\": \"public\"\r\n  },\r\n  \"type\": \"commonjs\",\r\n  \"exports\": {\r\n    \"./sharp.node\": \"./index.cjs\",\r\n    \"./package\": \"./package.json\",\r\n    \"./versions\": \"./versions.json\"\r\n  },\r\n  \"engines\": {\r\n    \"node\": \">=20.9.0\"\r\n  },\r\n  \"os\": [\r\n    \"win32\"\r\n  ],\r\n  \"cpu\": [\r\n    \"x64\"\r\n  ]\r\n}\r\n",
+    "sha256": "697b3d89590e3b988b51764bd22dfd6f4a1b35cd4eb12c664eca7987e8ee6115",
+    "size_bytes": 888
+  },
+  "index_cjs": {
+    "text": "module.exports = require('./lib/sharp-win32-x64-0.35.5.node');",
+    "sha256": "6ecbd583f45e914233410fe83a614e4f5ff1a6875a7eb828b03b7258e8ba6944",
+    "size_bytes": 62
+  },
+  "native_inventory_entry": {
+    "path": "runtime/0.9.30-codex-r254/agentmemory/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64-0.35.5.node",
+    "size_bytes": 443904,
+    "sha256": "971048779f9c8598df14641dfc03c625885c93f473a788e65ca2deb50d0b083e"
+  },
+  "scope": "Read-only captured package metadata/index and previously verified inventory; native module not read into a runtime, loaded or executed."
+}

@@ -441,12 +441,79 @@ function Test-OwnedProcess {
     }
 }
 
+function Request-OwnedGracefulStop {
+    param($Process, $Identity, [string]$ExpectedToken)
+    $publishAttempted = $false
+    try {
+        if (-not (Test-OwnedProcess -Process $Process -Identity $Identity)) { return 'identity_changed' }
+        if (Test-StopRequest -WorkerPid ([int]$Identity.pid) -ExpectedToken $ExpectedToken) { return 'delivered' }
+        $temporaryPath = "$stopPath.$PID.tmp"
+        $request = [ordered]@{ schema_version = 1; token = $ExpectedToken; worker_pid = [int]$Identity.pid; requested_at_utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json
+        [IO.File]::WriteAllText($temporaryPath, $request, (New-Object Text.UTF8Encoding($false)))
+        if (-not (Test-OwnedProcess -Process $Process -Identity $Identity)) { return 'identity_changed' }
+        $publishAttempted = $true
+        Move-Item -LiteralPath $temporaryPath -Destination $stopPath -Force -ErrorAction Stop
+        return 'delivered'
+    }
+    catch {
+        if (Test-StopRequest -WorkerPid ([int]$Identity.pid) -ExpectedToken $ExpectedToken) { return 'delivered' }
+        if ($publishAttempted) { return 'uncertain' }
+        return 'not_delivered'
+    }
+}
+
+function Update-OwnedStopDelivery {
+    param($Process, $Identity, [string]$ExpectedToken, [hashtable]$State, [DateTime]$NowUtc = [DateTime]::UtcNow)
+    $Process.Refresh()
+    if ($Process.HasExited) { $State.delivery = 'exited'; return }
+    if (-not (Test-OwnedProcess -Process $Process -Identity $Identity)) { $State.delivery = 'identity_changed'; return }
+    if (Test-StopRequest -WorkerPid ([int]$Identity.pid) -ExpectedToken $ExpectedToken) { $State.delivery = 'delivered'; return }
+    if ($State.delivery -in @('delivered','uncertain','failed','identity_changed') -or $NowUtc -lt $State.next_attempt_utc) { return }
+    $State.attempts++
+    $State.delivery = Request-OwnedGracefulStop -Process $Process -Identity $Identity -ExpectedToken $ExpectedToken
+    $State.next_attempt_utc = $NowUtc.AddSeconds(1)
+    if ($State.delivery -eq 'not_delivered' -and $State.attempts -ge 3) { $State.delivery = 'failed' }
+}
+
+function Write-OwnedShutdownWarning {
+    param([string]$Message)
+    try { Write-Warning -Message $Message -WarningAction Continue } catch {}
+}
+
+function Continue-OwnedShutdown {
+    param($Process, $Identity, $EngineIdentity, [string]$ExpectedToken, [hashtable]$State, [string]$Reason)
+    $previous = "$($State.delivery):$($State.attempts)"
+    try {
+        Update-OwnedStopDelivery -Process $Process -Identity $Identity -ExpectedToken $ExpectedToken -State $State
+    }
+    catch {
+        $State.delivery = 'uncertain'
+        Write-OwnedShutdownWarning 'Owned shutdown identity or delivery could not be inspected; runtime is preserved.'
+    }
+    if ($previous -cne "$($State.delivery):$($State.attempts)") {
+        Write-OwnedShutdownWarning "Owned shutdown delivery: $($State.delivery), attempts=$($State.attempts). Runtime is preserved until clean worker exit."
+        try {
+            Write-RuntimeState -Status 'active' -EngineIdentity $EngineIdentity -WorkerIdentity $Identity -TerminalReason $Reason -ShutdownRequest $State
+        }
+        catch {
+            Write-OwnedShutdownWarning 'Owned shutdown progress could not be persisted; runtime is preserved.'
+        }
+    }
+}
+
+function Assert-OwnedWorkerStoppedCleanly {
+    param([int]$ExitCode, [bool]$StopRequested)
+    if ($ExitCode -ne 0) { throw "AgentMemory worker exited with code $ExitCode." }
+    if (-not $StopRequested) { throw 'AgentMemory worker exited without an authenticated stop request.' }
+}
+
 function Stop-OwnedProcess {
     param(
         [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
         [Parameter(Mandatory = $true)]$Identity,
         [string]$GracefulStopPath,
-        [string]$GracefulStopToken
+        [string]$GracefulStopToken,
+        [switch]$PreserveUnconfirmed
     )
     if (-not (Test-OwnedProcess -Process $Process -Identity $Identity)) {
         return
@@ -472,6 +539,7 @@ function Stop-OwnedProcess {
             return
         }
     }
+    if ($PreserveUnconfirmed) { return }
     if (Test-OwnedProcess -Process $Process -Identity $Identity) {
         $Process.Kill()
         [void]$Process.WaitForExit(5000)
@@ -632,7 +700,8 @@ function Write-RuntimeState {
         $EngineIdentity,
         $WorkerIdentity,
         [string]$ErrorMessage,
-        [string]$TerminalReason
+        [string]$TerminalReason,
+        [AllowNull()][object]$ShutdownRequest = $null
     )
     if ($Status -eq 'failed' -and -not $EngineIdentity -and -not $WorkerIdentity -and (Test-Path -LiteralPath $statePath -PathType Leaf)) {
         $previousState = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
@@ -659,6 +728,7 @@ function Write-RuntimeState {
         engine = $EngineIdentity
         worker = $WorkerIdentity
         error_message = $ErrorMessage
+        shutdown_request = if ($ShutdownRequest) { [ordered]@{ requested_at_utc = $ShutdownRequest.requested_at_utc; delivery = $ShutdownRequest.delivery; attempts = $ShutdownRequest.attempts } } else { $null }
     }
     $temporaryPath = "$statePath.$PID.tmp"
     $state | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
@@ -707,6 +777,7 @@ $terminalStatus = 'inactive'
 $terminalError = $null
 $terminalReason = $null
 $explicitStopRequested = $false
+$stopDelivery = $null
 $stopToken = Get-StopToken -RunId $runId -DaemonPid $PID
 
 if (Test-Path -LiteralPath $stopPath -PathType Leaf) {
@@ -784,12 +855,16 @@ try {
     $cachedLeaseState = $null
     $runtimeHealth = @{ LastProbeUtc = [DateTime]::UtcNow; ConsecutiveFailures = 0 }
     while (-not $worker.WaitForExit(250)) {
+        if ($explicitStopRequested) {
+            Continue-OwnedShutdown -Process $worker -Identity $workerIdentity -EngineIdentity $engineIdentity -ExpectedToken $stopToken -State $stopDelivery -Reason $terminalReason
+            continue
+        }
         if (Test-StopRequest -WorkerPid $worker.Id -ExpectedToken $stopToken) {
             $explicitStopRequested = $true
             $terminalReason = 'authenticated_external_stop'
-            Stop-OwnedProcess -Process $worker -Identity $workerIdentity -GracefulStopPath $stopPath -GracefulStopToken $stopToken
-            if (-not $worker.HasExited) { throw 'The owned worker did not stop after an authenticated request.' }
-            break
+            $stopDelivery = @{ requested_at_utc = [DateTime]::UtcNow.ToString('o'); delivery = 'pending'; attempts = 0; next_attempt_utc = [DateTime]::MinValue }
+            Continue-OwnedShutdown -Process $worker -Identity $workerIdentity -EngineIdentity $engineIdentity -ExpectedToken $stopToken -State $stopDelivery -Reason $terminalReason
+            continue
         }
         if (Test-RuntimeRecoveryDue -State $runtimeHealth -Now ([DateTime]::UtcNow)) {
             Save-RuntimeStallEvidence -LogsPath $logsPath -RunId $runId -Worker $worker -WorkerIdentity $workerIdentity -Engine $engine -EngineIdentity $engineIdentity
@@ -828,11 +903,9 @@ try {
                         if ($consumerRecheck.State -eq 'Absent') {
                             $explicitStopRequested = $true
                             $terminalReason = 'codex_desktop_window_absent'
-                            Stop-OwnedProcess -Process $worker -Identity $workerIdentity -GracefulStopPath $stopPath -GracefulStopToken $stopToken
-                            if (-not $worker.HasExited) {
-                                throw 'AgentMemory did not stop after all Codex consumers exited.'
-                            }
-                            break
+                            $stopDelivery = @{ requested_at_utc = [DateTime]::UtcNow.ToString('o'); delivery = 'pending'; attempts = 0; next_attempt_utc = [DateTime]::MinValue }
+                            Continue-OwnedShutdown -Process $worker -Identity $workerIdentity -EngineIdentity $engineIdentity -ExpectedToken $stopToken -State $stopDelivery -Reason $terminalReason
+                            continue
                         }
                         $consumerAbsentSince = $null
                     }
@@ -850,12 +923,7 @@ try {
         $explicitStopRequested = $true
         $terminalReason = 'authenticated_external_stop'
     }
-    if ($worker.ExitCode -ne 0) {
-        throw "AgentMemory worker exited with code $($worker.ExitCode)."
-    }
-    if (-not $explicitStopRequested) {
-        throw 'AgentMemory worker exited without an authenticated stop request.'
-    }
+    Assert-OwnedWorkerStoppedCleanly -ExitCode $worker.ExitCode -StopRequested $explicitStopRequested
 }
 catch {
     $terminalStatus = 'failed'
@@ -876,7 +944,7 @@ finally {
         $engineLaunch.Dispose()
     }
     if ($engineIdentity -or $workerIdentity -or $terminalStatus -eq 'failed') {
-        Write-RuntimeState -Status $terminalStatus -EngineIdentity $engineIdentity -WorkerIdentity $workerIdentity -ErrorMessage $terminalError -TerminalReason $terminalReason
+        Write-RuntimeState -Status $terminalStatus -EngineIdentity $engineIdentity -WorkerIdentity $workerIdentity -ErrorMessage $terminalError -TerminalReason $terminalReason -ShutdownRequest $stopDelivery
     }
     if (Test-Path -LiteralPath $stopPath -PathType Leaf) {
         Remove-Item -Force -LiteralPath $stopPath

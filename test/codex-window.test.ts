@@ -295,3 +295,30 @@ describe("bounded restartable native Codex reads", () => {
     expect(result.cursor.byteOffset).toBe(Buffer.byteLength(prefix));
   });
 });
+
+
+describe("memory citation cursor continuity", () => {
+  it("resumes a saved legacy display mirror through append/restart and keeps stable source identities", async () => {
+    const mirror = { type: "event_msg", payload: { type: "item_completed", turn_id: "turn-a", item: {
+      type: "AgentMessage", id: "msg_final", phase: "final_answer", content: [{ type: "Text", text: "Synthetic answer" }],
+      memory_citation: { entries: [], rolloutIds: ["synthetic"] },
+    } } };
+    const { input, path } = await fixture(jsonl([header, start, user("u"), mirror]));
+    const before = await readCodexWindow(input);
+    expect(before.cursor.parser.finalMirrors).toHaveLength(1);
+    const text = "Synthetic answer<oai-mem-citation><rollout_ids>synthetic</rollout_ids></oai-mem-citation>";
+    const final = { type: "response_item", timestamp: "2026-09-13T00:00:02Z", payload: {
+      type: "message", role: "assistant", id: "msg_final", phase: "final_answer", content: [{ type: "output_text", text }],
+    } };
+    await appendFile(path, jsonl([final, { type: "event_msg", payload: { type: "task_complete", turn_id: "turn-a", last_agent_message: "Synthetic answer" } }]));
+    const cursor = JSON.parse(JSON.stringify(before.cursor));
+    const resumed = await readCodexWindow({ ...input, cursor });
+    expect(resumed.issue).toBeNull(); expect(resumed.caughtUp).toBe(true); expect(resumed.messages).toHaveLength(1);
+    expect(resumed.messages[0].text).toBe(text);
+    const retry = await readCodexWindow({ ...input, cursor }); expect(retry.messages).toEqual(resumed.messages);
+    const after = await readCodexWindow({ ...input, cursor: JSON.parse(JSON.stringify(resumed.cursor)) });
+    expect(after.messages).toEqual([]); expect(after.cursor).toEqual(resumed.cursor);
+    const invalid = structuredClone(resumed.cursor); invalid.parser.finalMessages[0].displayDigest = "not-a-digest";
+    await expect(readCodexWindow({ ...input, cursor: invalid })).rejects.toMatchObject({ diagnostic: { reason: "parser" } });
+  });
+});

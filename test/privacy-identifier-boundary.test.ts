@@ -4,7 +4,7 @@ import { stripPrivateData } from "../src/functions/privacy.js";
 
 const keys = ["sk-", "pk-", "rk-", "ak-", "sk-proj-", "sk-ant-"].map(p => p + "1234567890abcdefghijklmnopqrstuv");
 const capture = readFileSync(new URL("../plugin/scripts/_capture.mjs", import.meta.url), "utf8");
-const privacyRegion = capture.split("//#region src/functions/privacy.ts\n")[1]?.split("//#endregion")[0];
+const privacyRegion = capture.split(/\/\/#region (?:src\/functions\/privacy\.ts|packaging\/windows-codex\/hooks\/codex-privacy\.mjs)\r?\n/)[1]?.split("//#endregion")[0];
 describe("secret key identifier boundaries", () => {
   it("keeps the shipped capture scrubber equivalent to the server", () => {
     expect(privacyRegion).toBeTruthy();

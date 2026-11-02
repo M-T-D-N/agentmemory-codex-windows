@@ -107,7 +107,8 @@ export class HybridSearch {
 
     if (policy) policy.channels.graph = "skipped-automatic";
     const vectorEligible = this.vector && this.embeddingProvider && this.vector.size > 0;
-    if (policy) policy.channels.vector = !vectorEligible ? "unavailable" : this.vector!.size > policy.maxVectorScan ? "skipped-scan-bound" : "available";
+    if (policy) policy.channels.vector = !this.vector && !this.embeddingProvider ? "disabled"
+      : !vectorEligible ? "unavailable" : this.vector!.size > policy.maxVectorScan ? "skipped-scan-bound" : "available";
 
     const keywordDepth = selection?.resolve && !vectorEligible && (!graphEnabled || entities.length === 0) && (policy || !this.rerankEnabled)
       ? limit : fetchDepth;

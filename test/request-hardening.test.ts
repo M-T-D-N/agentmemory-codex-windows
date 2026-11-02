@@ -56,8 +56,22 @@ describe("managed upstream request hardening", () => {
       req.end("{}");
     });
     try {
-      upstream.listen(0, "127.0.0.1");
-      const restPort = await listen(upstream);
+      let restPort: number | undefined;
+      // OS-selected ports can be on fetch's forbidden-port list. Select the
+      // fixture endpoint before the assertions, retaining fetch's protection.
+      for (let attempt = 0; attempt < 8; attempt++) {
+        upstream.listen(0, "127.0.0.1");
+        const candidate = await listen(upstream);
+        try {
+          const probe = await fetch(`http://127.0.0.1:${candidate}/fixture-ready`, { signal: AbortSignal.timeout(1000) });
+          expect(probe.status).toBe(204); await probe.text();
+          restPort = candidate; forwarded = 0; break;
+        } catch (error) {
+          if (!(error instanceof Error) || !(error.cause instanceof Error) || error.cause.message !== "bad port") throw error;
+          await close(upstream);
+        }
+      }
+      if (restPort === undefined) throw Error("No fetch-compatible fixture port was assigned");
       viewer = startViewerServer(0, {} as never, {} as never, token, restPort);
       const port = await listen(viewer);
       expect(await send(port, { origin: "https://write-test.invalid", "content-type": "application/json" })).toBe(403);
@@ -70,7 +84,7 @@ describe("managed upstream request hardening", () => {
       expect(forwarded).toBe(2);
     } finally {
       if (viewer) await close(viewer);
-      await close(upstream);
+      if (upstream.listening) await close(upstream);
     }
   });
 });

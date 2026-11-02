@@ -1,11 +1,14 @@
+import { registerApiTriggers } from "../src/triggers/api.js";
+import { NativeSourceLifecycle } from "../src/shutdown.js";
+import { CodexReadBudget } from "../src/replay/codex-read-budget.js";
 import { zstdCompressSync } from "node:zlib";
 import { discoverCodexSession } from "../src/functions/codex-source-discovery.js";
 import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, appendFile, rm, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mockKV } from "./helpers/mocks.js";
+import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { initializeCodexSourceCapture, captureCodexSourceWindow } from "../src/functions/codex-source-capture.js";
 import { KV } from "../src/state/schema.js";
 import { withObservationWrite } from "../src/state/observation-write.js";
@@ -18,6 +21,149 @@ import { codexSessionForTransfer } from "../src/replay/codex-capture-state.js";
 import { retainCodexForgetExclusions, codexExclusionId } from "../src/functions/codex-capture-exclusion.js";
 
 describe("native source capture checkpoints", () => {
+  it("reuses a committed compressed EOF after reader cache loss without reading or decoding source bytes", async () => {
+    await writeFile(join(root, sourcePath + ".zst"), zstdCompressSync(await readFile(join(root, sourcePath))));
+    await rm(join(root, sourcePath)); await initialize(); await capture();
+    const before = structuredClone((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!);
+    const rows = structuredClone(await kv.list(KV.observations("s")));
+    vi.resetModules();
+    const fresh = await import("../src/functions/codex-source-capture.js");
+    const { CodexReadBudget: FreshBudget } = await import("../src/replay/codex-read-budget.js");
+    const budget = new FreshBudget({ maxPhysicalBytes: 1, maxDecodedBytes: 1 });
+    expect(await fresh.captureCodexSourceWindow(kv as never, scope, { ...managed(), readBudget: budget })).toMatchObject({ status: "caught_up", inserted: 0 });
+    expect(budget.usage()).toMatchObject({ physicalBytes: 0, decodedBytes: 0 });
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.cursor).toEqual(before.cursor);
+    expect(await kv.list(KV.observations("s"))).toEqual(rows);
+  });
+
+  it("preserves a nonzero compressed cursor on a real reader deadline and resumes once without duplicates", async () => {
+    await writeFile(join(root, sourcePath + ".zst"), zstdCompressSync(await readFile(join(root, sourcePath))));
+    await rm(join(root, sourcePath)); await initialize(); await capture();
+    const before = structuredClone((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!);
+    const rows = structuredClone(await kv.list(KV.observations("s")));
+    vi.resetModules();
+    const fresh = await import("../src/functions/codex-source-capture.js");
+    const reader = await import("../src/replay/codex-window.js");
+    const { CodexReadBudget: FreshBudget } = await import("../src/replay/codex-read-budget.js");
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    const budget = new FreshBudget({ maxMilliseconds: 30_000 });
+    const wrap = budget.physical.bind(budget);
+    budget.physical = file => wrap({ stat: () => file.stat(), read: async (...args) => {
+      const result = await file.read(...args); clock.mockReturnValue(30_001); return result;
+    } });
+    try {
+      await expect(fresh.captureCodexSourceWindow(kv as never, scope, { ...managed(), readBudget: budget },
+        { readWindow: reader.readCodexWindow })).rejects.toMatchObject({ reason: "elapsed_time" });
+    } finally { clock.mockRestore(); }
+    const failed = (await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!;
+    expect(failed).toMatchObject({ status: "unknown", issue: "native_source_read_budget_exceeded", cursor: before.cursor,
+      readBudgetReason: "elapsed_time", readBudget: { decodedBytes: 0, elapsedMilliseconds: 30_001 } });
+    expect(await kv.list(KV.observations("s"))).toEqual(rows);
+    const retryBudget = new FreshBudget({ maxPhysicalBytes: 1, maxDecodedBytes: 1 });
+    expect(await fresh.captureCodexSourceWindow(kv as never, scope, { ...managed(), readBudget: retryBudget })).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.issue).toBeUndefined();
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.readBudget).toBeUndefined();
+    expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.readBudgetReason).toBeUndefined();
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations("s"))).toEqual(rows);
+  });
+
+  it.each(["replacement", "plain_return", "missing", "invalid_ordinal", "invalid_parser"])("does not reuse a compressed EOF after %s", async change => {
+    const original = await readFile(join(root, sourcePath));
+    await writeFile(join(root, sourcePath + ".zst"), zstdCompressSync(original));
+    await rm(join(root, sourcePath)); await initialize(); await capture();
+    const before = structuredClone((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.cursor);
+    const rows = structuredClone(await kv.list(KV.observations("s")));
+    if (change === "invalid_ordinal" || change === "invalid_parser") {
+      const row = (await kv.get<Session>(KV.sessions, "s"))!;
+      if (change === "invalid_ordinal") row.codexNativeCapture!.cursor.ordinal = -1;
+      else row.codexNativeCapture!.cursor.parser.normalUserSeen = "invalid" as never;
+      Object.assign(before, structuredClone(row.codexNativeCapture!.cursor));
+      await kv.set(KV.sessions, "s", row);
+    } else if (change === "plain_return") await writeFile(join(root, sourcePath), original);
+    else { await rename(join(root, sourcePath + ".zst"), join(root, sourcePath + ".old"));
+      if (change === "replacement") await writeFile(join(root, sourcePath + ".zst"), zstdCompressSync(original)); }
+    await expect(capture()).rejects.toThrow();
+    const after = (await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!;
+    expect(after.status).toBe(change === "missing" ? "unknown" : "reconcile_required");
+    expect(after.cursor).toEqual(before); expect(await kv.list(KV.observations("s"))).toEqual(rows);
+  });
+
+  it("cancels a source read without persisting failure or a false checkpoint and resumes once", async () => {
+    await initialize(); await capture();
+    await appendFile(join(root, sourcePath), JSON.stringify(message("shutdown-next", 30, "synthetic next user turn")) + "\n");
+    const before = structuredClone(await kv.get(KV.sessions, "s")), rows = await kv.list(KV.observations("s"));
+    const controller = new AbortController();
+    await expect(captureCodexSourceWindow(kv as never, scope, { ...managed(), signal: controller.signal }, {
+      readWindow: async options => { controller.abort(); return readCodexWindow(options); },
+    })).rejects.toThrow("shutdown requested");
+    expect(await kv.get(KV.sessions, "s")).toEqual(before); expect(await kv.list(KV.observations("s"))).toEqual(rows);
+    expect(await capture()).toMatchObject({ inserted: 1, status: "caught_up" });
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+  });
+
+  it("cancels an ordinary capture's pending physical read through the production reader and leaves its checkpoint unchanged", async () => {
+    await initialize(); await capture();
+    await appendFile(join(root, sourcePath), JSON.stringify(message("pending-physical", 30, "synthetic pending read")) + "\n");
+    const before = structuredClone(await kv.get(KV.sessions, "s")), rows = await kv.list(KV.observations("s"));
+    const lifecycle = new NativeSourceLifecycle(), budget = new CodexReadBudget({ maxMilliseconds: 30_000 }, lifecycle.signal);
+    let started!: () => void, release!: () => void;
+    const reading = new Promise<void>(resolve => { started = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    const physical = budget.physical.bind(budget);
+    budget.physical = file => physical({ stat: () => file.stat(), read: async (...args) => { started(); await held; return file.read(...args); } });
+    const running = lifecycle.run(() => captureCodexSourceWindow(kv as never, scope, { ...managed(), signal: lifecycle.signal, readBudget: budget }));
+    const rejected = expect(running).rejects.toThrow("shutdown requested"); await reading;
+    let done = false; const stopped = lifecycle.stop().then(() => { done = true; });
+    await Promise.resolve(); expect(done).toBe(false); release(); await rejected; await stopped;
+    expect(await kv.get(KV.sessions, "s")).toEqual(before); expect(await kv.list(KV.observations("s"))).toEqual(rows);
+    expect(await capture()).toMatchObject({ inserted: 1, status: "caught_up" });
+  });
+
+  it("propagates cancellation through actual REST and nested SDK capture registrations without a permanent failure", async () => {
+    await initialize(); await capture();
+    await appendFile(join(root, sourcePath), JSON.stringify(message("nested-cancel", 30, "synthetic nested request")) + "\n");
+    const before = structuredClone(await kv.get(KV.sessions, "s")), rows = await kv.list(KV.observations("s"));
+    const lifecycle = new NativeSourceLifecycle(), sdk = mockSdk({ looseTrigger: true }), get = kv.get;
+    let started!: () => void, release!: () => void;
+    const reading = new Promise<void>(resolve => { started = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", root); vi.stubEnv("AGENT_ID", "codex-global");
+    try {
+      registerApiTriggers(sdk as never, kv as never, async () => ({ context: "", blocks: 0, tokens: 0 }), "synthetic-secret",
+        undefined, undefined, undefined, undefined, lifecycle);
+      kv.get = async (scope, key) => { if (scope === KV.sessions && key === "s") { started(); await held; } return get(scope, key); };
+      const request = sdk.trigger("api::session::start", { headers: { authorization: "Bearer synthetic-secret" },
+        body: { action: "capture-source", sessionId: "s", project: "p" } });
+      await reading; const stopping = lifecycle.stop(); release();
+      expect(await request).toMatchObject({ status_code: 409, body: { success: false, error: "Native source shutdown requested" } });
+      await stopping; kv.get = get;
+      expect(await kv.get(KV.sessions, "s")).toEqual(before); expect(await kv.list(KV.observations("s"))).toEqual(rows);
+      await expect(sdk.trigger("mem::codex-source-capture", scope)).rejects.toThrow("shutdown requested");
+    } finally { kv.get = get; vi.unstubAllEnvs(); }
+  });
+
+  it("finishes an initialization already committing when shutdown is requested", async () => {
+    const expected = await preview(), controller = new AbortController(), set = kv.set;
+    let started = false;
+    kv.set = async (scope, key, value) => { if (!started) { started = true; controller.abort(); } return set(scope, key, value); };
+    const result = await initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
+      expectedVersion: expected.expectedVersion, reason: "synthetic shutdown boundary" }, { ...managed(), signal: controller.signal });
+    kv.set = set;
+    expect(started).toBe(true); expect(result).toMatchObject({ initialized: true, dryRun: false });
+    expect(await capture()).toMatchObject({ status: "caught_up" });
+  });
+
+  it("finishes an already-started capture commit and resumes without duplicate observations", async () => {
+    await initialize();
+    const controller = new AbortController(), set = kv.set;
+    let started = false;
+    kv.set = async (scope, key, value) => { if (!started) { started = true; controller.abort(); } return set(scope, key, value); };
+    const result = await captureCodexSourceWindow(kv as never, scope, { ...managed(), signal: controller.signal });
+    kv.set = set;
+    expect(started).toBe(true); expect(result.status).toBe("caught_up");
+    const rows = await kv.list(KV.observations("s"));
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" }); expect(await kv.list(KV.observations("s"))).toEqual(rows);
+  });
+
   it("stores an unknown boundary diagnostic and preserves repeated unknown boundaries without duplicate rows", async () => {
     await initialize(); await capture(); const before = await kv.list(KV.observations("s"));
     await appendFile(join(root, sourcePath), JSON.stringify({ type: "response_item", payload: { type: "future_type" } }) + "\n");
@@ -28,14 +174,19 @@ describe("native source capture checkpoints", () => {
     expect((await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!.recordDiagnostic?.payloadType).toBe("future_type");
     expect(await capture()).toMatchObject({ inserted: 0, status: "unknown" }); expect(await kv.list(KV.observations("s"))).toEqual(before);
   });
-  it("previews historical privacy correspondence without changing canonical content, source metadata or archive state", async () => {
+  it.each([false, true])("preserves historical privacy through inspection, preview and continuation with legacy fields=%s", async legacy => {
     const raw = "identifier_sk-" + "a".repeat(32);
     await appendFile(join(root, sourcePath), JSON.stringify(assistantMessage("historical-final", 25, raw)) + "\n");
     await initialize(); await capture();
     const rows = await kv.list<CompressedObservation>(KV.observations("s"));
     const target = rows.find(row => row.codexSource?.nativeMessageId === "historical-final")!;
     const narrative = "identifier_[REDACTED_SECRET]";
-    const stored = { ...target, narrative, codexSource: { ...target.codexSource!, textDigest: createHash("sha256").update(narrative).digest("hex") } };
+    const stored: CompressedObservation = { ...target, narrative, codexSource: { ...target.codexSource!, textDigest: createHash("sha256").update(narrative).digest("hex") } };
+    if (legacy) {
+      delete stored.project;
+      stored.timestamp = new Date(Date.parse(target.timestamp) + 1500).toISOString();
+      stored.codexSource!.legacyExcludedReason = "assistant_without_normal_user";
+    }
     await kv.set(KV.observations("s"), target.id, stored);
     const archiveTarget = { kind: "observation" as const, id: target.id, sessionId: "s" };
     const archivePlan = await changeArchiveState(kv as never, { project: "p", target: archiveTarget, action: "archive", dryRun: true });
@@ -43,6 +194,9 @@ describe("native source capture checkpoints", () => {
       expectedRevision: (archivePlan as any).expectedRevision, expectedDigest: (archivePlan as any).expectedDigest, reason: "synthetic historical privacy preservation" });
     const before = structuredClone(await kv.list(KV.observations("s")));
     const archive = (await readArchiveVisibility(kv as never))(archiveTarget);
+    const inspected = await inspectCodexSource(kv as never, { ...scope, sourcePath }, managed());
+    expect(inspected).toMatchObject({ readOnly: true, status: "ready", completeNativeInventory: true, unmatchedCaptureCount: 0 });
+    expect(inspected.counts.blocked ?? 0).toBe(0);
     const first = await preview(), retry = await preview();
     expect(first).toMatchObject({ adopt: 0, missing: 0, historicalPrivacyPreserved: [{ observationId: target.id,
       currentTextDigest: createHash("sha256").update(raw).digest("hex"), textDigest: stored.codexSource.textDigest }] });
@@ -114,6 +268,45 @@ describe("native source capture checkpoints", () => {
     expect(await capture()).toMatchObject({ inserted: 1, status: "caught_up" });
     expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
     for (const row of originals) expect(await kv.get(KV.observations("s"), row.id)).toEqual(row);
+  });
+  it("requires an explicit complete preview for an identical raw replacement and retries without duplicates", async () => {
+    await initialize(); await capture();
+    const originals = structuredClone(await kv.list(KV.observations("s")));
+    const path = join(root, sourcePath), bytes = await readFile(path);
+    await writeFile(path + ".replacement", bytes); await rm(path); await rename(path + ".replacement", path);
+    await expect(capture()).rejects.toThrow("reconciliation is required");
+    const blocked = structuredClone(await kv.get(KV.sessions, "s"));
+    expect(blocked).toMatchObject({ codexNativeCapture: { status: "reconcile_required", cursorDiagnostic: { reason: "file_identity" } } });
+    const plan = await preview(); expect(plan).toMatchObject({ missing: 0, adopt: 0 });
+    expect(await kv.get(KV.sessions, "s")).toEqual(blocked);
+    await initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
+      expectedVersion: plan.expectedVersion, reason: "synthetic identical replacement verified" }, managed());
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await capture()).toMatchObject({ inserted: 0, status: "caught_up" });
+    expect(await kv.list(KV.observations("s"))).toEqual(originals);
+    const stale = await preview();
+    await appendFile(path, JSON.stringify(message("after-preview", 40, "synthetic new input")) + "\n");
+    await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
+      expectedVersion: stale.expectedVersion, reason: "stale synthetic plan" }, managed())).rejects.toThrow("preview is stale");
+    expect(await kv.list(KV.observations("s"))).toEqual(originals);
+  });
+  it.each(["content_changed", "truncated"])("keeps a compressed %s replacement blocked with originals unchanged", async change => {
+    await initialize(); await capture();
+    const originals = structuredClone(await kv.list(KV.observations("s")));
+    const path = join(root, sourcePath), rows = (await readFile(path, "utf8")).trimEnd().split("\n");
+    if (change === "truncated") rows.pop();
+    else {
+      const index = rows.findIndex(row => JSON.parse(row).payload?.id === "m1");
+      expect(index).toBeGreaterThan(0);
+      const changed = JSON.parse(rows[index]); changed.payload.content = [{ type: "input_text", text: "changed original" }]; rows[index] = JSON.stringify(changed);
+    }
+    await writeFile(path + ".zst", zstdCompressSync(Buffer.from(rows.join("\n") + "\n"))); await rm(path);
+    await expect(capture()).rejects.toThrow("reconciliation is required");
+    const blocked = structuredClone(await kv.get(KV.sessions, "s"));
+    await expect(preview()).rejects.toThrow("correspondence");
+    await expect(preview()).rejects.toThrow("correspondence");
+    expect(await kv.get(KV.sessions, "s")).toEqual(blocked);
+    expect(await kv.list(KV.observations("s"))).toEqual(originals);
   });
   it("automatically verifies an unchanged compressed archive and preserves the completed cursor and originals", async () => {
     await initialize(); await capture();
@@ -608,6 +801,54 @@ describe("native source capture checkpoints", () => {
     kv = mockKV(); await kv.set(KV.sessions, "s", structuredClone(session));
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  it.each([false, true])("restores full canonical final text from a legacy display without changing identity (long=%s)", long => {
+    return (async () => {
+      const visible = "Synthetic final result" + (long ? "x".repeat(500) : "");
+      const text = visible + "<oai-mem-citation>synthetic source reference</oai-mem-citation>";
+      await appendFile(join(root, sourcePath), JSON.stringify(assistantMessage("display-final", 24, text)) + "\n");
+      const row = { ...legacy("display-row", 25), type: "other" as const, title: "assistant_response", confidence: 0.3,
+        subtitle: JSON.stringify({ turn_id: "turn-a" }), narrative: visible,
+        origin: { channel: "tool" as const, detail: "assistant_response", capturedAt: assistantMessage("display-final", 25).timestamp } };
+      await kv.set(KV.observations("s"), row.id, row);
+      const beforeSource = await readFile(join(root, sourcePath));
+      const plan = await preview();
+      expect(plan).toMatchObject({ adopt: 1, missing: 2, restoreLegacyFinalDisplay: 1 });
+      expect(await kv.get(KV.observations("s"), row.id)).toEqual(row);
+      await kv.set(KV.observations("s"), row.id, { ...row, importance: 8 });
+      await expect(initializeCodexSourceCapture(kv as never, { ...scope, sourcePath, dryRun: false,
+        expectedVersion: plan.expectedVersion, reason: "stale synthetic preview" }, managed())).rejects.toThrow("stale");
+      await expectUninitialized();
+      await kv.set(KV.observations("s"), row.id, row);
+      await initialize();
+      expect(await kv.get(KV.observations("s"), row.id)).toEqual({ ...row, narrative: text,
+        codexSource: expect.objectContaining({ nativeMessageId: "display-final", textDigest: createHash("sha256").update(text).digest("hex") }) });
+      expect(JSON.stringify((await queryAudit(kv as never)).entries)).toContain('"restoreLegacyFinalDisplayObservationIds":["display-row"]');
+      const published: CompressedObservation[] = [];
+      expect(await capture(async rows => { published.push(...rows); })).toMatchObject({ inserted: 2, status: "caught_up" });
+      expect(published.find(item => item.id === row.id)?.narrative).toBe(text);
+      const after = await kv.list(KV.observations("s"));
+      expect(await preview()).toMatchObject({ restoreLegacyFinalDisplay: 0, missing: 0 });
+      await initialize(); expect(await capture()).toMatchObject({ inserted: 0 });
+      expect(await kv.list(KV.observations("s"))).toEqual(after);
+      expect(await readFile(join(root, sourcePath))).toEqual(beforeSource);
+    })();
+  });
+
+  it("does not restore an excluded legacy final display", async () => {
+    const visible = "Synthetic excluded final", text = visible + "<oai-mem-citation>synthetic</oai-mem-citation>";
+    await appendFile(join(root, sourcePath), JSON.stringify(assistantMessage("excluded-final", 24, text)) + "\n");
+    const row = { ...legacy("excluded-display", 25), type: "other" as const, title: "assistant_response", confidence: 0.3,
+      subtitle: JSON.stringify({ turn_id: "turn-a" }), narrative: visible,
+      origin: { channel: "tool" as const, detail: "assistant_response", capturedAt: assistantMessage("excluded-final", 25).timestamp } };
+    await kv.set(KV.observations("s"), row.id, row);
+    const id = codexExclusionId("s", row.id);
+    await kv.set(KV.codexCaptureExclusions, id, { version: 1, id, sessionId: "s", project: "p", observationId: row.id,
+      forgottenAt: "2026-09-13T00:01:00Z", match: { kind: "legacy", messageKind: "assistant_final", timestamp: row.timestamp,
+        textDigest: createHash("sha256").update(visible).digest("hex") } });
+    await expect(preview()).rejects.toThrow("correspondence");
+    expect(await kv.get(KV.observations("s"), row.id)).toEqual(row); await expectUninitialized();
+  });
 
   it("initializes past an already deleted empty row without restoring, rewriting or binding it", async () => {
     const row = { ...legacy("deleted-empty", 10), narrative: "", facts: [], title: "assistant_response", type: "other" as const,

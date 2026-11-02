@@ -1,4 +1,5 @@
 import type { ArchiveState, CompressedObservation, Session } from "../types.js";
+import type { CodexCursorDiagnostic } from "../replay/codex-window.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { readArchiveVisibility } from "./archive.js";
@@ -8,6 +9,8 @@ import { unresolvedCodexCapture } from "../replay/codex-unresolved-capture.js";
 
 const reasons = new Set(["native_source_missing", "native_source_read_failed", "native_source_read_budget_exceeded", "native_capture_correspondence_changed", "native_observation_too_large", "native_source_cursor_invalid", "native_source_correspondence_changed",
   "observation_too_large", "record_exceeds_supported_size", "invalid_jsonl_record", "unsupported_response_type", "unsupported_record_type", "invalid_additional_tools_payload",
+  "conflicting_final_message_identity", "conflicting_final_item_identity", "completion_without_matching_final_message",
+  "previous_turn_has_unmatched_message_mirrors", "completion_has_unmatched_message_mirrors",
   "fork_record_precedes_or_lacks_own_history_timestamp", "native_capture_rpc_failed", "returned_source_requires_reconciliation", "returned_source_identity_changed"]);
 const exact = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
   value.length <= 512 && value === value.trim() && value !== "*";
@@ -15,6 +18,8 @@ const publicId = (value: unknown): string | null => exact(value) && /^[\w.-]+$/.
 export interface NativeCaptureIssue {
   sessionId: string | null; project: string | null; observationId?: string | null;
   category: "capture_unknown" | "requires_reconciliation" | "capture_failed" | "legacy_review";
+  cursorDiagnostic?: CodexCursorDiagnostic;
+  readBudget?: import("../replay/codex-read-budget.js").CodexReadUsage & { reason?: "physical_bytes" | "decoded_bytes" | "elapsed_time" };
   reason: string; observedAt: string | null; record?: { ordinal: number; byteOffset: number; recordType?: string; payloadType?: string; itemType?: string }; action?: "update_adapter_and_retry_saved_cursor";
 }
 export interface NativeCaptureReport {
@@ -64,12 +69,32 @@ export async function readCodexSourceStatus(kv: StateKV, owner: string, options:
     const add = (row: Session, category: NativeCaptureIssue["category"], reason: string, observationId?: string) => {
       affected.add(row.id);
       issues.push({ sessionId: publicId(row.id), project: publicId(row.project), category, reason,
+        ...(category === "capture_unknown" && reason === "native_source_read_budget_exceeded" && (() => {
+          const d = row.codexNativeCapture?.readBudget;
+          if (!d) return {};
+          const usage = { physicalBytes: d.physicalBytes, decodedBytes: d.decodedBytes, elapsedMilliseconds: d.elapsedMilliseconds,
+            maxPhysicalBytes: d.maxPhysicalBytes, maxDecodedBytes: d.maxDecodedBytes,
+            maxMilliseconds: d.maxMilliseconds, maxWindowBytes: d.maxWindowBytes };
+          if (!Object.values(usage).every(value => Number.isSafeInteger(value) && value >= 0) ||
+              ![d.maxPhysicalBytes, d.maxDecodedBytes, d.maxMilliseconds, d.maxWindowBytes].every(value => value > 0)) return {};
+          const reason = row.codexNativeCapture?.readBudgetReason;
+          return { readBudget: { ...usage, ...(["physical_bytes", "decoded_bytes", "elapsed_time"].includes(reason ?? "") ? { reason } : {}) } };
+        })()),
         ...(category === "capture_unknown" && row.codexNativeCapture?.recordDiagnostic && (() => {
           const d = row.codexNativeCapture.recordDiagnostic;
           if (!Number.isSafeInteger(d.ordinal) || d.ordinal < 1 || !Number.isSafeInteger(d.byteOffset) || d.byteOffset < 0) return {};
           const safe = (v: unknown) => typeof v === "string" && /^[A-Za-z_]{1,64}$/.test(v) ? v : undefined;
           return { record: { ordinal: d.ordinal, byteOffset: d.byteOffset, recordType: safe(d.recordType), payloadType: safe(d.payloadType), itemType: safe(d.itemType) },
             action: "update_adapter_and_retry_saved_cursor" as const };
+        })()),
+        ...(category === "requires_reconciliation" && row.codexNativeCapture?.issue === "native_source_cursor_invalid" && (() => {
+          const diagnostic = row.codexNativeCapture.cursorDiagnostic;
+          if (!diagnostic || !["version", "hold_mode", "file_identity", "source_identity", "byte_offset", "ordinal", "anchor", "parser"].includes(diagnostic.reason) ||
+              !Number.isSafeInteger(diagnostic.snapshotBytes) || diagnostic.snapshotBytes < 0 ||
+              typeof diagnostic.expectedDigest !== "string" || typeof diagnostic.observedDigest !== "string" ||
+              !/^[a-f0-9]{64}$/.test(diagnostic.expectedDigest) || !/^[a-f0-9]{64}$/.test(diagnostic.observedDigest)) return {};
+          return { cursorDiagnostic: { reason: diagnostic.reason, snapshotBytes: diagnostic.snapshotBytes,
+            expectedDigest: diagnostic.expectedDigest, observedDigest: diagnostic.observedDigest } };
         })()),
         observedAt: category === "capture_failed" && row.codexNativeCapture?.lastFailure
           ? row.codexNativeCapture.lastFailure.observedAt

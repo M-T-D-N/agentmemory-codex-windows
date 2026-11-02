@@ -1,5 +1,6 @@
 *.yaml text eol=lf
 *.yml text eol=lf
+/test/fixtures/codex-zstd-frames.baseline.ts.txt text eol=lf
 /plugin/skills/**/REFERENCE.md text eol=lf
 /plugin/scripts/*.mjs text eol=lf
 /packaging/windows-codex/licenses/iii-LICENSE_ELv2 -text

@@ -78,12 +78,60 @@ describe("fixed historical privacy correspondence", () => {
     expect(matchCodexMessages([message], [row], { ...scope, completeNativeInventory: false })[0].action).toBe("blocked");
     expect(message.text).toBe(raw);
   });
+  const legacyCases = [false, true].flatMap(missingProject => [false, true].flatMap(hookTime =>
+    [false, true].map(priorExcluded => ({ missingProject, hookTime, priorExcluded }))));
+  it.each(legacyCases)("preserves proved legacy fields $missingProject/$hookTime/$priorExcluded without rewriting them", options => {
+    const { message, row } = fixture();
+    if (options.missingProject) delete row.project;
+    if (options.hookTime) row.timestamp = new Date(Date.parse(at) + 1500).toISOString();
+    if (options.priorExcluded) row.codexSource!.legacyExcludedReason = "assistant_without_normal_user";
+    const before = structuredClone(row);
+    const boundScope = { ...scope, canonicalSession: { id: scope.sessionId, project: scope.project, agentId: scope.agentId } };
+    for (const source of [message, codexMessageReference(message)]) {
+      expect(matchCodexMessages([source], [row], boundScope)[0]).toMatchObject({ action: "present",
+        observationId: row.id, historicalPrivacyPreserved: { textDigest: row.codexSource!.textDigest } });
+      expect(row).toEqual(before);
+    }
+  });
+  it("requires exact session binding for absent project and complete native provenance for hook timestamps", () => {
+    const { message, row } = fixture();
+    delete row.project;
+    row.timestamp = new Date(Date.parse(at) + 1500).toISOString();
+    row.codexSource!.legacyExcludedReason = "assistant_without_normal_user";
+    const canonicalSession = { id: scope.sessionId, project: scope.project, agentId: scope.agentId };
+    const boundScope = { ...scope, canonicalSession };
+    const before = structuredClone(row);
+    const reject = (observation: CompressedObservation, source = message, selection = boundScope) => {
+      expect(matchCodexMessages([source], [observation], selection).some(x => x.action === "present" || x.action === "adopt")).toBe(false);
+    };
+    reject(row, message, { ...boundScope, canonicalSession: undefined as never });
+    for (const field of ["id", "project", "agentId"] as const) {
+      reject(row, message, { ...boundScope, canonicalSession: { ...canonicalSession, [field]: "other" } });
+    }
+    reject(row, message, { ...boundScope, completeNativeInventory: false });
+    reject(row, message, { ...boundScope, completeNativeInventory: "true" as never });
+    reject({ ...row, agentId: "other" });
+    reject({ ...row, timestamp: "invalid" });
+    reject({ ...row, narrative: masked + " changed" });
+    reject({ ...row, codexSource: undefined });
+    for (const field of ["version", "key", "nativeMessageId", "kind", "timestamp", "ordinal", "byteOffset", "textDigest"] as const) {
+      reject({ ...row, codexSource: { ...row.codexSource!, [field]: ["version", "ordinal", "byteOffset"].includes(field) ? 0 : "different" } } as CompressedObservation);
+    }
+    reject({ ...row, codexSource: { ...row.codexSource!, retainedSourcePath: "archived_sessions/rollout-other.jsonl" } });
+    reject({ ...row, codexSource: { ...row.codexSource!, legacyExcludedReason: undefined } },
+      { ...message, legacyExcludedReason: "assistant_without_normal_user" });
+    reject(row, fixture("assistant", raw + " changed").message);
+    reject(row, { ...message, historicalPrivacy: { ...message.historicalPrivacy!, textDigest: "0".repeat(64) } });
+    expect(() => matchCodexMessages([message], [{ ...row, project: "other" }], boundScope)).toThrow("observation scope");
+    expect(() => matchCodexMessages([message], [{ ...row, sessionId: "other" }], boundScope)).toThrow("observation scope");
+    expect(row).toEqual(before);
+  });
   it("rejects different text, markers, metadata, ownership, and protected records", () => {
     const { message, row } = fixture();
     for (const changed of [
       { ...row, narrative: masked + " changed" }, { ...row, narrative: "identifier_[PRIVATE]" },
       { ...row, codexSource: undefined }, { ...row, agentId: "other" }, { ...row, project: undefined },
-      { ...row, timestamp: "2026-09-10T07:43:21Z" },
+      { ...row, timestamp: "invalid" },
       { ...row, emptyDeletion: { state: "deleted", version: 1, changedAt: at, reason: "protected", auditId: "audit" } },
       ...["key", "nativeMessageId", "kind", "timestamp", "ordinal", "byteOffset", "textDigest"].map(field => ({
         ...row, codexSource: { ...row.codexSource, [field]: field === "ordinal" || field === "byteOffset" ? 1 : "different" } })),

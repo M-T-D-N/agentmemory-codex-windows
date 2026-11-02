@@ -13,7 +13,7 @@ export interface CodexParseState {
   finalDigests: string[];
   userMessages: Array<{ key: string; digest: string; imageReadFailureDisplay?: { digest: string; path: string } }>;
   userMirrors: Array<{ id: string; digest: string; localImagePaths?: string[]; sourceLocation?: { ordinal: number; byteOffset: number; recordDigest: string } }>;
-  finalMessages: Array<{ id: string | null; digest: string }>;
+  finalMessages: Array<{ id: string | null; digest: string; displayDigest?: string }>;
   finalMirrors: Array<{ id: string; digest: string }>;
   userInputToolIds: string[];
 }
@@ -82,6 +82,11 @@ export function unmatchedCodexUserMirrors(state: CodexParseState): CodexParseSta
   return state.userMirrors.filter((_, index) => !assign(index, new Set()));
 }
 
+// Native item_completed/task_complete omit these literal hidden citation blocks.
+// Keep the canonical response text and digest intact; compare only the display mirror.
+export const codexAssistantDisplayDigest = (text: string) => digest(text.replace(/<oai-mem-citation>[\s\S]*?(?:<\/oai-mem-citation>|$)/g, ""));
+const finalDisplayDigest = (message: CodexParseState["finalMessages"][number]) => message.displayDigest ?? message.digest;
+
 function imageReadFailureDisplay(content: unknown[]): { digest: string; path: string } | undefined {
   if (content.length !== 2) return;
   const original = asRecord(content[0]), diagnostic = asRecord(content[1]);
@@ -101,13 +106,13 @@ export function pendingCodexMirrors(state: CodexParseState): boolean {
   if (unmatchedCodexUserMirrors(state).length) return true;
   const unmatchedMessages = [...state.finalMessages];
   const unmatchedMirrors = state.finalMirrors.filter(mirror => {
-    const index = unmatchedMessages.findIndex(message => message.id === mirror.id && message.digest === mirror.digest);
+    const index = unmatchedMessages.findIndex(message => message.id === mirror.id && finalDisplayDigest(message) === mirror.digest);
     if (index < 0) return true;
     unmatchedMessages.splice(index, 1);
     return false;
   });
   return unmatchedMirrors.some(mirror => {
-    const index = unmatchedMessages.findIndex(message => message.digest === mirror.digest &&
+    const index = unmatchedMessages.findIndex(message => finalDisplayDigest(message) === mirror.digest &&
       (message.id === null || (/^item-\d+$/.test(mirror.id) && /^msg_/.test(message.id))));
     if (index < 0) return true;
     unmatchedMessages.splice(index, 1);
@@ -178,8 +183,10 @@ export function parseCodexRecord(
     if (payload.type === "task_complete") {
       if (payload.turn_id !== state.turnId) return unknown("completion_turn_mismatch");
       if (pendingCodexMirrors(state)) return unknown("completion_has_unmatched_message_mirrors");
-      if (eligibleFinal(state) && typeof payload.last_agent_message === "string" && payload.last_agent_message.trim() &&
-          !state.finalDigests.includes(digest(stripPrivateData(payload.last_agent_message)))) {
+      const completedDigest = typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()
+        ? digest(stripPrivateData(payload.last_agent_message)) : null;
+      if (eligibleFinal(state) && completedDigest && !state.finalDigests.includes(completedDigest) &&
+          !state.finalMessages.some(message => message.displayDigest === completedDigest)) {
         return unknown("completion_without_matching_final_message");
       }
       return excluded("completion_duplicate");
@@ -210,7 +217,7 @@ export function parseCodexRecord(
       if (item.type === "AgentMessage") {
         const existing = state.finalMirrors.find(mirror => mirror.id === item.id);
         const primary = state.finalMessages.find(message => message.id === item.id);
-        if ((existing && existing.digest !== fingerprint) || (primary && primary.digest !== fingerprint)) return unknown("conflicting_final_item_identity");
+        if ((existing && existing.digest !== fingerprint) || (primary && finalDisplayDigest(primary) !== fingerprint)) return unknown("conflicting_final_item_identity");
         if (!existing) {
           if (state.finalMirrors.length >= 128) return unknown("excessive_final_items_in_turn");
           state.finalMirrors.push({ id: item.id, digest: fingerprint });
@@ -341,9 +348,11 @@ export function parseCodexRecord(
     if (state.finalDigests.length >= 128) return unknown("excessive_final_messages_in_turn");
     const mirror = nativeMessageId ? state.finalMirrors.find(item => item.id === nativeMessageId) : undefined;
     const existing = nativeMessageId ? state.finalMessages.find(item => item.id === nativeMessageId) : undefined;
-    if ((mirror && mirror.digest !== digest(text)) || (existing && existing.digest !== digest(text))) return unknown("conflicting_final_message_identity");
-    state.finalDigests.push(digest(text));
-    if (!existing) state.finalMessages.push({ id: nativeMessageId, digest: digest(text) });
+    const fingerprint = digest(text), displayDigest = codexAssistantDisplayDigest(text);
+    if ((mirror && mirror.digest !== displayDigest) || (existing && existing.digest !== fingerprint)) return unknown("conflicting_final_message_identity");
+    state.finalDigests.push(fingerprint);
+    if (!existing) state.finalMessages.push({ id: nativeMessageId, digest: fingerprint,
+      ...(displayDigest !== fingerprint ? { displayDigest } : {}) });
   }
   return { status: "message", state, message };
 }

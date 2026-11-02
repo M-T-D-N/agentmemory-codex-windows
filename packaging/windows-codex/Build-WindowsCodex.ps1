@@ -1,20 +1,43 @@
 [CmdletBinding(DefaultParameterSetName = 'Release')]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Release')][string]$OutputDirectory,
+    [Parameter(ParameterSetName = 'Release')][switch]$PrivateInstallCandidate,
+    [Parameter(ParameterSetName = 'Release')][switch]$PinPrivateInstallCandidate,
     [Parameter(Mandatory = $true, ParameterSetName = 'Release')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Diagnostic')][string]$IiiEnginePath,
     [string]$NodePath = '',
     [string]$ScratchDirectory = '',
     [string]$ReleaseRevision = 'r32',
     [switch]$SkipTests,
+    [switch]$Offline,
+    [Parameter(ParameterSetName = 'Release')][string]$UserLibvipsInputDirectory = '',
+    [Parameter(ParameterSetName = 'Release')][string]$NativeSourceEvidenceArchive = '',
     [Parameter(Mandatory = $true, ParameterSetName = 'Validation')][switch]$ValidationOnly,
     [Parameter(Mandatory = $true, ParameterSetName = 'Diagnostic')][switch]$DiagnosticOnly,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Diagnostic')][string]$QualificationScript
+    [Parameter(Mandatory = $true, ParameterSetName = 'Diagnostic')][string]$QualificationScript,
+    [Parameter(Mandatory = $true, ParameterSetName = 'CloseoutPackages')][switch]$CloseoutPackages,
+    [Parameter(Mandatory = $true, ParameterSetName = 'CloseoutPackages')][string]$InstallRoot,
+    [Parameter(Mandatory = $true, ParameterSetName = 'CloseoutPackages')][string[]]$RetirePackageRoots,
+    [Parameter(ParameterSetName = 'CloseoutPackages')][string[]]$ProtectedPackagePaths = @(),
+    [Parameter(ParameterSetName = 'CloseoutPackages')][string]$RecycleStagingDirectory = '',
+    [Parameter(ParameterSetName = 'CloseoutPackages')][switch]$ConsumersPublicationDiagnosisEnded,
+    [Parameter(ParameterSetName = 'CloseoutPackages')][switch]$Execute
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ($CloseoutPackages) {
+    if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'Package closeout requires an explicit task ScratchDirectory.' }
+    . (Join-Path $PSScriptRoot 'powershell\agentmemory-upgrade-retention.ps1')
+    . (Join-Path $PSScriptRoot 'powershell\Complete-ReleaseBackupReview.ps1')
+    . (Join-Path $PSScriptRoot 'powershell\Complete-PackageCloseout.ps1')
+    $closeout = Complete-AgentMemoryPackageCloseout -ScratchDirectory $ScratchDirectory -InstallRoot $InstallRoot -RetirePackageRoots $RetirePackageRoots -ProtectedPackagePaths $ProtectedPackagePaths -RecycleStagingDirectory $RecycleStagingDirectory -ConsumersPublicationDiagnosisEnded:$ConsumersPublicationDiagnosisEnded -Execute:$Execute
+    $closeout | ConvertTo-Json -Depth 100
+    if ($closeout.status -eq 'incomplete') { exit 1 }
+    return
+}
 
 $buildKind = if ($ValidationOnly) { 'validation' } elseif ($DiagnosticOnly) { 'diagnostic' } else { 'release_candidate' }
 if ($buildKind -eq 'release_candidate' -and $SkipTests) {
@@ -103,6 +126,16 @@ if ($DiagnosticOnly) {
 }
 if (-not $ValidationOnly -and -not $DiagnosticOnly) {
     $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
+    $privateScratch = $null
+    if ($ScratchDirectory -match '^D:[\\/]Workspace[\\/]scratch[\\/]agentmemory[\\/][a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}([\\/].*)?$' -and $ScratchDirectory.IndexOfAny([char[]]'*?[]') -lt 0) {
+        $declaredScratch = [IO.Path]::GetFullPath($ScratchDirectory).TrimEnd('\')
+        if ($outputRoot.StartsWith($declaredScratch + '\',[StringComparison]::OrdinalIgnoreCase)) {
+            Assert-PhysicalDirectoryPath -Path $declaredScratch
+            Assert-PhysicalDirectoryPath -Path $outputRoot
+            $privateScratch = $declaredScratch
+        }
+    }
+    if (($PrivateInstallCandidate -or $PinPrivateInstallCandidate) -and -not $privateScratch) { throw 'Private install candidates require a literal D Workspace scratch/agentmemory/task-UUID boundary and OutputDirectory within it.' }
     if (Test-Path -LiteralPath $outputRoot) {
         throw "OutputDirectory already exists: $outputRoot"
     }
@@ -118,6 +151,30 @@ foreach ($required in @($node, (Join-Path $sourceRoot 'pnpm-lock.yaml'), (Join-P
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required build input is missing: $required"
     }
+}
+
+$packageJson = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
+$packageManager = $packageJson.PSObject.Properties['packageManager']
+if ($null -eq $packageManager -or [string]$packageManager.Value -notmatch '^pnpm@([0-9]+\.[0-9]+\.[0-9]+)$') {
+    throw 'package.json packageManager must pin an exact pnpm version (pnpm@X.Y.Z).'
+}
+$expectedPnpmVersion = $Matches[1]
+$scratchParent = $ScratchDirectory
+if ([string]::IsNullOrWhiteSpace($scratchParent)) { $scratchParent = $env:WORKSPACE_TASK_ROOT }
+if ([string]::IsNullOrWhiteSpace($scratchParent)) { $scratchParent = [IO.Path]::GetTempPath() }
+$scratchParent = [IO.Path]::GetFullPath($scratchParent).TrimEnd([IO.Path]::DirectorySeparatorChar)
+if ($scratchParent -match '^[A-Za-z]:$') { $scratchParent += [IO.Path]::DirectorySeparatorChar }
+Assert-PhysicalDirectoryPath -Path $scratchParent
+Push-Location $sourceRoot
+try {
+    $pnpmVersionLines = @(& $pnpm --version --config.manage-package-manager-versions=false --config.pm-on-fail=ignore)
+    $pnpmVersionExit = $LASTEXITCODE
+}
+finally { Pop-Location }
+if ($pnpmVersionExit -ne 0) { throw "Could not read selected pnpm version (exit $pnpmVersionExit)." }
+$pnpmVersion = ($pnpmVersionLines -join [Environment]::NewLine).Trim()
+if ($pnpmVersion -cne $expectedPnpmVersion) {
+    throw "pnpm version mismatch: package.json requires $expectedPnpmVersion; selected pnpm reported '$pnpmVersion'. No dependency installation or tool replacement was performed."
 }
 
 if (-not $ValidationOnly) {
@@ -151,7 +208,6 @@ if ($iiiHash -ne [string]$thirdParty.iii_engine.sha256) {
 }
 }
 
-$packageJson = Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $sourceRoot 'package.json') | ConvertFrom-Json
 $version = [string]$packageJson.version
 $downstreamVersion = [string]$packageJson.agentmemoryDownstream.version
 if ($packageJson.agentmemoryDownstream.dataContractVersion -ne 5) {
@@ -172,18 +228,12 @@ if (-not $ValidationOnly -and -not $DiagnosticOnly) {
 
 }
 
-$scratchParent = $ScratchDirectory
-if ([string]::IsNullOrWhiteSpace($scratchParent)) { $scratchParent = $env:WORKSPACE_TASK_ROOT }
-if ([string]::IsNullOrWhiteSpace($scratchParent)) { $scratchParent = [IO.Path]::GetTempPath() }
-$scratchParent = [IO.Path]::GetFullPath($scratchParent).TrimEnd([IO.Path]::DirectorySeparatorChar)
-if ($scratchParent -match '^[A-Za-z]:$') { $scratchParent += [IO.Path]::DirectorySeparatorChar }
-Assert-PhysicalDirectoryPath -Path $scratchParent
 [void][IO.Directory]::CreateDirectory($scratchParent)
 $scratchRoot = Join-Path $scratchParent ("agentmemory-build-" + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $scratchRoot -ErrorAction Stop)
 $buildSucceeded = $false
 $priorEnvironment = @{}
-foreach ($name in @('NODE_OPTIONS', 'CI', 'TEMP', 'TMP', 'TMPDIR', 'NODE_COMPILE_CACHE')) {
+foreach ($name in @('NODE_OPTIONS', 'CI', 'TEMP', 'TMP', 'TMPDIR', 'NODE_COMPILE_CACHE', 'AGENTMEMORY_INTEGRATION', 'AGENTMEMORY_CURATE', 'AGENTMEMORY_SYNTHETIC_TEST_ROOT')) {
     $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 try {
@@ -198,6 +248,9 @@ $priorNodeOptions = $priorEnvironment['NODE_OPTIONS']
 foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) { [Environment]::SetEnvironmentVariable($name, $scratchRoot, 'Process') }
 $env:NODE_COMPILE_CACHE = Join-Path $scratchRoot 'node-compile-cache'
 $env:CI = 'true'
+$env:AGENTMEMORY_INTEGRATION = '0'
+$env:AGENTMEMORY_CURATE = '0'
+$env:AGENTMEMORY_SYNTHETIC_TEST_ROOT = $scratchRoot
 $nodeHeapOption = '--max-old-space-size=12288'
 if ([string]::IsNullOrWhiteSpace($priorNodeOptions)) {
     $env:NODE_OPTIONS = $nodeHeapOption
@@ -208,10 +261,12 @@ elseif ($priorNodeOptions -notmatch '(?:^|\s)--max-old-space-size(?:=|\s)') {
 
 if ($buildKind -eq 'release_candidate') { $sourceInputBefore = Get-BuildSourceSnapshot }
 $suiteProofs = [ordered]@{}
+$userLibraryBinding = $null
 
 Push-Location $sourceRoot
 try {
-    & $pnpm --config.confirmModulesPurge=false --config.node-linker=hoisted install --frozen-lockfile
+    [string[]]$networkArguments = if ($Offline) { @('--offline') } else { @() }
+    & $pnpm --config.confirmModulesPurge=false --config.node-linker=hoisted install --frozen-lockfile @networkArguments
     if ($LASTEXITCODE -ne 0) { throw "pnpm install failed with exit code $LASTEXITCODE" }
 
     & $pnpm run skills:check
@@ -237,7 +292,7 @@ try {
     }
 
     if (-not $ValidationOnly) {
-    & $pnpm --config.inject-workspace-packages=true --config.node-linker=hoisted --filter '@agentmemory/agentmemory' deploy --prod $runtimePackageRoot
+    & $pnpm --config.inject-workspace-packages=true --config.node-linker=hoisted --filter '@agentmemory/agentmemory' deploy @networkArguments --prod $runtimePackageRoot
     if ($LASTEXITCODE -ne 0) { throw "pnpm deploy failed with exit code $LASTEXITCODE" }
     Get-ChildItem -Recurse -Directory -Filter '.bin' -LiteralPath (Join-Path $runtimePackageRoot 'node_modules') |
         Sort-Object { $_.FullName.Length } -Descending |
@@ -252,7 +307,13 @@ try {
         $metadata = Join-Path $runtimePackageRoot $metadataName
         if (Test-Path -LiteralPath $metadata -PathType Leaf) { Remove-Item -LiteralPath $metadata -Force }
     }
-    & $node (Join-Path $PSScriptRoot 'tests\release-smoke.mjs') $runtimePackageRoot $sourceRoot
+    & $node (Join-Path $PSScriptRoot 'build\windows-node-payload.mjs') $runtimePackageRoot $releaseRoot
+    if ($LASTEXITCODE -ne 0) { throw "Windows Node payload preparation failed with exit code $LASTEXITCODE" }
+    if ($UserLibvipsInputDirectory) {
+        . (Join-Path $PSScriptRoot 'build\Stage-UserLibvips.ps1')
+        $userLibraryBinding = Stage-AgentMemoryUserLibvips -InputDirectory $UserLibvipsInputDirectory -RuntimePackageRoot $runtimePackageRoot
+    }
+    & $node (Join-Path $PSScriptRoot 'verification\payload-import-smoke.mjs') $runtimePackageRoot $sourceRoot
     if ($LASTEXITCODE -ne 0) { throw "release smoke failed with exit code $LASTEXITCODE" }
     }
 }
@@ -261,7 +322,7 @@ finally {
 }
 
 if ($ValidationOnly) {
-    $result = [ordered]@{ success = $true; validation_only = $true; source_commit = $sourceCommit; source_dirty = ($sourceDirty.Count -gt 0); tests_skipped = [bool]$SkipTests; release_created = $false }
+    $result = [ordered]@{ success = $true; validation_only = $true; pnpm = $pnpmVersion; source_commit = $sourceCommit; source_dirty = ($sourceDirty.Count -gt 0); tests_skipped = [bool]$SkipTests; release_created = $false }
 }
 else {
 $scriptsOut = Join-Path $payloadRoot 'scripts'
@@ -275,8 +336,10 @@ foreach ($directory in @($scriptsOut, $binOut, $configOut, $srcOut)) {
 Copy-Item -Path (Join-Path $PSScriptRoot 'powershell\*.ps1') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-turn.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-visibility.mjs') -Destination $scriptsOut
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-privacy.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-project.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-recall-evidence.mjs') -Destination $scriptsOut
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'hooks\codex-recall-scope.mjs') -Destination $scriptsOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'node\agentmemory-worker.mjs') -Destination $binOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\iii-config.yaml') -Destination $configOut
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config\hook-spec.json') -Destination $configOut
@@ -300,6 +363,14 @@ $licensesOut = Join-Path $payloadRoot 'licenses'
 [void][IO.Directory]::CreateDirectory($licensesOut)
 foreach ($name in @('LICENSE', 'NOTICE', 'iii-LICENSE_ELv2', 'iii-NOTICE', 'iii-PATENTS', 'THIRD-PARTY-NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $releaseRoot $name) -Destination $licensesOut
+}
+
+# Optional opaque reviewed source evidence: explicit input, no fetch/unpack/execute.
+$nativeSourceEvidence = $null
+if ($NativeSourceEvidenceArchive) {
+    $sourceEvidenceOutput = & $node (Join-Path $PSScriptRoot 'verification\native-source-evidence.mjs') $NativeSourceEvidenceArchive $releaseRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Native source evidence staging failed; candidate is unqualified.' }
+    $nativeSourceEvidence = $sourceEvidenceOutput | ConvertFrom-Json
 }
 
 $cscCandidates = @(
@@ -365,7 +436,7 @@ $manifest = [ordered]@{
     }
     build_runtime = [ordered]@{
         node = (& $node --version).Trim()
-        pnpm = (& $pnpm --version).Trim()
+        pnpm = $pnpmVersion
         iii = [string]$thirdParty.iii_engine.version
         iii_source_commit = [string]$thirdParty.iii_engine.source_commit
         iii_patch_sha256 = [string]$thirdParty.iii_engine.patch_sha256
@@ -379,7 +450,17 @@ $manifest = [ordered]@{
     release_files = $releaseFiles
     immutable_files = $files
 }
+if ($nativeSourceEvidence) { $manifest['native_source_evidence'] = $nativeSourceEvidence }
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+if ($userLibraryBinding) {
+    $manifest['distribution_variant'] = 'user-libvips'
+    $manifest['custom_libraries'] = [ordered]@{
+        schema_version=1; kind='user-built-libvips'; input_digest=$userLibraryBinding.input_digest
+        descriptor_path="$($manifest.package_relative_path)/user-libvips-input.json"
+        provenance_path="$($manifest.package_relative_path)/user-libvips-provenance.json"
+        provenance_sha256=$userLibraryBinding.provenance_sha256
+    }
+}
 [System.IO.File]::WriteAllText(
     (Join-Path $releaseRoot 'release-manifest.json'),
     ($manifest | ConvertTo-Json -Depth 8),
@@ -399,6 +480,10 @@ if ($buildKind -eq 'release_candidate') {
         suites = $suiteProofs
         windows_e2e = [ordered]@{ source_commit = $sourceCommit; manifest_sha256 = $manifestDigest; fresh_install = 'not-run'; managed_update = 'not-run'; restart = 'not-run'; failure_recovery = 'not-run' }
         operating_e2e = $null }
+    if ($userLibraryBinding) { $qualification['library_input_digest'] = $userLibraryBinding.input_digest }
+    if ($privateScratch) {
+        $qualification.storage_lifecycle = [ordered]@{ schema_version=1; policy='private-install-candidate-rolling-v1'; scratch_directory=$privateScratch; release_root=$releaseRoot; private_not_published=$true; pinned=[bool]$PinPrivateInstallCandidate }
+    }
     [IO.File]::WriteAllText((Join-Path $outputRoot 'qualification.json'), ($qualification | ConvertTo-Json -Depth 12), $utf8NoBom)
 }
 
@@ -408,6 +493,8 @@ $result = [ordered]@{
     tests_skipped = [bool]$SkipTests
     release_root = $releaseRoot
     payload_files = $files.Count
+    private_install_candidate = ($buildKind -eq 'release_candidate' -and [bool]$privateScratch)
+    source_payload_disposition = if ($buildKind -eq 'release_candidate' -and $privateScratch) { 'pending_acceptance' } else { 'retained_unclassified' }
     version = $downstreamVersion
     agentmemory_version = $version
     qualification_path = if ($buildKind -eq 'release_candidate') { Join-Path $outputRoot 'qualification.json' } else { $null }

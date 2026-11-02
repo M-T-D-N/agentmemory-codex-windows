@@ -74,6 +74,7 @@ export function parseGraphXml(
   xml: string,
   observationIds: string[],
   omitUnknownRelationshipEndpoints = false,
+  singleSourceCitationAlias?: string,
 ): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
@@ -85,6 +86,9 @@ export function parseGraphXml(
   const entitySection = envelope[1];
   const relationshipSection = envelope[2];
   const allowedObservationIds = new Set(observationIds);
+  if (singleSourceCitationAlias !== undefined && allowedObservationIds.size !== 1) {
+    throw new Error("A temporary source citation requires exactly one original observation");
+  }
   const nodeByReference = new Map<string, GraphNode>();
 
   const citedObservationIds = (
@@ -95,7 +99,8 @@ export function parseGraphXml(
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean);
-    const unique = [...new Set(values)];
+    const unique = [...new Set(values.map(value =>
+      singleSourceCitationAlias !== undefined && value === singleSourceCitationAlias ? observationIds[0]! : value))];
     if (unique.length === 0) {
       if (allowedObservationIds.size === 1) return [...allowedObservationIds];
       throw new Error(`${label} is missing source_observation_ids`);

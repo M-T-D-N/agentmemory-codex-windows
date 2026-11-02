@@ -5,13 +5,18 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 // declare the mock's mutable state alongside the mock itself.
 const state = vi.hoisted(() => ({
   queryCalls: [] as Array<{ systemPrompt: string; userPrompt: string }>,
+  loadCalls: 0,
+  sdkUnavailable: false,
   mockResult: "<result>ok</result>" as
     | string
     | ((systemPrompt: string, userPrompt: string) => string),
 }));
 
-vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
-  query: ({
+vi.mock("../src/providers/agent-sdk-loader.js", () => ({
+  loadAgentSdk: async () => {
+    state.loadCalls++;
+    if (state.sdkUnavailable) throw new Error("synthetic SDK unavailable");
+    return { query: ({
     prompt,
     options,
   }: {
@@ -27,6 +32,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
       yield { type: "result", result: value } as { type: "result"; result: string };
     }
     return gen();
+  } };
   },
 }));
 
@@ -35,12 +41,34 @@ import { AgentSDKProvider } from "../src/providers/agent-sdk.js";
 describe("AgentSDKProvider recursion guard", () => {
   beforeEach(() => {
     state.queryCalls.length = 0;
+    state.loadCalls = 0;
+    state.sdkUnavailable = false;
     state.mockResult = "<result>ok</result>";
     delete process.env.AGENTMEMORY_SDK_CHILD;
   });
 
   afterEach(() => {
     delete process.env.AGENTMEMORY_SDK_CHILD;
+    vi.unstubAllEnvs();
+  });
+
+  it("noop and local-qwen remain selectable without loading an unavailable SDK", async () => {
+    state.sdkUnavailable = true;
+    vi.stubEnv("AGENTMEMORY_LOCAL_QWEN_COORDINATION_DIR", process.env.TEMP!);
+    const { createProvider } = await import("../src/providers/index.js");
+    const noop = createProvider({ provider: "noop", model: "noop", maxTokens: 100 });
+    expect(await noop.summarize("synthetic", "synthetic")).toBe("");
+    expect(createProvider({ provider: "local-qwen", model: "synthetic", maxTokens: 100 }).name).toBe("local-qwen");
+    expect(state.loadCalls).toBe(0);
+    expect(state.queryCalls).toHaveLength(0);
+  });
+
+  it("an explicitly selected absent SDK returns its error and restores the child marker", async () => {
+    state.sdkUnavailable = true;
+    await expect(new AgentSDKProvider().summarize("synthetic", "synthetic")).rejects.toThrow("synthetic SDK unavailable");
+    expect(state.loadCalls).toBe(1);
+    expect(state.queryCalls).toHaveLength(0);
+    expect(process.env.AGENTMEMORY_SDK_CHILD).toBeUndefined();
   });
 
   it("concurrent summarize calls each return the SDK result (no empty siblings)", async () => {

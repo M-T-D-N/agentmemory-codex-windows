@@ -29,6 +29,54 @@ describe("SearchIndex", () => {
     index = new SearchIndex();
   });
 
+  it.each([
+    ["AM_NATIVE31_SERVICE_ONLY.", "AM_NATIVE31_SERVICE_ONLY"],
+    ["AM_NATIVE31_SERVICE_ONLY...", "AM_NATIVE31_SERVICE_ONLY."],
+    ["memory.", "memories"],
+    ["stories.", "story"],
+    ["qwen\\_only.", "qwen_only"],
+    ["123.", "123"],
+  ])("finds a sentence-final token %s with query %s", (narrative, query) => {
+    index.add(makeObs({ id: "synthetic-period", title: "", subtitle: "", narrative, facts: [], concepts: [], files: [] }));
+    expect(index.search(query).map(row => row.obsId)).toEqual(["synthetic-period"]);
+    expect(SearchIndex.deserialize(index.serialize()).search(query)).toEqual(index.search(query));
+  });
+
+  it.each([2, 3])("normalizes sentence periods in existing v%s snapshots without losing term frequency", version => {
+    const entries = [
+      ["a", { obsId: "a", sessionId: "memory", termCount: 3 }],
+      ["b", { obsId: "b", sessionId: "memory", termCount: 1 }],
+    ];
+    const legacy = version === 2 ? {
+      v: 2, entries, inverted: [["memory.", ["a"]], ["memori", ["a", "b"]]],
+      docTerms: [["a", [["memory.", 2], ["memori", 1]]], ["b", [["memori", 1]]]], totalDocLength: 4,
+    } : {
+      v: 3, documents: [["a", "memory", 3], ["b", "memory", 1]], terms: ["memory.", "memori"],
+      postings: [[0], [0, 1]], docTerms: [[0, [[0, 2], [1, 1]]], [1, [[1, 1]]]], totalDocLength: 4,
+    };
+    const expected = SearchIndex.deserialize(JSON.stringify({
+      v: 3, documents: [["a", "memory", 3], ["b", "memory", 1]], terms: ["memori"],
+      postings: [[0, 1]], docTerms: [[0, [[0, 3]]], [1, [[0, 1]]]], totalDocLength: 4,
+    }));
+    const restored = SearchIndex.deserialize(JSON.stringify(legacy));
+    expect(restored.search("memories")).toEqual(expected.search("memories"));
+    expect(restored.search("memory.")).toEqual(expected.search("memories"));
+    expect(restored.serialize()).toBe(expected.serialize());
+    expect(SearchIndex.deserialize(restored.serialize()).serialize()).toBe(restored.serialize());
+    restored.remove("a");
+    expect(restored.search("memory").map(row => row.obsId)).toEqual(["b"]);
+  });
+
+  it("preserves dotted filenames, versions, URLs and Windows path spelling", () => {
+    const literals = [".env", "module.ts", "1.2.3", "example.com", "../memory.", String.raw`D:\folder\memory.`, String.raw`\\server\share\memory.`];
+    for (const [n, narrative] of literals.entries()) {
+      index.add(makeObs({ id: `literal-${n}`, title: "", subtitle: "", narrative, facts: [], concepts: [], files: [] }));
+      expect(index.search(narrative).map(row => row.obsId)).toContain(`literal-${n}`);
+    }
+    expect(index.search("memory")).toEqual([]);
+    expect(SearchIndex.deserialize(index.serialize()).serialize()).toBe(index.serialize());
+  });
+
   it("counts memory and lesson documents apart from observations", () => {
     index.add(makeObs({ id: "obs_1" }));
     index.add(makeObs({ id: "mem_1", sessionId: "memory" }));

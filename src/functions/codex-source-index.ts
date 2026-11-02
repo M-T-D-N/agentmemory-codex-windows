@@ -1,3 +1,5 @@
+import { CodexReadBudget } from "../replay/codex-read-budget.js";
+import { throwIfNativeSourceStopping } from "../shutdown.js";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -57,7 +59,7 @@ function classifyThread(row: Record<string, unknown>, sourceRoot: string): Codex
     ...([0, 1].includes(row.has_conversation_evidence as number) ? { hasConversationEvidence: row.has_conversation_evidence === 1 } : {}) };
 }
 
-async function classifyIndexedThread(row: Record<string, unknown>, root: string): Promise<CodexThreadIndexEntry> {
+async function classifyIndexedThread(row: Record<string, unknown>, root: string, signal?: AbortSignal): Promise<CodexThreadIndexEntry> {
   const classified = classifyThread(row, root);
   if (classified.status !== "unknown" || row.source !== "unknown" || typeof row.cwd !== "string" || row.thread_source !== null ||
       ![0, 1].includes(row.archived as number) || !timestamp(row.created_at_ms) || !timestamp(row.updated_at_ms)) return classified;
@@ -76,12 +78,13 @@ async function classifyIndexedThread(row: Record<string, unknown>, root: string)
       return { status: "candidate", sessionId: source.sessionId, sourcePath: source.relativePath,
         cwd: canonicalCodexCwd(source.cwd), source: source.source, threadSource, createdAt: source.createdAt,
         updatedAt: new Date(Math.max(Date.parse(source.createdAt), row.updated_at_ms as number)).toISOString(), archived: row.archived === 1 };
-    });
-  } catch { return classified; }
+    }, new CodexReadBudget({}, signal));
+  } catch (error) { throwIfNativeSourceStopping(signal); return classified; }
 }
 
 /** A bounded view of Codex's source index; candidates are not ownership or capture authorization. */
-export async function readCodexThreadIndex(sourceRoot: string, input: { afterId?: string; sessionId?: string; limit?: number } = {}) {
+export async function readCodexThreadIndex(sourceRoot: string, input: { afterId?: string; sessionId?: string; limit?: number; signal?: AbortSignal } = {}) {
+  throwIfNativeSourceStopping(input.signal);
   if (!sourceRoot || !isAbsolute(sourceRoot)) throw Error("Codex source root is not configured");
   const limit = input.limit ?? 200;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500 ||
@@ -133,7 +136,10 @@ export async function readCodexThreadIndex(sourceRoot: string, input: { afterId?
   await verifyPath();
   const hasMore = rows.length > limit;
   const entries: CodexThreadIndexEntry[] = [];
-  for (const row of rows.slice(0, limit)) entries.push(await classifyIndexedThread(row, root));
+  for (const row of rows.slice(0, limit)) {
+    throwIfNativeSourceStopping(input.signal);
+    entries.push(await classifyIndexedThread(row, root, input.signal));
+  }
   return { version: 5 as const, checkedAt: new Date().toISOString(), entries,
     nextAfterId: hasMore ? entries.at(-1)!.sessionId : null };
 }

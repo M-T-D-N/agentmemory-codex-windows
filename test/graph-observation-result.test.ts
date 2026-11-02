@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import type { CompressedObservation, Session } from "../src/types.js";
 import { KV } from "../src/state/schema.js";
+import { createLocalQwenLifecycle } from "../src/providers/local-qwen-lifecycle.js";
+import type { ProviderRuntimeInfo } from "../src/types.js";
 import { sessionLifecycleLockKey } from "../src/functions/session-lifecycle.js";
 import { keyedLockBusy } from "../src/state/keyed-mutex.js";
 import { resumeGraphWritePlan } from "../src/state/graph-write-plan.js";
 import { graphObservationDigest, readGraphCompletionContext } from "../src/functions/graph-observation-result.js";
 import { registerGraphFunction } from "../src/functions/graph.js";
-import { registerSemanticGraphBacklogFunction, selectSemanticGraphBatch, semanticGraphCursorsAtEnd } from "../src/functions/semantic-graph-backlog.js";
+import { registerSemanticGraphBacklogFunction, selectSemanticGraphBatch, semanticGraphCursorsAtEnd, startSemanticGraphBacklogScheduler } from "../src/functions/semantic-graph-backlog.js";
 
 vi.mock("../src/logger.js", () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 vi.mock("../src/config.js", async original => ({ ...await original<typeof import("../src/config.js")>(), isGraphExtractionEnabled: () => true }));
@@ -219,4 +221,50 @@ it.each(["The following is the Codex agent history added since your last approva
  const current=(await f.kv.get<Session>(KV.sessions,"s"))!;
  expect(semanticGraphCursorsAtEnd(current,[row],await readGraphCompletionContext(f.kv as never,current))).toBe(true);
  expect(await f.extract([row])).toMatchObject({skipped:"already_processed",processingCompleted:true});
+});
+
+
+describe("isolated Qwen host lifecycle through real graph backlog and extraction", () => {
+  it.each(["owned", "borrowed", "consumer-held"])("processes a synthetic observation and respects %s ownership at idle", async ownership => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    const original = structuredClone(f.row);
+    let ready = false, releaseDeferred = false;
+    const runtime: ProviderRuntimeInfo = { provider: "local-qwen", model: "synthetic-fixture", contextTokens: 131072,
+      maxInputTokens: 32768, maxOutputTokens: 4096, fingerprint: "synthetic-qwen-fixture" };
+    const provider = Object.assign(f.provider, { name: "local-qwen",
+      probe: async () => { if (!ready) throw Error("synthetic offline"); return runtime; },
+      getRuntimeInfo: () => ready ? runtime : null,
+    });
+    provider.compress.mockResolvedValue('<entities><entity type="decision" name="Synthetic choice" source_observation_ids="new"/></entities><relationships></relationships>');
+    const token = "1234567890abcdef1234567890abcdef";
+    const invoke = vi.fn(async (_executable: string, args: string[]) => {
+      if (args.includes("start-qwen")) {
+        ready = true;
+        return JSON.stringify({ status: "ready_owned", started_by_request: ownership !== "borrowed", service: { owner_token: token } });
+      }
+      expect(args).toContain("stop-qwen"); expect(args).toContain("-ExpectedOwnerToken"); expect(args).toContain(token);
+      if (ownership === "consumer-held" && !releaseDeferred) { releaseDeferred = true; throw Error("synthetic consumer guard"); }
+      ready = false; return JSON.stringify({ status: "stopped" });
+    });
+    const lifecycle = createLocalQwenLifecycle({ platform: "win32", script: "D:/synthetic/Invoke-LocalAI.ps1",
+      powershell: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", exists: () => true, invoke })!;
+    const scheduler = startSemanticGraphBacklogScheduler(f.sdk as never, provider, null,
+      { lifecycle, readyGraceMs: 1, idleReleaseMs: 1000, eventDrainCooldownMs: 1000, intervalMs: 60_000 });
+    try {
+      await vi.advanceTimersByTimeAsync(30);
+      expect(invoke.mock.calls[0][1]).toContain("-Background");
+      expect(provider.compress).toHaveBeenCalledOnce();
+      expect(await f.kv.get(KV.sessions, "s")).toMatchObject({ semanticGraphStatus: "complete", semanticGraphThroughObservationId: "new" });
+      expect(await f.kv.get(KV.graphObservationResults("s"), "new")).toMatchObject({ outcome: "extracted", analyzer: runtime.fingerprint });
+      expect(await f.kv.get(KV.observations("s"), "new")).toEqual(original);
+      expect(await f.kv.list(KV.graphNodes)).toEqual(expect.arrayContaining([expect.objectContaining({ name: "Synthetic choice", project: "p" })]));
+      await vi.advanceTimersByTimeAsync(2100);
+      if (ownership === "borrowed") { expect(ready).toBe(true); expect(invoke).toHaveBeenCalledOnce(); }
+      else { expect(ready).toBe(false); expect(invoke).toHaveBeenCalledTimes(ownership === "consumer-held" ? 3 : 2); }
+      scheduler.wake(); await vi.advanceTimersByTimeAsync(1100);
+      expect(provider.compress).toHaveBeenCalledOnce();
+      expect(await f.kv.list(KV.observations("s"))).toEqual([original]);
+    } finally { await scheduler.stop(); vi.useRealTimers(); }
+  });
 });

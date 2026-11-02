@@ -14,6 +14,7 @@ import {
   registerGraphFunction,
 } from "../src/functions/graph.js";
 import { registerRememberFunction } from "../src/functions/remember.js";
+import { parseGraphXml } from "../src/functions/graph-derivation.js";
 import type {
   CompressedObservation,
   GraphNode,
@@ -1142,17 +1143,20 @@ describe("Graph Functions", () => {
     expect(await localKv.list<GraphNode>("mem:graph:nodes")).toEqual([]);
   });
 
-  it.each(["valid", "invalid_again", "multiple_sources"])("regenerates only an exact single-source citation failure once: %s", async (outcome) => {
+  it.each(["valid", "alias", "alias_and_exact", "unknown_alias", "invalid_again", "multiple_sources"])("regenerates only an exact single-source citation failure once: %s", async (outcome) => {
     const localSdk = mockSdk();
     const localKv = mockKV();
-    const sourceId = "obs_mtj6kfub_f02ae9c7fc32";
-    const invalidId = "obs_mtj6kfub_f02ae9c7";
+    const sourceId = "obs_codex_" + "1234567890abcdef".repeat(4);
+    const invalidId = sourceId.slice(0, 23) + sourceId.slice(29);
+    const succeeds = ["valid", "alias", "alias_and_exact"].includes(outcome);
+    const regeneratedId = outcome === "alias" ? "source_1" : outcome === "alias_and_exact" ? `source_1,${sourceId}`
+      : outcome === "valid" ? sourceId : outcome === "unknown_alias" ? "source_2" : "obs_foreign";
     const observation = { ...testObs, id: sourceId, narrative: "Keep the current local root until the user approves relocation.", concepts: [], files: [] };
     const second = { ...observation, id: "obs_second", timestamp: "2026-02-01T11:00:00Z" };
     const xml = (id: string) => `<entities><entity key="n1" type="decision" name="Keep current root" source_observation_ids="${id}"/></entities><relationships></relationships>`;
     const provider = {
       name: "local-qwen",
-      compress: vi.fn().mockResolvedValueOnce(xml(invalidId)).mockResolvedValueOnce(xml(outcome === "valid" ? sourceId : "obs_foreign")),
+      compress: vi.fn().mockResolvedValueOnce(xml(invalidId)).mockResolvedValueOnce(xml(regeneratedId)),
       summarize: vi.fn(),
       getRuntimeInfo: () => null,
     };
@@ -1163,18 +1167,19 @@ describe("Graph Functions", () => {
     await localKv.set("mem:obs:foreign_session", "obs_foreign", { ...observation, id: "obs_foreign", sessionId: "foreign_session" });
     registerGraphFunction(localSdk as never, localKv as never, provider as never);
     const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: outcome === "multiple_sources" ? [observation, second] : [observation] });
-    expect(result.semanticCompleted).toBe(outcome === "valid");
+    expect(result.semanticCompleted).toBe(succeeds);
     expect(provider.compress).toHaveBeenCalledTimes(outcome === "multiple_sources" ? 1 : 2);
     if (outcome !== "multiple_sources") {
       const regeneration = provider.compress.mock.calls[1]![1];
       expect(regeneration).toContain(observation.narrative);
       expect(regeneration).toContain(`Observation ID: ${sourceId}`);
       expect(regeneration).toContain("Regenerate a fresh result");
+      expect(regeneration).toContain('source_observation_ids="source_1"');
       expect(regeneration).not.toContain(`source_observation_ids="${invalidId}"`);
     }
     const session = await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1");
     const providerNodes = (await localKv.list<GraphNode>("mem:graph:nodes")).filter(node => node.properties?.curation_lane === "provider_graph");
-    if (outcome === "valid") {
+    if (succeeds) {
       expect(session).toMatchObject({ semanticGraphStatus: "complete", semanticGraphThroughObservationId: sourceId });
       expect(providerNodes).toHaveLength(1);
       expect(providerNodes[0]!.sourceObservationIds).toEqual([sourceId]);
@@ -1183,6 +1188,35 @@ describe("Graph Functions", () => {
       expect(session?.semanticGraphThroughObservationId).toBeUndefined();
       expect(providerNodes).toEqual([]);
     }
+  });
+
+  it.each(["source_1", "source_2"])("binds a regenerated relationship to the sole source or rejects it: %s", async citation => {
+    const localSdk = mockSdk(), localKv = mockKV();
+    const observation = { ...testObs, id: "obs_codex_" + "abcdef1234567890".repeat(4), narrative: "Synthetic runner uses synthetic parser.", concepts: [], files: [] };
+    const initial = '<entities><entity key="n1" type="function" name="runner" source_observation_ids="truncated_id"/></entities><relationships></relationships>';
+    const regenerated = `<entities><entity key="n1" type="function" name="runner" source_observation_ids="source_1"/><entity key="n2" type="function" name="parser" source_observation_ids="source_1"/></entities><relationships><relationship type="uses" source="n1" target="n2" source_observation_ids="${citation}"/></relationships>`;
+    const provider = { name: "local-qwen", compress: vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce(regenerated), summarize: vi.fn() };
+    await localKv.set("mem:sessions", "ses_1", { id: "ses_1", project: "/project-a", status: "completed", observationCount: 1 });
+    await localKv.set("mem:obs:ses_1", observation.id, observation);
+    registerGraphFunction(localSdk as never, localKv as never, provider as never);
+    const result = await localSdk.trigger("mem::graph-extract", { project: "/project-a", sessionId: "ses_1", observations: [observation] });
+    expect(result.semanticCompleted).toBe(citation === "source_1");
+    expect(provider.compress).toHaveBeenCalledTimes(2);
+    const nodes = await localKv.list<GraphNode>("mem:graph:nodes"), edges = await localKv.list<GraphEdge>("mem:graph:edges");
+    if (citation === "source_1") {
+      expect(nodes).toHaveLength(2); expect(edges).toHaveLength(1);
+      for (const record of [...nodes, ...edges]) expect(record.sourceObservationIds).toEqual([observation.id]);
+    } else {
+      expect(nodes).toEqual([]); expect(edges).toEqual([]);
+      expect((await localKv.get<Record<string, unknown>>("mem:sessions", "ses_1"))?.semanticGraphThroughObservationId).toBeUndefined();
+    }
+    expect(await localKv.get("mem:obs:ses_1", observation.id)).toEqual(observation);
+  });
+
+  it("does not enable temporary citations for ordinary or multiple-source parsing", () => {
+    const xml = '<entities><entity key="n1" type="concept" name="Synthetic" source_observation_ids="source_1"/></entities><relationships></relationships>';
+    expect(() => parseGraphXml(xml, ["obs_original"])).toThrow("outside the input batch");
+    expect(() => parseGraphXml(xml, ["obs_a", "obs_b"], false, "source_1")).toThrow("exactly one original observation");
   });
 
   it("discards parsed provider nodes when a regenerated relationship still cites a foreign observation", async () => {

@@ -8,6 +8,8 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $release = [IO.Path]::GetFullPath($ReleaseRoot)
+$qualification = Get-Content -LiteralPath $QualificationPath -Raw | ConvertFrom-Json
+if ($qualification.PSObject.Properties['storage_lifecycle']) { throw 'Private scratch install candidates cannot become public distributions; build a delivery outside owned task scratch.' }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $output) { throw 'OutputDirectory already exists.' }
 if ($output.StartsWith($release.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Distribution output must be outside ReleaseRoot.' }

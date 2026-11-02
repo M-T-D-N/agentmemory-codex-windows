@@ -308,9 +308,10 @@ describe("graph compaction on boot", () => {
   it("is scheduled after the viewer starts and never awaited during boot", () => {
     const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8").replaceAll("\r\n", "\n");
     const viewerAt = src.indexOf("startViewerServer(\n");
-    const runAt = src.indexOf("void runGraphCompactOnBoot(");
+    const runAt = src.indexOf("return runGraphCompactOnBoot(");
     expect(viewerAt).toBeGreaterThan(0);
     expect(runAt).toBeGreaterThan(viewerAt);
+    expect(src).toMatch(/workerLifecycle\.timeout\(\(\) => \{\s*return runGraphCompactOnBoot/);
     expect(src).not.toMatch(/await runGraphCompactOnBoot/);
     expect(src).toMatch(/if \(isGraphCompactOnBootEnabled\(\)\)[\s\S]*?setGraphCompactBootDisabled\(\)/);
   });

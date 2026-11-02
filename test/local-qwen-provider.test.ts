@@ -129,9 +129,7 @@ function installFetchMock(): ReturnType<typeof vi.fn> {
   return mock;
 }
 
-// Several real Windows helper launches each have a 10s process bound.
-// The suite deadline must cover those calls before cleanup restores shared mocks.
-describe("LocalQwenProvider", { timeout: 60_000 }, () => {
+describe("LocalQwenProvider", () => {
   beforeEach(async () => {
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     actualCoordination = (await vi.importActual<typeof import("../src/providers/local-qwen-coordination.js")>("../src/providers/local-qwen-coordination.js")).invokeQwenCoordination;
@@ -264,7 +262,7 @@ describe("LocalQwenProvider", { timeout: 60_000 }, () => {
     expect(rejected.reason.message).toBe("local_qwen_deferred:lease_busy");
     expect(releaseOperation).toHaveBeenCalledTimes(5);
     expect(existsSync(join(coordinationDir, "qwen-use.lock"))).toBe(false);
-  });
+  }, 15000); // Several real Windows coordination helpers run in this barrier test.
 
   it("preserves the request error and exhausted cleanup error together", async () => {
     const fetch = installFetchMock();

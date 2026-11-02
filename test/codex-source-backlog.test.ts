@@ -1,8 +1,10 @@
+import { NativeSourceLifecycle, throwIfNativeSourceStopping, waitForShutdownTasks } from "../src/shutdown.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
-import { registerCodexSourceBacklog, startCodexSourceScheduler } from "../src/functions/codex-source-backlog.js";
+import { registerCodexSourceBacklog, startCodexSourceScheduler, codexDiscoveryFailureReason } from "../src/functions/codex-source-backlog.js";
 import * as qwenLifecycle from "../src/providers/local-qwen-lifecycle.js";
 import { KV } from "../src/state/schema.js";
+import { CodexReadBudget, CodexReadBudgetError } from "../src/replay/codex-read-budget.js";
 import type { Session } from "../src/types.js";
 import { changeArchiveState } from "../src/functions/archive.js";
 
@@ -14,6 +16,75 @@ const drain = (overrides: object = {}) => ({ unknown: 0, captureUnknown: 0, requ
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("bounded native source backlog", () => {
+  it("reports a fresh canonical read deadline without inventing an additional RPC failure", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/native");
+    const sdk = mockSdk(), kv = mockKV(); await kv.set(KV.sessions, "s", session("s"));
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine");
+    sdk.registerFunction("mem::codex-source-capture", async () => {
+      const row = (await kv.get<Session>(KV.sessions, "s"))!;
+      await kv.set(KV.sessions, "s", { ...row, codexNativeCapture: { ...row.codexNativeCapture!, status: "unknown",
+        issue: "native_source_read_budget_exceeded", checkedAt: new Date().toISOString(),
+        readBudget: new CodexReadBudget().usage() } });
+      throw Error("Remote function failed: source read budget exceeded");
+    });
+    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ captureUnknown: 1 });
+    const failed = (await kv.get<Session>(KV.sessions, "s"))!.codexNativeCapture!;
+    expect(failed.issue).toBe("native_source_read_budget_exceeded");
+    expect(failed.cursor!.byteOffset).toBe(0); expect(failed.readBudget).toBeDefined();
+    expect(failed.lastFailure).toBeUndefined();
+  });
+  it("does not persist shutdown as capture failure or start another source after cancellation", async () => {
+    vi.stubEnv("AGENTMEMORY_CODEX_SOURCE_ROOT", "C:/synthetic");
+    const sdk = mockSdk(), kv = mockKV(), lifecycle = new NativeSourceLifecycle();
+    for (const id of ["a", "b"]) await kv.set(KV.sessions, id, session(id));
+    const before = structuredClone(await kv.list(KV.sessions));
+    registerCodexSourceBacklog(sdk as never, kv as never, () => "mine", lifecycle);
+    sdk.registerFunction("mem::codex-source-discover", async () => ({ unknown: 0, reconcileRequired: 0, cycleComplete: true, failures: [] }));
+    let finish!: () => void; const held = new Promise<void>(resolve => { finish = resolve; });
+    const captured: string[] = [];
+    sdk.registerFunction("mem::codex-source-capture", input => lifecycle.run(async () => {
+      captured.push((input as { sessionId: string }).sessionId); await held; throwIfNativeSourceStopping(lifecycle.signal);
+    }));
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    try {
+      await vi.waitFor(() => expect(captured).toEqual(["a"]));
+      const stopped = waitForShutdownTasks([lifecycle.stop(), scheduler.stop()]);
+      finish(); await stopped; scheduler.wake(); await Promise.resolve();
+      expect(captured).toEqual(["a"]); expect(await kv.list(KV.sessions)).toEqual(before);
+      expect(scheduler.status().consecutiveFailures).toBe(0);
+      await expect(sdk.trigger("mem::codex-source-drain", {})).rejects.toThrow("shutdown requested");
+    } finally { finish(); await scheduler.stop(); }
+  });
+
+  it("keeps exact safe discovery causes through scheduler reporting without leaking raw errors", async () => {
+    vi.useFakeTimers();
+    const failures = [
+      new CodexReadBudgetError("decoded_bytes", new CodexReadBudget().usage()),
+      Error("A complete supported native inventory is required before capture initialization"),
+      Error("Unresolved capture correspondence or legacy forget provenance prevents initialization"),
+      Error("Reviewed source hold no longer matches the native inventory"),
+      Error("Source cwd reconciliation requires the same source identity and complete matching current cwd"),
+      Error("Native capture cwd does not match the canonical session"),
+      Error("private/source: private original text"),
+    ];
+    const reasons = failures.map(codexDiscoveryFailureReason);
+    expect(reasons).toEqual(["native_source_read_budget_exceeded", "native_source_inventory_incomplete",
+      "native_source_correspondence_unverified", "native_source_hold_changed", "native_source_scope_mismatch", "native_source_scope_mismatch", "native_source_discovery_failed"]);
+    const sdk = { trigger: vi.fn().mockResolvedValue(drain({ discovery: { unknown: failures.length, reconcileRequired: 0,
+      cycleComplete: true, failures: reasons.map((error, i) => ({ sessionId: `s${i}`, error })) } })) };
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const report = scheduler.status();
+      expect(report.status).toBe("attention"); expect(report.pipeline.discoveryDetailsComplete).toBe(false);
+      expect(report.pipeline.discoveryRecords.map(row => row.reason).sort()).toEqual([...reasons].sort());
+      expect(JSON.stringify(report)).not.toContain("private");
+      sdk.trigger.mockResolvedValue(drain({ discovery: { unknown: 5, reconcileRequired: 0, cycleComplete: true,
+        failures: reasons.slice(0, 5).map((error, i) => ({ sessionId: `s${i}`, error })) } }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scheduler.status().pipeline.discoveryDetailsComplete).toBe(true);
+    } finally { await scheduler.stop(); }
+  });
   it("preserves a completed cycle timestamp while the next batch becomes incomplete", async () => {
     vi.useFakeTimers(); const sdk = { trigger: vi.fn().mockResolvedValue(drain({ captureCycleComplete: true })) };
     const scheduler = startCodexSourceScheduler(sdk as never);
@@ -499,4 +570,102 @@ it("separates held connection-refused history from current graph faults without 
   expect(await kv.get(KV.sessions,"off")).toMatchObject({semanticGraphLastError:"local_qwen_transport_failed:ECONNREFUSED:127.0.0.1:8000"});
   policy.mockReturnValue(undefined);
   expect(await sdk.trigger("mem::codex-source-drain",{})).toMatchObject({graphFailures:3,graphHeldTransportHistory:0});
+});
+
+
+describe("prompt append follow-up on the canonical scheduler", () => {
+  it("retains prompts while startup indexes load and captures the latest input before regular draining", async () => {
+    vi.useFakeTimers();
+    const requests: Array<{function_id:string;payload?:{promptTextDigest?:string}}> = [];
+    const sdk = { trigger: vi.fn(async (request: typeof requests[number]) => {
+      requests.push(request);
+      return request.function_id === "mem::codex-source-capture" ? {status:"caught_up",promptCaptured:true} : drain();
+    }) };
+    const scheduler = startCodexSourceScheduler(sdk as never, {deferStart:true});
+    const input = {project:"p",sessionId:"active",promptTurnId:"same",promptTextDigest:"a".repeat(64)};
+    try {
+      expect(scheduler.requestPromptCapture(input)).toBe(true);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(scheduler.requestPromptCapture({...input,promptTextDigest:"b".repeat(64)})).toBe(true);
+      await vi.advanceTimersByTimeAsync(1000);
+      scheduler.wake();
+      expect(requests).toEqual([]);
+      expect(scheduler.status().pendingPromptCaptures).toBe(1);
+      scheduler.start(); scheduler.start(); await vi.advanceTimersByTimeAsync(0);
+      expect(requests.map(row=>row.function_id)).toEqual(["mem::codex-source-capture","mem::codex-source-drain"]);
+      expect(requests[0]?.payload?.promptTextDigest).toBe("b".repeat(64));
+      expect(scheduler.status().pendingPromptCaptures).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(requests).toHaveLength(3);
+    } finally { await scheduler.stop(); }
+  });
+  it("can stop before startup completes without capturing or later restarting", async () => {
+    vi.useFakeTimers(); const sdk={trigger:vi.fn()};
+    const scheduler=startCodexSourceScheduler(sdk as never,{deferStart:true});
+    expect(scheduler.requestPromptCapture({project:"p",sessionId:"s",promptTurnId:"t"})).toBe(true);
+    await scheduler.stop(); scheduler.start(); scheduler.wake();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(sdk.trigger).not.toHaveBeenCalled();
+    expect(scheduler.status()).toMatchObject({status:"stopped",pendingPromptCaptures:0});
+  });
+  it("retries a not-yet-written prompt, coalesces its hook, and drains other sessions between attempts", async () => {
+    vi.useFakeTimers(); let available = false;
+    const calls: string[] = [];
+    const sdk = { trigger: vi.fn(async (request: {function_id: string}) => {
+      calls.push(request.function_id);
+      return request.function_id === "mem::codex-source-capture" ? {status:"caught_up",promptCaptured:available} : drain();
+    }) };
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const input = {project:"p",sessionId:"active",promptTurnId:"new-turn"};
+      expect(scheduler.requestPromptCapture(input)).toBe(true);
+      expect(scheduler.requestPromptCapture(input)).toBe(true);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(calls).toEqual(["mem::codex-source-drain","mem::codex-source-capture","mem::codex-source-drain"]);
+      available = true; await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler.status().pendingPromptCaptures).toBe(0);
+      expect(calls.slice(-2)).toEqual(["mem::codex-source-capture","mem::codex-source-drain"]);
+    } finally { await scheduler.stop(); }
+  });
+  it("cannot remove a newer turn queued while the older request is in flight, and shutdown waits", async () => {
+    vi.useFakeTimers(); let finish!: (value: unknown) => void;
+    const captured: string[] = [];
+    const sdk = { trigger: vi.fn(async (request: {function_id:string;payload:{promptTurnId:string;promptTextDigest?:string}}) => {
+      if (request.function_id !== "mem::codex-source-capture") return drain();
+      captured.push(request.payload.promptTextDigest!);
+      return new Promise(resolve => {finish=resolve;});
+    }) };
+    const scheduler = startCodexSourceScheduler(sdk as never);
+    const input={project:"p",sessionId:"active",promptTurnId:"same",promptTextDigest:"a".repeat(64)};
+    await vi.advanceTimersByTimeAsync(0); scheduler.requestPromptCapture(input);
+    await vi.advanceTimersByTimeAsync(250);
+    scheduler.requestPromptCapture({...input,promptTextDigest:"b".repeat(64)});
+    finish({status:"caught_up",promptCaptured:true}); await vi.advanceTimersByTimeAsync(0);
+    expect(scheduler.status().pendingPromptCaptures).toBe(1);
+    await vi.advanceTimersByTimeAsync(250); expect(captured).toEqual(["a".repeat(64),"b".repeat(64)]);
+    let stopped=false; const stopping=scheduler.stop().then(()=>{stopped=true;});
+    await Promise.resolve(); expect(stopped).toBe(false);
+    finish({status:"caught_up",promptCaptured:true}); await stopping;
+    expect(scheduler.requestPromptCapture(input)).toBe(false);
+    await vi.advanceTimersByTimeAsync(120000); expect(captured).toEqual(["a".repeat(64),"b".repeat(64)]);
+  });
+  it("bounds failed retries and pending sessions without starving regular drains or leaking errors", async () => {
+    vi.useFakeTimers(); const sdk={trigger:vi.fn(async (request:{function_id:string})=>{
+      if(request.function_id==="mem::codex-source-capture") throw Error("private path or source text");
+      return drain();
+    })};
+    const scheduler=startCodexSourceScheduler(sdk as never);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      scheduler.requestPromptCapture({project:"p",sessionId:"active",promptTurnId:"new"});
+      await vi.advanceTimersByTimeAsync(14250);
+      expect(sdk.trigger.mock.calls.filter(([r])=>r.function_id==="mem::codex-source-capture")).toHaveLength(4);
+      expect(sdk.trigger.mock.calls.filter(([r])=>r.function_id==="mem::codex-source-drain")).toHaveLength(5);
+      expect(scheduler.status()).toMatchObject({pendingPromptCaptures:0,consecutiveFailures:4});
+      expect(JSON.stringify(scheduler.status())).not.toContain("private");
+      for(let i=0;i<64;i++) expect(scheduler.requestPromptCapture({project:"p",sessionId:String(i),promptTurnId:"t"})).toBe(true);
+      expect(scheduler.requestPromptCapture({project:"p",sessionId:"overflow",promptTurnId:"t"})).toBe(false);
+    } finally {await scheduler.stop();}
+  });
 });

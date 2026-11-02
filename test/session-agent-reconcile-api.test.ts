@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { queryAudit } from "../src/functions/audit.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile, appendFile, rm } from "node:fs/promises";
@@ -19,9 +20,9 @@ describe("official Codex owner reconciliation entry point", () => {
   let persistence: IndexPersistence;
   const sourcePath = "sessions/rollout-native-a.jsonl";
   const base = { action: "reconcile-owner", sessionId: "native-a", project: "a", sourcePath, dryRun: true };
-  function register(secret: string | undefined = "test-only-secret") {
+  function register(secret: string | undefined = "test-only-secret", pending?: (request: {sessionId:string;project:string;promptTurnId:string}) => boolean) {
     sdk = mockSdk({ looseTrigger: true });
-    registerApiTriggers(sdk as never, kv as never, async () => ({ context: "", blocks: 0, tokens: 0 }), secret);
+    registerApiTriggers(sdk as never, kv as never, async () => ({ context: "", blocks: 0, tokens: 0 }), secret, undefined, undefined, undefined, undefined, undefined, undefined, pending);
     registerMcpEndpoints(sdk as never, kv as never);
   }
   const call = (body = {}, authorization = "Bearer test-only-secret") => sdk.trigger("api::session::start", {
@@ -54,6 +55,42 @@ describe("official Codex owner reconciliation entry point", () => {
   });
   afterEach(async () => { persistence.stop(); setIndexPersistence(null); vi.unstubAllEnvs(); vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); });
 
+  it("confirms only the exact appended turn, retaining partial lines and idempotent source identity", async () => {
+    const queued=vi.fn(()=>true); register("test-only-secret",queued);
+    sdk.registerFunction("stream::set",async()=>({}));
+    await kv.update(KV.sessions,"native-a",[{type:"set",path:"agentId",value:"codex-global"}]);
+    await kv.set(KV.observations("native-a"),"obs-a",{id:"obs-a",sessionId:"native-a",title:"prompt_submit",narrative:"preserved",timestamp:"2026-09-07T08:14:03Z",agentId:"codex-global",type:"conversation"});
+    const rows=(turn:string,text:string)=>[
+      {type:"event_msg",payload:{type:"task_started",turn_id:turn}},
+      {type:"response_item",timestamp:"2026-09-07T08:14:03Z",payload:{type:"message",role:"user",id:turn,content:[{type:"input_text",text}]}}
+    ].map(row=>JSON.stringify(row)).join("\n")+"\n";
+    await appendFile(join(root,sourcePath),rows("old","preserved"));
+    const plan=await call({action:"initialize-source"});
+    expect(await call({action:"initialize-source",dryRun:false,expectedVersion:plan.body.expectedVersion,reason:"synthetic source"})).toMatchObject({status_code:200});
+    expect(await call({action:"capture-source",promptTurnId:"new"})).toMatchObject({status_code:200,body:{promptCaptured:false,promptRetryQueued:true}});
+    expect(queued).toHaveBeenCalledTimes(1); queued.mockClear();
+    expect(await call({action:"capture-source",promptTurnId:"new",project:"wrong"})).toMatchObject({status_code:409});
+    expect(await call({action:"capture-source",promptTurnId:"new"},"")).toMatchObject({status_code:401});
+    expect(await call({action:"capture-source",promptTurnId:{invalid:true}})).toMatchObject({status_code:400});
+    expect(queued).not.toHaveBeenCalled();
+    const appended=rows("new","synthetic appended user");
+    await appendFile(join(root,sourcePath),appended.slice(0,-4));
+    expect(await call({action:"capture-source",promptTurnId:"new"})).toMatchObject({status_code:200,body:{promptCaptured:false}});
+    await appendFile(join(root,sourcePath),appended.slice(-4)); queued.mockClear();
+    expect(await call({action:"capture-source",promptTurnId:"new"})).toMatchObject({status_code:200,body:{promptCaptured:true,inserted:1}});
+    const saved=await kv.list(KV.observations("native-a"));
+    expect(saved).toHaveLength(2); expect(queued).not.toHaveBeenCalled();
+    expect(await call({action:"capture-source",promptTurnId:"new"})).toMatchObject({status_code:200,body:{promptCaptured:true,inserted:0}});
+    expect(await kv.list(KV.observations("native-a"))).toEqual(saved);
+    const second="synthetic same-turn steering <private>not a real secret</private>";
+    const digest=createHash("sha256").update("synthetic same-turn steering [REDACTED]").digest("hex");
+    expect(await call({action:"capture-source",promptTurnId:"new",promptTextDigest:digest})).toMatchObject({status_code:200,body:{promptCaptured:false,promptRetryQueued:true}});
+    expect(await call({action:"capture-source",promptTurnId:"new",promptTextDigest:"invalid"})).toMatchObject({status_code:400});
+    await appendFile(join(root,sourcePath),JSON.stringify({type:"response_item",timestamp:"2026-09-07T08:14:04Z",payload:{type:"message",role:"user",id:"second-user",content:[{type:"input_text",text:second}]}})+"\n");
+    expect(await call({action:"capture-source",promptTurnId:"new",promptTextDigest:digest})).toMatchObject({status_code:200,body:{promptCaptured:true,inserted:1}});
+    expect(await call({action:"capture-source",promptTurnId:"new",promptTextDigest:digest})).toMatchObject({status_code:200,body:{promptCaptured:true,inserted:0}});
+    expect(await kv.list(KV.observations("native-a"))).toHaveLength(3);
+  });
   it("uses the official owner and inspection path for a verified later cwd", async () => {
     await kv.update(KV.sessions, "native-a", [{ type: "set", path: "cwd", value: "C:/work/later" }]);
     vi.spyOn(codexIndex, "readCodexThreadIndex").mockResolvedValue({ version: 5, checkedAt: "2026-09-07T08:14:04Z", nextAfterId: null,

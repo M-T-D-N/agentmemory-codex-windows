@@ -1,5 +1,7 @@
 # Windows용 Codex AgentMemory
 
+> **Preview.19/r269 후보 — 로컬 검증 완료, 미게시.** Windows payload의 빌드 소스는 `7e66cd75702222aece989ac1c6be4c73aa004e7d`이며, 이 공개 소스의 문서 보완은 이후 변경으로 바이너리를 다시 빌드한 것이 아닙니다. [실제 검증·해시·제한](../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02)을 확인하세요. [고정 preview.19 Release 주소](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19)는 게시 예정 주소이며, 자산 공개와 해당 공개 커밋의 CI 성공을 아직 주장하지 않습니다.
+
 > **Preview.18/r225 공개 완료:** [고정 Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18)에서 검증한 네 자산·해시·설치 안내를 확인하세요. 배포 tag는 `6359546a`, payload source는 `3632849b`입니다. 현재 main의 공개 후 문서 커밋과 해당 CI는 별도이며 기존 바이너리의 빌드 원본을 바꾸지 않습니다.
 
 <p align="center">
@@ -14,7 +16,7 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 [빌드 없이 설치](#빌드-없이-설치하기) · [운영 가이드](../packaging/windows-codex/README.md) · [검증 범위](#검색필터인덱스의-동작과-검증-범위) · [릴리스 변경](../CHANGELOG.md)
 
 > [!IMPORTANT]
-> 이 저장소는 독립 Technical Preview `0.1.0-preview.18`입니다.
+> 현재 소스는 미게시 후보 Technical Preview `0.1.0-preview.19`를 준비합니다.
 > [AgentMemory](https://github.com/rohitg00/agentmemory) `v0.9.30`를 기반으로
 > 하지만 공식 upstream 저장소나 `@agentmemory/*` npm 배포본이 아니며,
 > upstream 지원을 약속하지 않습니다. upstream `npx` 명령이나 호환성용
@@ -23,9 +25,16 @@ OpenAI Codex Desktop와 Codex CLI를 위한 독립 Windows 네이티브 AgentMem
 개발 안내: 이 다운스트림은 AI가 생성하고 사용자가 시험했습니다. [전체
 고지](#ai-개발-고지)를 확인하세요.
 
+## 미게시 preview.19 후보
+
+새 소스 후보의 버전은 `0.1.0-preview.19`입니다. r269의 로컬 자산 생성·검증은
+완료됐으며 GitHub 공개와 해당 공개 커밋의 CI는 아직 미완료입니다. 호환성 0.9.30, engine/SDK 0.22.1, data contract 5는
+유지합니다. [후보 변경·설치·갱신·복구·미완료 검증](../docs/PREVIEW_19.md)을
+확인하세요. 기존 공개 preview.18 자산과 고정 설치 안내는 그대로 보존합니다.
+
 ## 처음 시작하기
 
-1. Windows x64, Node.js 24+, Windows PowerShell 5.1과 Codex desktop을 확인하고 [고정 버전 설치 가이드](../packaging/windows-codex/npm/README.md)를 따르세요. 빌드된 실행본이 제공되므로 소스 빌드는 선택 사항입니다.
+1. Windows x64, Node.js 24+, Windows PowerShell 5.1과 Codex desktop을 확인하고 [고정 버전 설치 가이드](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md)를 따르세요. 빌드된 실행본이 제공되므로 소스 빌드는 선택 사항입니다.
 2. 설치 경로를 dry-run으로 확인한 뒤 `--execute`를 사용하세요. 빈 대상은 기본 경로에서 준비·활성화·서비스 확인을 진행합니다. `--fresh`와 `--activate-prepared`로 단계를 나눌 수도 있습니다. 서비스 확인 뒤 Codex MCP를 연결하세요.
 3. 실패하면 [지원 안내](../SUPPORT.md)에 따라 버전과 실패 단계, 민감정보를 지운 짧은 오류를 알려주세요. 기억 데이터베이스나 인증정보는 첨부하지 마세요.
 
@@ -151,7 +160,7 @@ preview.18의 버전 tag·다운로드 자산·CI 결과는 해당 Release에서
 다른 버전의 실행기와 ZIP을 혼합하지 않습니다.
 
 일치하는 preview.18 GitHub Release의 ZIP 또는 버전이 고정된 TGZ 실행기와
-[npm/npx 설치 안내](../packaging/windows-codex/npm/README.md)를 사용합니다.
+[npm/npx 설치 안내](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md)를 사용합니다.
 Windows x64, Node.js 24 이상, Codex가 필요합니다. 업스트림을 먼저 설치할 필요는 없습니다.
 기본 명령은 dry-run이며 `--execute`로 빈 대상의 설치·활성화·서비스 확인을 진행합니다.
 기존 관리형 설치는 같은 루트에서 갱신하고, 원본 0.9.29/0.9.30 파일 저장소는
@@ -167,7 +176,7 @@ npm 12는 원격 TGZ를 기본 차단하므로 설치 명령의 `--allow-remote=
 - PowerShell 5.1 이상이 있는 Windows; 현재 공개판은 Windows 11에서 검증
 - Node.js 24 이상
 - HTTP 회귀 테스트용 PATH의 Python 3 (CI는 Python 3.12 사용)
-- 저장소가 고정한 pnpm `11.19.0`
+- 저장소가 고정한 pnpm `11.25.0`
 - [`third-party-inputs.json`](../packaging/windows-codex/config/third-party-inputs.json)의
   SHA-256과 일치하는 다운스트림 패치 적용 iii engine `0.22.1` Windows 실행 파일
 
@@ -248,8 +257,12 @@ pnpm run skills:check
 pnpm run typecheck
 pnpm run build
 pnpm test
-node packaging/windows-codex/tests/codex-turn.test.mjs
 ```
+
+Windows 어댑터·패키징 검사는
+[설치 runbook의 소스 검사 절차](../INSTALL_FOR_AGENTS.md#2-verify-the-source-checkout)를 따르세요.
+현재 `test-suites.json`의 adapter/packaging 목록을 읽고, integration/curation을
+비활성화한 상태에서 명시적인 합성 시험 임시 폴더를 사용합니다.
 
 package manifest는 upstream `@agentmemory/*` 이름으로 실수로 배포되는 것을 막기
 위해 `private`로 설정되어 있습니다. 기여 방법은

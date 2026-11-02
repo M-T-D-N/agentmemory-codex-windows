@@ -4,7 +4,7 @@ import type {
   Session,
   GraphSnapshot,
 } from "../types.js";
-import { isVisibleAfterReset, queryIndexMatchesSnapshot, readAllGraphQueryDocuments, readGraphQueryEdgeRefs, hydrateGraphNodes, hydrateGraphEdges, type GraphQueryIndexManifest } from "./graph-query-index.js";
+import { isVisibleAfterReset, queryIndexMatchesSnapshot, readAllGraphQueryDocuments, readGraphQueryEdgeRefs, hydrateGraphNodes, hydrateGraphEdges, type GraphQueryIndexManifest, type GraphQueryIndexDocument } from "./graph-query-index.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { filterCodexGraphSources } from "./observation-visibility.js";
@@ -110,7 +110,7 @@ export class GraphRetrieval {
     if (await this.readEpoch() !== epoch) throw Error("Graph reset changed during retrieval");
   }
 
-  private async readGraph(project?: string): Promise<{ nodes: GraphNode[]; readEdges: () => Promise<GraphEdge[]>; epoch: string }> {
+  private async readGraph(project?: string, selectSeed?: (document: GraphQueryIndexDocument) => boolean, maxDepth = 0): Promise<{ nodes: GraphNode[]; readEdges: () => Promise<GraphEdge[]>; epoch: string }> {
     const snapshot = await this.kv.get<GraphSnapshot>(KV.graphSnapshot, "current");
     const epoch = this.snapshotEpoch(snapshot);
     if (epoch && snapshot?.stats.totalNodes === 0 && snapshot.stats.totalEdges === 0) return { nodes: [], readEdges: async () => [], epoch };
@@ -119,10 +119,30 @@ export class GraphRetrieval {
     let nodes: GraphNode[]; let readEdges: () => Promise<GraphEdge[]>;
     if (snapshot && queryIndexMatchesSnapshot(manifest, snapshot)) {
       const documents = (await readAllGraphQueryDocuments(this.kv)).filter(row => isVisibleAfterReset(row, snapshot.resetAt) && (!project || row.project === project));
-      nodes = await hydrateGraphNodes(this.kv, documents.map(row => row.id), snapshot.resetAt);
+      let selectedIds = documents.map(row => row.id);
+      if (selectSeed) {
+        const universe = new Set(selectedIds);
+        const selected = new Set(documents.filter(selectSeed).map(row => row.id));
+        let frontier = [...selected];
+        const cache = new Map();
+        for (let depth = 0; depth < maxDepth && frontier.length; depth++) {
+          const { refs } = await readGraphQueryEdgeRefs(this.kv, frontier, cache);
+          const next: string[] = [];
+          for (const edge of refs) {
+            if (project && edge.project !== project) continue;
+            for (const id of [edge.sourceNodeId, edge.targetNodeId]) {
+              if (universe.has(id) && !selected.has(id)) { selected.add(id); next.push(id); }
+            }
+          }
+          frontier = next;
+        }
+        selectedIds = selectedIds.filter(id => selected.has(id));
+      }
+      nodes = await hydrateGraphNodes(this.kv, selectedIds, snapshot.resetAt);
       readEdges = async () => {
         const { refs } = await readGraphQueryEdgeRefs(this.kv, nodes.map(row => row.id));
-        return hydrateGraphEdges(this.kv, refs.map(row => row.id), snapshot.resetAt);
+        const ids = new Set(nodes.map(row => row.id));
+        return hydrateGraphEdges(this.kv, refs.filter(row => ids.has(row.sourceNodeId) && ids.has(row.targetNodeId)).map(row => row.id), snapshot.resetAt);
       };
     } else {
       if (epoch) throw Error("Graph retrieval index is unavailable after reset");
@@ -139,11 +159,7 @@ export class GraphRetrieval {
     project?: string,
     readSession?: (id: string) => Promise<Session | null>,
   ): Promise<GraphRetrievalResult[]> {
-    const { nodes, readEdges, epoch } = await this.readGraph(project);
-    const archived = await readArchiveVisibility(this.kv);
-    const sourceCache = new Map<string, boolean>();
-    const eligibleNodes = nodes.filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
-    const matchesEntity = (n: GraphNode) => {
+    const matchesEntity = (n: Pick<GraphNode, "name">) => {
       const nameLower = n.name.toLowerCase();
       return entityNames.some(
         (e) =>
@@ -151,6 +167,10 @@ export class GraphRetrieval {
           e.toLowerCase().includes(nameLower),
       );
     };
+    const { nodes, readEdges, epoch } = await this.readGraph(project, matchesEntity, maxDepth);
+    const archived = await readArchiveVisibility(this.kv);
+    const sourceCache = new Map<string, boolean>();
+    const eligibleNodes = nodes.filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));
     if (!eligibleNodes.some(matchesEntity)) return [];
     const allNodes = await filterCodexGraphSources(this.kv, eligibleNodes, sourceCache, readSession);
     const eligibleEdges = (await readEdges()).filter((e) => !e.stale && !archived({ kind: "graph_edge", id: e.id }) && e.isLatest !== false && !e.reviewRetirement?.active && (!project || e.project === project));
@@ -204,7 +224,7 @@ export class GraphRetrieval {
     project?: string,
     readSession?: (id: string) => Promise<Session | null>,
   ): Promise<GraphRetrievalResult[]> {
-    const { nodes, readEdges, epoch } = await this.readGraph(project);
+    const { nodes, readEdges, epoch } = await this.readGraph(project, row => row.sourceObservationIds.some(id => obsIds.includes(id)), maxDepth);
     const archived = await readArchiveVisibility(this.kv);
     const sourceCache = new Map<string, boolean>();
     const eligibleNodes = nodes.filter((n) => !n.stale && !archived({ kind: "graph_node", id: n.id }) && (!project || n.project === project));

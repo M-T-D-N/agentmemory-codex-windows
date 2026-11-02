@@ -1,3 +1,4 @@
+import { NativeSourceLifecycle, throwIfNativeSourceStopping, isNativeSourceShutdown } from "../shutdown.js";
 import type { IIIClient } from "iii-sdk";
 import type { Session } from "../types.js";
 import type { StateKV } from "../state/kv.js";
@@ -13,11 +14,24 @@ import { discoverCodexSession, existingCodexDiscoveryStatus } from "./codex-sour
 import { projectFor, readProjectRegistry } from "../../packaging/windows-codex/hooks/codex-project.mjs";
 import { readArchiveVisibility } from "./archive.js";
 import { readCodexSourceStatus } from "./codex-source-status.js";
+import { CodexReadBudgetError } from "../replay/codex-read-budget.js";
+
+// Stable reasons preserve useful diagnostics without returning source text or paths.
+export function codexDiscoveryFailureReason(error: unknown): string {
+  if (error instanceof CodexReadBudgetError) return "native_source_read_budget_exceeded";
+  const message = error instanceof Error ? error.message : "";
+  if (message === "A complete supported native inventory is required before capture initialization") return "native_source_inventory_incomplete";
+  if (message === "Unresolved capture correspondence or legacy forget provenance prevents initialization") return "native_source_correspondence_unverified";
+  if (message === "Reviewed source hold no longer matches the native inventory") return "native_source_hold_changed";
+  if (["Source cwd reconciliation requires the same source identity and complete matching current cwd", "Native capture cwd does not match the canonical session"].includes(message)) return "native_source_scope_mismatch";
+  return "native_source_discovery_failed";
+}
 
 const sourceUnavailable = (session: Session) => session.codexNativeCapture?.status === "unknown" &&
   session.codexNativeCapture.issue === "native_source_missing";
 
-export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId: () => string) {
+export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId: () => string, lifecycle = new NativeSourceLifecycle()) {
+  const checkStopping = () => throwIfNativeSourceStopping(lifecycle.signal);
   sdk.registerFunction("mem::codex-source-status", (input: Parameters<typeof readCodexSourceStatus>[2]) => readCodexSourceStatus(kv, agentId(), input));
   let discoveryAfterId: string | undefined;
   let discoveryConfiguration = "";
@@ -28,16 +42,17 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
   let nextDiscoveryAt = 0;
   sdk.registerFunction("mem::codex-source-index", async (input: { afterId?: string; limit?: number }) => {
     if (!process.env.AGENTMEMORY_CODEX_SOURCE_ROOT || !agentId()) return { disabled: true };
-    return readCodexThreadIndex(process.env.AGENTMEMORY_CODEX_SOURCE_ROOT, { afterId: input.afterId, limit: input.limit });
+    checkStopping();
+    return lifecycle.run(() => readCodexThreadIndex(process.env.AGENTMEMORY_CODEX_SOURCE_ROOT!, { afterId: input.afterId, limit: input.limit, signal: lifecycle.signal }));
   });
-  sdk.registerFunction("mem::codex-source-discover", () => withKeyedLock("codex-source-discover", async () => {
+  sdk.registerFunction("mem::codex-source-discover", () => lifecycle.run(() => withKeyedLock("codex-source-discover", async () => {
     const sourceRoot = process.env.AGENTMEMORY_CODEX_SOURCE_ROOT, workspaceRoot = process.env.AGENTMEMORY_WORKSPACE_ROOT;
     const registryPath = process.env.AGENTMEMORY_PROJECT_REGISTRY, owner = agentId();
     if (!sourceRoot || !workspaceRoot || !registryPath || !owner) return { disabled: true };
     const configuration = JSON.stringify([sourceRoot, workspaceRoot, registryPath, owner]);
     if (configuration !== discoveryConfiguration) { discoveryAfterId = undefined; discoveryConfiguration = configuration; }
     const startedAt = Date.now();
-    const page = await readCodexThreadIndex(sourceRoot, { afterId: discoveryAfterId, limit: 500 });
+    const page = await readCodexThreadIndex(sourceRoot, { afterId: discoveryAfterId, limit: 500, signal: lifecycle.signal });
     const sessions = new Map((await kv.list<Session>(KV.sessions)).map(session => [session.id, session]));
     const archived = await readArchiveVisibility(kv);
     let registry: ReturnType<typeof readProjectRegistry> | undefined;
@@ -47,6 +62,7 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
       failures: [] as Array<{ sessionId: string; error: string }> };
     let inspected = 0;
     for (const entry of page.entries) {
+      checkStopping();
       result.scanned++;
       try {
         if (entry.status === "excluded") result.excluded++;
@@ -57,7 +73,7 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
           const retryArchivedMissing = status === "managed" && existing && sourceUnavailable(existing) && archived({ kind: "session", id: existing.id });
           const retryCompressedTransition = existing && ["native_source_missing", "native_source_cursor_invalid"].includes(existing.codexNativeCapture?.issue ?? "");
           const outcome = status !== "inspect" && status !== "relocate" && !retryArchivedMissing && !retryCompressedTransition ? { status }
-            : (++inspected, await discoverCodexSession(kv, entry, { sourceRoot, agentId: owner, projectForCwd }));
+            : (++inspected, await discoverCodexSession(kv, entry, { sourceRoot, agentId: owner, projectForCwd, signal: lifecycle.signal }));
           if (outcome.status === "reconcile_required") {
             result.reconcileRequired++;
             result.reconciliation.push({ sessionId: entry.sessionId, reason: "reason" in outcome ? outcome.reason! : "existing_source_requires_reconciliation" });
@@ -69,8 +85,9 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
           if ("reason" in outcome && outcome.status === "unknown") result.failures.push({ sessionId: entry.sessionId, error: outcome.reason! });
         }
       } catch (error) {
+        checkStopping();
         result.unknown++;
-        result.failures.push({ sessionId: entry.sessionId, error: error instanceof Error ? error.message.slice(0, 512) : "Native discovery failed" });
+        result.failures.push({ sessionId: entry.sessionId, error: codexDiscoveryFailureReason(error) });
       }
       discoveryAfterId = entry.sessionId;
       if (result.readySessionIds.length || inspected >= 8 || Date.now() - startedAt >= 2000) break;
@@ -79,8 +96,9 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
       discoveryAfterId = undefined; result.cycleComplete = true;
     }
     return result;
-  }));
-  sdk.registerFunction("mem::codex-source-drain", () => withKeyedLock("codex-source-drain", async () => {
+  })));
+  sdk.registerFunction("mem::codex-source-drain", () => lifecycle.run(() => withKeyedLock("codex-source-drain", async () => {
+    checkStopping();
     const owner = process.env.AGENTMEMORY_CODEX_SOURCE_ROOT && agentId();
     if (!owner) return { disabled: true };
     const configuration = JSON.stringify([process.env.AGENTMEMORY_CODEX_SOURCE_ROOT, owner,
@@ -91,9 +109,10 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
     if (Date.now() >= nextDiscoveryAt) discoveryRoundDone = false;
     const ranDiscovery = !discoveryRoundDone;
     const discovery = !ranDiscovery ? { unknown: 0, reconcileRequired: 0 } :
-      await sdk.trigger({ function_id: "mem::codex-source-discover", payload: {} }).catch(error => ({
-        unknown: 1, failures: [{ error: error instanceof Error ? error.message.slice(0, 512) : "Native discovery failed" }],
-      })) as { unknown?: number; failures?: unknown[]; reconcileRequired?: number; cycleComplete?: boolean; readySessionIds?: string[] };
+      await sdk.trigger({ function_id: "mem::codex-source-discover", payload: {} }).catch(error => {
+        checkStopping();
+        return { unknown: 1, failures: [{ error: codexDiscoveryFailureReason(error) }] };
+      }) as { unknown?: number; failures?: unknown[]; reconcileRequired?: number; cycleComplete?: boolean; readySessionIds?: string[] };
     if (ranDiscovery) {
       discoveryRoundDone = discovery.cycleComplete !== false;
       if (discoveryRoundDone) nextDiscoveryAt = Date.now() + 60_000;
@@ -127,6 +146,7 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
     const ready = eligible.filter(session => readyIds.has(session.id));
     const ordinary = remaining.filter(session => !readyIds.has(session.id)).slice(0, 8 - ready.length);
     for (const session of [...ready, ...ordinary]) {
+      checkStopping();
       const priority = readyIds.has(session.id);
       result.scannedSessions++;
       let priorOffset = session.codexNativeCapture!.cursor!.byteOffset;
@@ -140,6 +160,7 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
         reportedUnknown = unknown; reportedUnavailable = unavailable;
       };
       for (let window = 0; window < (priority ? 1 : 4); window++) {
+        checkStopping();
         const attemptStartedAt = Date.now();
         try {
           const captured = await sdk.trigger({ function_id: "mem::codex-source-capture", payload: { project: session.project, sessionId: session.id } }) as {
@@ -157,6 +178,7 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
           priorOffset = captured.bytesReadThrough!;
           if (captured.status !== "pending" || noProgress || captured.bytesReadThrough === captured.snapshotBytes || Date.now() - startedAt >= 2000) break;
         } catch (error) {
+          checkStopping();
           progressingTail = false;
           // Retain failures in the existing canonical capture state, not a batch-local queue.
           // Use the capture/forget lifecycle lock and merge the current row so concurrent
@@ -169,6 +191,10 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
             if (state.status === "reconcile_required" ||
                 (["caught_up", "caught_up_with_holds"].includes(state.status) &&
                  Date.parse(state.checkedAt ?? "") >= attemptStartedAt)) return latest;
+            // A fresh canonical read failure is the remote function's outcome,
+            // not evidence of an additional transport/RPC failure.
+            if (state.status === "unknown" && state.issue && state.issue !== "native_capture_rpc_failed" &&
+                Date.parse(state.checkedAt ?? "") >= attemptStartedAt) return latest;
             const observedAt = new Date().toISOString();
             const next = { ...latest, codexNativeCapture: { ...state, status: "unknown" as const,
               issue: state.status === "unknown" ? state.issue : "native_capture_rpc_failed", checkedAt: observedAt,
@@ -193,13 +219,21 @@ export function registerCodexSourceBacklog(sdk: IIIClient, kv: StateKV, agentId:
       captureAfterId = undefined; captureRoundPending = false;
     }
     return result;
-  }));
+  })));
 }
 
-export function startCodexSourceScheduler(sdk: IIIClient) {
+export interface NativePromptCaptureRequest { sessionId: string; project: string; promptTurnId: string; promptTextDigest?: string }
+
+export function startCodexSourceScheduler(sdk: IIIClient, options: { deferStart?: boolean } = {}) {
   let stopped = false;
+  let started = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
   let running: Promise<void> | undefined;
   let continuation: ReturnType<typeof setTimeout> | undefined;
+  // A hook may arrive before Codex appends its user row. Retry only that exact
+  // turn via the canonical capture function; regular fair draining still runs.
+  const promptRetryDelays = [250, 1000, 3000, 10000];
+  const pendingPrompts = new Map<string, NativePromptCaptureRequest & { dueAt: number; attempt: number }>();
   const startedAt = Date.now();
   let lastAttemptAt: number | undefined, lastCompletedAt: number | undefined, lastDiscoveryCompletedAt: number | undefined;
   let lastCaptureCycleCompletedAt: number | undefined;
@@ -211,7 +245,8 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
   let completedDiscoveryRecords: Array<{ sessionId: string | null; category: string; reason: string; observedAt: string }> = [];
   const discoveryReasons = new Set(["unsupported_source", "unsupported_thread_source", "invalid_thread_metadata", "invalid_thread_path",
     "existing_source_requires_reconciliation", "relocated_source_identity_changed", "returned_source_identity_changed", "returned_source_requires_reconciliation", "source_identity_changed", "native_source_missing",
-    "native_source_read_failed", "source_not_created"]);
+    "native_source_read_failed", "source_not_created", "native_source_read_budget_exceeded", "native_source_inventory_incomplete",
+    "native_source_correspondence_unverified", "native_source_hold_changed", "native_source_scope_mismatch", "native_source_discovery_failed"]);
   const recordDiscovery = (rows: unknown[] | undefined, category: string) => {
     for (const raw of rows ?? []) {
       const row = raw as { sessionId?: unknown; reason?: unknown; error?: unknown } | null;
@@ -252,19 +287,44 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
       observedAt: lastCompletedAt === undefined ? null : new Date(lastCompletedAt).toISOString(),
       discoveryCycleCompletedAt: lastDiscoveryCompletedAt === undefined ? null : new Date(lastDiscoveryCompletedAt).toISOString(),
       discoveryIssueCount: all.length, discoveryTargetCount: new Set(all.flatMap(row => row.sessionId ? [row.sessionId] : [])).size,
-      discoveryDetailsComplete: all.length >= Math.max(discoveryIssues, completedDiscoveryIssues) && all.every(row => row.sessionId !== null && row.reason !== "discovery_issue_unclassified"),
+      discoveryDetailsComplete: all.length >= Math.max(discoveryIssues, completedDiscoveryIssues) && all.every(row => row.sessionId !== null && !["discovery_issue_unclassified", "native_source_discovery_failed"].includes(row.reason)),
       discoveryRecords: all.slice(offset, offset + limit),
       nextOffset: offset + limit < all.length ? offset + limit : null,
     },
+    pendingPromptCaptures: pendingPrompts.size,
     consecutiveFailures, discoveryIssues: Math.max(discoveryIssues, completedDiscoveryIssues), captureIssues, sourceUnavailable: sourceUnavailableCount, archivedSourceUnavailable: archivedUnavailableCount, graphFailures, unresolvedCaptures, sourceHolds,
   });
   };
   const wake = () => {
-    if (stopped || running) return;
+    if (stopped || !started || running) return;
     clearTimeout(continuation); continuation = undefined;
     let moreCaptureWork = false;
     running = Promise.resolve().then(async () => {
       lastAttemptAt = Date.now();
+      let promptFailure = false;
+      const due = [...pendingPrompts.values()].filter(row => row.dueAt <= Date.now())
+        .sort((a, b) => a.dueAt - b.dueAt).slice(0, 2);
+      for (const request of due) {
+        if (stopped) return;
+        let completed = false;
+        try {
+          const captured = await sdk.trigger({ function_id: "mem::codex-source-capture", payload: {
+            sessionId: request.sessionId, project: request.project, promptTurnId: request.promptTurnId,
+            ...(request.promptTextDigest !== undefined ? {promptTextDigest: request.promptTextDigest} : {}),
+          } }) as { promptCaptured?: boolean; status?: string };
+          if (!captured || typeof captured.promptCaptured !== "boolean") throw Error("Invalid prompt capture response");
+          completed = captured.promptCaptured || !["pending", "caught_up", "caught_up_with_holds"].includes(captured.status ?? "");
+        } catch (error) {
+          if (stopped && isNativeSourceShutdown(error)) return;
+          promptFailure = true;
+          logger.warn("Native Codex prompt follow-up failed", { reason: "native_prompt_capture_failed" });
+        }
+        if (pendingPrompts.get(request.sessionId) !== request) continue;
+        request.attempt++;
+        if (completed || request.attempt >= promptRetryDelays.length) pendingPrompts.delete(request.sessionId);
+        else request.dueAt = Date.now() + promptRetryDelays[request.attempt]!;
+      }
+      if (stopped) return;
       const result = await sdk.trigger({ function_id: "mem::codex-source-drain", payload: {} }) as {
         disabled?: boolean; unknown?: number; failures?: unknown[]; captureUnknown?: number; sourceUnavailable?: number; archivedSourceUnavailable?: number; requiresReconciliation?: number; graphFailures?: number; unresolvedCaptures?: number; sourceHolds?: number;
         captureCycleComplete?: boolean; moreCaptureWork?: boolean;
@@ -298,25 +358,46 @@ export function startCodexSourceScheduler(sdk: IIIClient) {
       }
       if (result.captureCycleComplete === true) lastCaptureCycleCompletedAt = Date.now();
       moreCaptureWork = result.disabled !== true && result.moreCaptureWork === true;
-      consecutiveFailures = 0; lastCompletedAt = Date.now();
+      consecutiveFailures = promptFailure ? consecutiveFailures + 1 : 0; lastCompletedAt = Date.now();
       if (result?.unknown || result?.failures?.length) logger.warn("Native Codex source reconciliation needs attention", {
         unknown: result.unknown ?? 0, failures: result.failures?.length ?? 0,
         sourceUnavailable: sourceUnavailableCount,
       });
     }).catch(error => {
+      if (stopped && isNativeSourceShutdown(error)) return;
       consecutiveFailures++;
       logger.warn("Native Codex source reconciliation failed", { reason: error instanceof Error && error.message === "Invalid native source drain response" ? "invalid_native_drain_response" : "native_drain_failed" });
     })
       .finally(() => {
         running = undefined;
-        if (!stopped && moreCaptureWork) {
-          continuation = setTimeout(wake, 100);
-          continuation.unref();
-        }
+        schedule(moreCaptureWork ? 100 : undefined);
       });
   };
-  const timer = setInterval(wake, 60_000);
-  timer.unref();
-  wake();
-  return { wake, status, async stop() { stopped = true; clearInterval(timer); clearTimeout(continuation); await running; } };
+  const schedule = (normalDelay?: number) => {
+    if (stopped || !started || running) return;
+    const due = Math.min(...[...pendingPrompts.values()].map(row => row.dueAt));
+    const delay = Math.min(normalDelay ?? Infinity, Math.max(0, due - Date.now()));
+    clearTimeout(continuation); continuation = undefined;
+    if (Number.isFinite(delay)) { continuation = setTimeout(wake, delay); continuation.unref(); }
+  };
+  const requestPromptCapture = (input: NativePromptCaptureRequest) => {
+    if (stopped || !input || ![input.sessionId, input.project, input.promptTurnId]
+      .every(value => typeof value === "string" && value.trim().length > 0 && value.length <= 512)) return false;
+    if (input.promptTextDigest !== undefined && (typeof input.promptTextDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.promptTextDigest))) return false;
+    const previous = pendingPrompts.get(input.sessionId);
+    if (previous?.project === input.project && previous.promptTurnId === input.promptTurnId && previous.promptTextDigest === input.promptTextDigest) return true;
+    if (!previous && pendingPrompts.size >= 64) return false;
+    pendingPrompts.set(input.sessionId, { ...input, attempt: 0, dueAt: Date.now() + promptRetryDelays[0]! });
+    schedule();
+    return true;
+  };
+  const start = () => {
+    if (stopped || started) return;
+    started = true;
+    timer = setInterval(wake, 60_000);
+    timer.unref();
+    wake();
+  };
+  if (!options.deferStart) start();
+  return { start, wake, status, requestPromptCapture, async stop() { stopped = true; pendingPrompts.clear(); clearInterval(timer); clearTimeout(continuation); await running; } };
 }

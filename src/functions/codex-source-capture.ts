@@ -1,3 +1,4 @@
+import { throwIfNativeSourceStopping } from "../shutdown.js";
 import { createHash } from "node:crypto";
 import { validateCodexSourceHolds } from "../replay/codex-source-hold.js";
 import { unresolvedCodexCapture, validateUnresolvedCodexCaptures } from "../replay/codex-unresolved-capture.js";
@@ -9,18 +10,19 @@ import { withObservationWrite } from "../state/observation-write.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { checkPayloadFrameSize } from "../state/frame-guard.js";
 import { advanceSessionActivity, seedSourceSessionActivity, sessionLifecycleLockKey } from "./session-lifecycle.js";
-import { canonicalCodexCwd, withReadOnlyCodexSource } from "./codex-source-identity.js";
+import { canonicalCodexCwd, codexSourceIdentityDigest, unchangedCodexCompressedSnapshot, withReadOnlyCodexSource } from "./codex-source-identity.js";
+import { pendingCodexMirrors } from "../replay/codex-record.js";
 import { isExcludedCodexAmbientSession, isCodexApprovalReviewText } from "./observation-visibility.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { recordAudit } from "./audit.js";
 import { codexInventoryWindowBound, readCodexInventory } from "../replay/codex-inventory.js";
-import { CodexCursorValidationError, readCodexWindow, readCodexWindowFromFile } from "../replay/codex-window.js";
+import { CodexCursorValidationError, readCodexWindow, readCodexWindowFromFile, validCodexCursorParser } from "../replay/codex-window.js";
 import { CodexReadBudget, CodexReadBudgetError } from "../replay/codex-read-budget.js";
 import { readCodexRetainedSources } from "./codex-retained-source.js";
 import { initialCodexParseState } from "../replay/codex-record.js";
-import { codexLegacyPromptDigests, codexLegacySyntheticDigest, codexMessageReference, codexTextDigest, matchCodexMessages, unmatchedCodexCaptures, type CodexMessageReference } from "../replay/codex-match.js";
+import { codexLegacyFinalDisplayDigest, codexLegacyPromptDigests, codexLegacySyntheticDigest, codexMessageReference, codexTextDigest, matchCodexMessages, unmatchedCodexCaptures, type CodexMessageReference } from "../replay/codex-match.js";
 
-type ManagedSource = { sourceRoot: string; agentId: string; maxInventoryWindows?: number; readBudget?: CodexReadBudget };
+type ManagedSource = { sourceRoot: string; agentId: string; maxInventoryWindows?: number; readBudget?: CodexReadBudget; signal?: AbortSignal };
 type Scope = { sessionId: string; project: string };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const sourceMetadata = (message: CodexMessageReference, duplicateOfObservationId?: string): NonNullable<CompressedObservation["codexSource"]> => ({
@@ -118,7 +120,7 @@ export async function initializeCodexSourceCapture(kv: StateKV,
     typeof input.reason !== "string" || !input.reason.trim() || input.reason.length > 512))) throw Error("Capture initialization requires an explicit preview or its expectedVersion and reason");
   codexInventoryWindowBound({ maxWindows: managed.maxInventoryWindows });
   if (readWindow !== readCodexWindow) return initializeCodexSourceCaptureWithReader(kv, input, managed, readWindow);
-  const budget = managed.readBudget ?? new CodexReadBudget({ maxMilliseconds: input.readTimeoutMilliseconds ?? 30_000 });
+  const budget = managed.readBudget ?? new CodexReadBudget({ maxMilliseconds: input.readTimeoutMilliseconds ?? 30_000 }, managed.signal);
   return withReadOnlyCodexSource(managed.sourceRoot, input.sourcePath, input.sessionId,
     (source, file) => initializeCodexSourceCaptureWithReader(kv, input, { ...managed, readBudget: budget },
       options => options.sourcePath === input.sourcePath && options.sessionId === input.sessionId
@@ -134,12 +136,17 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
   retainedReader: typeof readCodexWindow = readWindow,
 ) {
   return withObservationWrite(() => withKeyedLock(sessionLifecycleLockKey(input.sessionId), async () => {
+    throwIfNativeSourceStopping(managed.signal);
     const session = await scopedSession(kv, input, managed, true);
+    const canonicalSession = { id: session.id, project: session.project, agentId: session.agentId };
     const observations = await kv.list<CompressedObservation>(KV.observations(session.id), { includeDeleted: true });
     const normalized = normalizedObservationView(observations, session, managed.agentId);
     const legacyDigests = new Set(normalized.observations.filter(row => row && row.codexSource === undefined && row.emptyDeletion === undefined &&
       ((row.title === "assistant_response" && row.type === "other") || (row.title === "prompt_submit" && row.type === "conversation")) && row.confidence === 0.3 &&
       typeof row.narrative === "string" && row.narrative.length <= 400)
+      .map(row => codexTextDigest(row.narrative)));
+    const finalDisplayDigests = new Set(normalized.observations.filter(row => row.codexSource === undefined && row.emptyDeletion === undefined &&
+      row.title === "assistant_response" && row.type === "other" && row.confidence === 0.3 && typeof row.narrative === "string")
       .map(row => codexTextDigest(row.narrative)));
     const recoveryTexts = new Map<string, string>();
     let firstSourcePrompt: { key: string; preview: string } | undefined;
@@ -157,7 +164,8 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
         for (const message of [...window.messages, ...(window.legacyMessages ?? [])]) {
           const digest = codexLegacySyntheticDigest(message);
           const prompt = codexLegacyPromptDigests(message);
-          if ((digest && legacyDigests.has(digest)) || (message.legacyImageWrappedDigest && imageDigests.has(message.legacyImageWrappedDigest)) ||
+          const finalDisplay = codexLegacyFinalDisplayDigest(message);
+          if ((finalDisplay && finalDisplayDigests.has(finalDisplay)) || (digest && legacyDigests.has(digest)) || (message.legacyImageWrappedDigest && imageDigests.has(message.legacyImageWrappedDigest)) ||
             (message.imageReadFailureDisplay && imageDigests.has(message.imageReadFailureDisplay.digest)) ||
             (message.legacyRecovery && imageDigests.has(message.legacyRecovery.textDigest)) ||
             (prompt && (imageDigests.has(prompt.textDigest) || (prompt.syntheticDigest && imageDigests.has(prompt.syntheticDigest))))) {
@@ -183,13 +191,13 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
     const captureCwd = canonicalCodexCwd(last.source.cwd) !== targetCwd ? targetCwd : undefined;
     if (captureCwd && last.cursor.parser.cwd !== captureCwd) throw Error("Native capture cwd does not match the canonical session");
     const exclusions = (await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions)).filter(row => row.sessionId === session.id);
-    let decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId, completeNativeInventory: true, exclusions });
+    let decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId, canonicalSession, completeNativeInventory: true, exclusions });
     const unmatched = new Set(unmatchedCodexCaptures(normalized.observations, decisions).map(row => row.observationId));
     const retained = await readCodexRetainedSources({ sourceRoot: managed.sourceRoot, sourcePath: input.sourcePath, sessionId: input.sessionId },
       messages, normalized.observations.filter(row => unmatched.has(row.id)), retainedReader,
       { readBudget: managed.readBudget, maxInventoryWindows: managed.maxInventoryWindows });
     messages = [...messages, ...retained.messages];
-    decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId,
+    decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId, canonicalSession,
       completeNativeInventory: true, exclusions, singlePhysicalSource: retained.singlePhysicalSource, sourceCreatedAt: last.source.createdAt });
     const proven = new Set(decisions.filter(row => row.action === "adopt" || row.action === "present").map(row => row.observationId));
     const previousUnresolved = validateUnresolvedCodexCaptures(session.codexNativeCapture?.unresolvedCaptures?.filter(row => !proven.has(row.observationId)),
@@ -201,7 +209,7 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
         return unresolvedCodexCapture(observations.find(row => row.id === item.observationId)!, { ...input, agentId: managed.agentId });
       }).sort((a, b) => a.observationId.localeCompare(b.observationId)) : [];
     const unresolvedIds = new Set(unresolvedCaptures.map(row => row.observationId));
-    if (unresolvedCaptures.length) decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId,
+    if (unresolvedCaptures.length) decisions = matchCodexMessages(messages, normalized.observations, { ...input, agentId: managed.agentId, canonicalSession,
       completeNativeInventory: true, exclusions, unresolvedCaptures, singlePhysicalSource: retained.singlePhysicalSource, sourceCreatedAt: last.source.createdAt });
     const adopted = new Set(decisions.filter(row => row.action === "adopt").map(row => row.observationId));
     if (decisions.some(row => row.action === "blocked") || unmatchedCodexCaptures(normalized.observations, decisions).some(row => !unresolvedIds.has(row.observationId)) ||
@@ -223,7 +231,8 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
       const row = normalized.recovered.get(decision.observationId!) ?? byId.get(decision.observationId!)!;
       if (!message) throw Error(`Missing native source for capture recovery: ${decision.observationId}`);
       const narrative = decision.contentRepair === "restore_legacy_synthetic" || decision.contentRepair === "restore_legacy_image_text" ||
-        decision.contentRepair === "restore_legacy_recovery_parts" || decision.contentRepair === "restore_legacy_prompt_whitespace" || decision.contentRepair === "restore_image_read_diagnostic" ? recoveryTexts.get(message.key)
+        decision.contentRepair === "restore_legacy_recovery_parts" || decision.contentRepair === "restore_legacy_prompt_whitespace" ||
+        decision.contentRepair === "restore_legacy_final_display" || decision.contentRepair === "restore_image_read_diagnostic" ? recoveryTexts.get(message.key)
         : decision.contentRepair === "restore_terminal_lf" ? row.narrative + "\n" : row.narrative;
       if (typeof narrative !== "string" || codexTextDigest(narrative) !== message.textDigest) throw Error("Recovered capture does not match its full native source");
       const next = { ...row, narrative, ...(decision.timestampRepair ? { timestamp: message.timestamp } : {}), codexSource: sourceMetadata(message, decision.duplicateOfObservationId) };
@@ -244,6 +253,7 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
       retainedSourceMessageCount: retained.messages.length,
       adoptRetainedSource: decisions.filter(row => row.action === "adopt" && byKey.get(row.sourceKey)?.retainedSourcePath).length,
       restoreLegacyPromptWhitespace: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_prompt_whitespace").length,
+      restoreLegacyFinalDisplay: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_final_display").length,
       restoreLegacySynthetic: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_synthetic").length,
       adoptExcludedFinal: decisions.filter(row => row.action === "adopt" && byKey.get(row.sourceKey)?.legacyExcludedReason).length,
       restoreLegacyTimestamp: decisions.filter(row => row.action === "adopt" && row.timestampRepair).length,
@@ -253,8 +263,10 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
       restoreImageReadDiagnostic: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_image_read_diagnostic").length,
       restoreLegacyRecoveryParts: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_recovery_parts").length,
       restoreLegacyImageText: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_image_text").length };
+    throwIfNativeSourceStopping(managed.signal);
     if (input.dryRun) return { dryRun: true, expectedVersion, sessionId: session.id, ...counts };
     if (input.expectedVersion !== expectedVersion) throw Error("Capture initialization preview is stale; no changes were made");
+    managed.readBudget?.finishReading();
     await recordAudit(kv, "observe", "mem::codex-source-initialize", [session.id], { phase: "initialize", project: session.project, reason: input.reason,
       ...counts, recoverRawObservationIds: [...normalized.recovered.keys()],
       adoptExcludedFinalObservationIds: decisions.filter(row => row.action === "adopt" && byKey.get(row.sourceKey)?.legacyExcludedReason).map(row => row.observationId),
@@ -267,6 +279,7 @@ async function initializeCodexSourceCaptureWithReader(kv: StateKV,
       restoreTerminalLfObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_terminal_lf").map(row => row.observationId),
       retainedSourceObservations: decisions.filter(row => row.action === "adopt" && byKey.get(row.sourceKey)?.retainedSourcePath).map(row => ({ observationId: row.observationId, sourcePath: byKey.get(row.sourceKey)!.retainedSourcePath, sourceKey: row.sourceKey })),
       restoreLegacyPromptWhitespaceObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_prompt_whitespace").map(row => row.observationId),
+      restoreLegacyFinalDisplayObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_final_display").map(row => row.observationId),
       restoreLegacySyntheticObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_synthetic").map(row => row.observationId),
       restoreLegacyImageTextObservationIds: decisions.filter(row => row.action === "adopt" && row.contentRepair === "restore_legacy_image_text").map(row => row.observationId) });
     for (const decision of decisions) {
@@ -303,7 +316,9 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
   options: { readWindow?: typeof readCodexWindow; publish?: (indexRows: CompressedObservation[], eventRows: CompressedObservation[]) => Promise<void>; rebuildIndex?: boolean } = {},
 ) {
   return withObservationWrite(() => withKeyedLock(sessionLifecycleLockKey(input.sessionId), async () => {
+    throwIfNativeSourceStopping(managed.signal);
     const session = await scopedSession(kv, input, managed);
+    const canonicalSession = { id: session.id, project: session.project, agentId: session.agentId };
     const state = session.codexNativeCapture;
     if (!state || ![1, 2].includes(state.version) || !state.cursor || state.status === "reconcile_required") throw Error("Native source requires capture initialization");
     const sourceHolds = validateCodexSourceHolds(state.sourceHolds, session.id);
@@ -313,12 +328,24 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
     });
     let window: Awaited<ReturnType<typeof readCodexWindow>>;
     try {
-      window = await (options.readWindow ?? readCodexWindow)({ ...managed, sourcePath: state.source.relativePath,
-        sessionId: session.id, cursor: state.cursor, sourceHolds });
+      const budget = managed.readBudget ?? new CodexReadBudget({}, managed.signal);
+      const completeSnapshot = !options.readWindow && !state.source.continuation &&
+        (state.status === "caught_up" || state.status === "caught_up_with_holds" ||
+          state.status === "unknown" && ["native_source_read_budget_exceeded", "native_capture_rpc_failed"].includes(state.issue ?? "")) &&
+        Number.isSafeInteger(state.snapshotBytes) && state.snapshotBytes! > 0 && state.cursor.byteOffset === state.snapshotBytes &&
+        Number.isSafeInteger(state.cursor.ordinal) && state.cursor.ordinal >= 0 && validCodexCursorParser(state.cursor.parser) &&
+        state.cursor.sourceIdentity === codexSourceIdentityDigest(state.source) && /^[a-f0-9]{64}$/.test(state.cursor.anchor) &&
+        !pendingCodexMirrors(state.cursor.parser) &&
+        await unchangedCodexCompressedSnapshot(managed.sourceRoot, state.source.relativePath, state.cursor.fileIdentity, budget);
+      window = completeSnapshot ? { source: state.source, messages: [], excluded: {}, issue: null,
+        incompleteTail: false, waitingForPrimary: false, snapshotBytes: state.snapshotBytes!, caughtUp: true, cursor: state.cursor }
+        : await (options.readWindow ?? readCodexWindow)({ ...managed, readBudget: budget, sourcePath: state.source.relativePath,
+          sessionId: session.id, cursor: state.cursor, sourceHolds });
       if (!isDeepStrictEqual(window.source, state.source) ||
           (state.captureCwd !== undefined && typeof state.captureCwd !== "string") ||
           canonicalCodexCwd(state.captureCwd ?? window.source.cwd) !== canonicalCodexCwd(session.cwd)) throw Error("Native capture source identity changed");
     } catch (error) {
+      throwIfNativeSourceStopping(managed.signal);
       const missing = error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
       const invalidCursor = error instanceof Error && error.message === "Codex source cursor is invalid, replaced or truncated; reconciliation is required";
       if (invalidCursor) await kv.set(KV.sessions, session.id, { ...session, codexNativeCapture: { ...state,
@@ -327,15 +354,17 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
         checkedAt: new Date().toISOString() } });
       else if (error instanceof CodexReadBudgetError) await kv.set(KV.sessions, session.id, { ...session,
         codexNativeCapture: { ...state, status: "unknown", issue: "native_source_read_budget_exceeded", recordDiagnostic: undefined,
-          readBudget: error.usage, checkedAt: new Date().toISOString() } });
+          readBudget: error.usage, readBudgetReason: error.reason, checkedAt: new Date().toISOString() } });
       else await markUnknown(missing ? "native_source_missing" : "native_source_read_failed");
       throw error;
     }
+    throwIfNativeSourceStopping(managed.signal);
     const observations = await kv.list<CompressedObservation>(KV.observations(session.id), { includeDeleted: true });
     const exclusions = await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions);
+    throwIfNativeSourceStopping(managed.signal);
     let decisions: ReturnType<typeof matchCodexMessages>;
     try {
-      decisions = matchCodexMessages(window.messages, observations, { ...input, agentId: managed.agentId,
+      decisions = matchCodexMessages(window.messages, observations, { ...input, agentId: managed.agentId, canonicalSession,
         completeNativeInventory: false, exclusions, unresolvedCaptures: state.unresolvedCaptures });
       if (decisions.some(row => row.action === "blocked" || row.action === "adopt")) throw Error("Native capture correspondence changed; reconciliation is required");
     } catch (error) { await markUnknown("native_capture_correspondence_changed"); throw error; }
@@ -355,6 +384,7 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
       if (oversized) { await markUnknown("native_observation_too_large"); throw Error(oversized.error); }
       rows.push(row);
     }
+    throwIfNativeSourceStopping(managed.signal);
     const inserts = rows.filter(row => !existing.has(row.id));
     if (inserts.length) await recordAudit(kv, "observe", "mem::codex-source-capture", inserts.map(row => row.id), {
       phase: "capture-window", project: session.project, sessionId: session.id,
@@ -378,7 +408,7 @@ export async function captureCodexSourceWindow(kv: StateKV, input: Scope, manage
     const next: Session = { ...activitySession,
       observationCount: [...existing.values()].filter(row => row.emptyDeletion?.state !== "deleted").length,
       updatedAt: capturedAt, ...(rows.length ? { semanticGraphStatus: "pending" } : {}),
-      codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, recordDiagnostic: window.issue ? { ordinal: window.issue.ordinal, byteOffset: window.issue.byteOffset, recordType: window.issue.recordType, payloadType: window.issue.payloadType, itemType: window.issue.itemType } : undefined, cursorDiagnostic: undefined, readBudget: undefined, lastFailure: undefined, indexPending, snapshotBytes: window.snapshotBytes },
+      codexNativeCapture: { ...state, cursor: window.cursor, checkedAt: capturedAt, status, issue: window.issue?.reason, recordDiagnostic: window.issue ? { ordinal: window.issue.ordinal, byteOffset: window.issue.byteOffset, recordType: window.issue.recordType, payloadType: window.issue.payloadType, itemType: window.issue.itemType } : undefined, cursorDiagnostic: undefined, readBudget: undefined, readBudgetReason: undefined, lastFailure: undefined, indexPending, snapshotBytes: window.snapshotBytes },
     };
     const unchangedCheckpoint = isDeepStrictEqual(activitySession, session) && rows.length === 0 && !state.lastFailure && !indexPending && state.indexPending === false &&
       next.observationCount === session.observationCount && status === state.status &&

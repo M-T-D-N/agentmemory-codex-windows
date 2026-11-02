@@ -1,3 +1,4 @@
+import { NativeSourceLifecycle, type WorkerShutdownStatus } from "../shutdown.js";
 import { attachCodexCaptureBatch, readCodexSourceStatus, type NativeCaptureReport } from "../functions/codex-source-status.js";
 import { currentMemoryHeads } from "../state/memory-utils.js";
 import { randomBytes } from "node:crypto";
@@ -565,6 +566,9 @@ export function registerApiTriggers(
   provider?: { name?: string; circuitState?: unknown },
   onNativeCaptured?: () => void,
   nativeSourceStatus?: (page?: { limit?: number; offset?: number }) => unknown,
+  nativeSourceLifecycle = new NativeSourceLifecycle(),
+  shutdownStatus?: () => WorkerShutdownStatus | undefined,
+  onNativePromptPending?: (request: { sessionId: string; project: string; promptTurnId: string; promptTextDigest?: string }) => boolean,
 ): void {
   sdk.registerFunction(
     "middleware::api-auth",
@@ -590,6 +594,7 @@ export function registerApiTriggers(
     viewerSkipped: getViewerSkipped(),
     streamsPort: bootStreamsPort,
     ...(nativeSourceStatus ? { nativeCapture: nativeSourceStatus() } : {}),
+    ...(shutdownStatus?.() ? { shutdown: shutdownStatus() } : {}),
   });
 
   let lastNotificationState: string | undefined;
@@ -652,8 +657,9 @@ export function registerApiTriggers(
       const circuitBreaker =
         provider && "circuitState" in provider ? provider.circuitState : null;
 
-      const status = health?.status || "healthy";
-      const statusCode = status === "critical" ? 503 : 200;
+      const shutdown = shutdownStatus?.();
+      const status = shutdown && shutdown.state !== "running" ? (shutdown.state === "failed" ? "shutdown_failed" : "stopping") : health?.status || "healthy";
+      const statusCode = ["critical", "stopping", "shutdown_failed"].includes(status) ? 503 : 200;
 
       return {
         status_code: statusCode,
@@ -699,7 +705,7 @@ export function registerApiTriggers(
           query.nativeHistory !== undefined && !["true", "false"].includes(String(query.nativeHistory))) {
         return { status_code: 400, body: { error: "Invalid native capture selection" } };
       }
-      const report = await statusReport({ nativeSelection: selection });
+      const report = { ...await statusReport({ nativeSelection: selection }), ...(shutdownStatus?.() ? { shutdown: shutdownStatus() } : {}) };
       const accept = req.headers?.["accept"] ?? req.headers?.["Accept"];
       const format = req.query_params?.["format"];
       if (prefersHtml(typeof accept === "string" ? accept : undefined, typeof format === "string" ? format : undefined)) {
@@ -1134,13 +1140,15 @@ export function registerApiTriggers(
     return inspectCodexSource(kv, input, { sourceRoot: process.env["AGENTMEMORY_CODEX_SOURCE_ROOT"] ?? "", agentId: getAgentId() ?? "" });
   });
   const nativeIndexReady = new Set<string>();
-  const managedNativeSource = () => ({ sourceRoot: process.env["AGENTMEMORY_CODEX_SOURCE_ROOT"] ?? "", agentId: getAgentId() ?? "" });
-  sdk.registerFunction("mem::codex-source-initialize", async (input: Parameters<typeof initializeCodexSourceCapture>[1]) => {
+  const managedNativeSource = () => ({ sourceRoot: process.env["AGENTMEMORY_CODEX_SOURCE_ROOT"] ?? "", agentId: getAgentId() ?? "", signal: nativeSourceLifecycle.signal });
+  sdk.registerFunction("mem::codex-source-initialize", (input: Parameters<typeof initializeCodexSourceCapture>[1]) => nativeSourceLifecycle.run(async () => {
     const result = await initializeCodexSourceCapture(kv, input, managedNativeSource());
     if (!result.dryRun) nativeIndexReady.delete(input.sessionId);
     return result;
-  });
-  sdk.registerFunction("mem::codex-source-capture", async (input: { sessionId: string; project: string }) => {
+  }));
+  sdk.registerFunction("mem::codex-source-capture", (input: { sessionId: string; project: string; promptTurnId?: string; promptTextDigest?: string }) => nativeSourceLifecycle.run(async () => {
+    if (input.promptTurnId !== undefined && (typeof input.promptTurnId !== "string" || !input.promptTurnId.trim() || input.promptTurnId.length > 512)) throw Error("Invalid prompt turn identity");
+    if (input.promptTextDigest !== undefined && (input.promptTurnId === undefined || typeof input.promptTextDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.promptTextDigest))) throw Error("Invalid prompt text digest");
     const result = await captureCodexSourceWindow(kv, input, managedNativeSource(), {
       rebuildIndex: !nativeIndexReady.has(input.sessionId),
       publish: async (rows, eventRows) => {
@@ -1157,9 +1165,15 @@ export function registerApiTriggers(
     if (result.captured > 0) {
       try { onNativeCaptured?.(); } catch { logger.warn("Graph wake deferred after native capture was stored"); }
     }
+    if (input.promptTurnId !== undefined) {
+      const session = await kv.get<Session>(KV.sessions, input.sessionId);
+      const parser = session?.codexNativeCapture?.cursor?.parser;
+      return { ...result, promptCaptured: parser?.turnId === input.promptTurnId && parser.normalUserSeen === true
+        && (input.promptTextDigest === undefined || parser.userMessages.some(message => message.digest === input.promptTextDigest)) };
+    }
     return result;
-  });
-  registerCodexSourceBacklog(sdk, kv, () => getAgentId() ?? "");
+  }));
+  registerCodexSourceBacklog(sdk, kv, () => getAgentId() ?? "", nativeSourceLifecycle);
 
   sdk.registerFunction("api::session::start",
     async (
@@ -1184,9 +1198,24 @@ export function registerApiTriggers(
             return { status_code: 200, body: result };
           }
           if (body.action === "capture-source") {
+            if (body.promptTurnId !== undefined && (typeof body.promptTurnId !== "string" || !body.promptTurnId.trim() || body.promptTurnId.length > 512)) {
+              return { status_code: 400, body: { error: "Invalid prompt turn identity" } };
+            }
+            if (body.promptTextDigest !== undefined && (body.promptTurnId === undefined || typeof body.promptTextDigest !== "string" || !/^[a-f0-9]{64}$/.test(body.promptTextDigest))) {
+              return { status_code: 400, body: { error: "Invalid prompt text digest" } };
+            }
             const result = await sdk.trigger({ function_id: "mem::codex-source-capture", payload: {
               project: body.project, sessionId: body.sessionId,
-            } });
+              ...(body.promptTurnId !== undefined ? { promptTurnId: body.promptTurnId } : {}),
+              ...(body.promptTextDigest !== undefined ? { promptTextDigest: body.promptTextDigest } : {}),
+            } }) as { promptCaptured?: boolean; status?: string };
+            // Capture has already authenticated and checked canonical source ownership.
+            if (result.promptCaptured === false && ["pending", "caught_up", "caught_up_with_holds"].includes(result.status ?? "")) {
+              const promptRetryQueued = onNativePromptPending?.({ project: body.project as string,
+                sessionId: body.sessionId as string, promptTurnId: body.promptTurnId as string,
+                ...(body.promptTextDigest !== undefined ? {promptTextDigest: body.promptTextDigest as string} : {}) }) ?? false;
+              return { status_code: 200, body: { ...result, promptRetryQueued } };
+            }
             return { status_code: 200, body: result };
           }
           if (body.action === "inspect-source") {

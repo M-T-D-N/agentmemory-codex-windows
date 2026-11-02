@@ -9,7 +9,8 @@ describe("stop reaps the worker process (#640, #474)", () => {
     const source = readFileSync("src/index.ts", "utf-8");
     expect(source).toMatch(/from "\.\/worker-pidfile\.js"/);
     expect(source).toMatch(/writeWorkerPidfile\(\)/);
-    expect(source).toMatch(/clearWorkerPidfile\(\)/);
+    expect(source).toMatch(/clearPidfile:\s*clearWorkerPidfile/);
+    expect(source).toMatch(/process\.on\("SIGTERM", shutdownController\.request\)/);
   });
 
   it("src/cli.ts reads worker.pid in runStop and signals it on stop", () => {

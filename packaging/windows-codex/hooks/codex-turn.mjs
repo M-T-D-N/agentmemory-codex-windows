@@ -1,10 +1,13 @@
 import { isCodexInternalAmbientText as isInternalCodexAmbientPrompt, isCodexApprovalReviewText as isApprovalReviewPrompt, isExcludedCodexAmbientSession as isExcludedSession, isIncidentalCodexHostEvent as isIncidentalHostEvent, stripCodexAmbientUiBlocks } from "./codex-visibility.mjs";
+import { scopeRequestText, scopeDirective, scopeOnlyRequest, resolveRecallScope, scopeAllows, recordMatchesProject, graphRecordProject } from "./codex-recall-scope.mjs";
+import { stripPrivateData } from "./codex-privacy.mjs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { projectFor as resolveCodexProject, readProjectRegistry } from "./codex-project.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readRecallTranscript, evidenceDigest, promptDigest, recallPlanContext } from "./codex-recall-evidence.mjs";
+import { assertManagedHookSource, readRecallTranscript, evidenceDigest, promptDigest, recallPlanContext } from "./codex-recall-evidence.mjs";
 
 const REST_URL = process.env.AGENTMEMORY_URL || "http://127.0.0.1:3111";
 const SECRET = process.env.AGENTMEMORY_SECRET || "";
@@ -62,7 +65,6 @@ const MAX_EXPANDED_RECALL_CONTEXT = 1150;
 const MAX_RECALL_RESULTS = 8;
 const RECALL_TOKEN_CEILINGS = [512, 1024, 2048];
 const estimateContextTokens = text => Math.ceil(String(text).length / 3);
-const MAX_RECALL_RESULTS_PER_PROJECT = 2;
 const MAX_FEDERATED_GRAPH_QUERIES = 6;
 const MAX_GRAPH_NODES = 8;
 const MAX_GRAPH_EDGES = 6;
@@ -172,8 +174,26 @@ function recallBypass(value) {
     ? "explicit-user-bypass" : null;
 }
 
+function questionReplyRows(text) {
+  const reply = /^\s*<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>\s*$/u.exec(text);
+  if (!reply) return null;
+  try {
+    const rows = JSON.parse(reply[1]);
+    if (!Array.isArray(rows) || !rows.length || rows.some(row => !row || typeof row !== "object" || Array.isArray(row)
+        || typeof row.question !== "string" || typeof row.answer !== "string"
+        || typeof row.questionItemId !== "string" || Object.keys(row).some(key => !["questionItemId", "question", "answer"].includes(key)))) return null;
+    return rows;
+  } catch { return null; }
+}
+
 function recallQuery(value) {
-  return recallRequestText(value) ?? "";
+  const text = recallRequestText(value) ?? "";
+  const rows = questionReplyRows(text);
+  return rows ? rows.map(row => {
+      const answer = row.answer.trim();
+      const confirmation = /^(?:네|예|응|승인|동의|좋아|ok|okay|yes|no|approved?)(?:[ .!。]|$)/iu.test(answer);
+      return answer && graphTokens(answer).length >= 2 && !confirmation && !omittedSubject(answer) ? answer : row.question + "\n" + row.answer;
+    }).join("\n") : text;
 }
 
 function curationCandidateText(value) {
@@ -410,7 +430,7 @@ function asksForHistoricalContext(prompt) {
   return /(?:history|historical|previous|past|failure|failed|obsolete|deprecated|supersed|reject|block|과거|이전|실패|폐기|기각|거절|차단|교체|이력|변천|작동하지)/i.test(prompt);
 }
 
-function formatGraphContext(prompt, project, graph) {
+function formatGraphContext(prompt, project, graph, scope) {
   const tokens = graphTokens(prompt);
   if (tokens.length === 0 || !Array.isArray(graph?.nodes)) return null;
 
@@ -540,7 +560,7 @@ function formatGraphContext(prompt, project, graph) {
     .slice(0, MAX_GRAPH_NODES);
   if (ranked.length === 0) return null;
 
-  const header = `<agentmemory-graph-context current_project="${project}" scope="federated">\nUse as derived context; verify consequential claims.`;
+  const header = `<agentmemory-graph-context current_project="${project}" scope="${scope?.mode === "current" ? "current-project" : "federated"}">\nUse as derived context; verify consequential claims.`;
   const footer = "\n</agentmemory-graph-context>";
   const nodeLines = [];
   for (const { node } of ranked) {
@@ -601,14 +621,28 @@ async function post(path, body, timeout = scaledBudget(5000)) {
   return response;
 }
 
+async function recallPost(path, body, scope, timeout) {
+  if (!scopeAllows(scope, body.project)) throw Error("Recall request exceeds the user search scope");
+  return post(path, body, timeout);
+}
+
 async function getJson(path, timeout = scaledBudget(4000)) {
   const response = await fetch(`${REST_URL}${path}`, {
     method: "GET",
     headers: headers(),
     signal: AbortSignal.timeout(requestTimeout(timeout)),
   });
-  if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}`);
+  if (!response.ok) throw Object.assign(new Error(`${path} returned HTTP ${response.status}`), { status: response.status });
   return response.json();
+}
+
+async function sessionObservationPage(project, sessionId, offset, timeout, limit = 48) {
+  const path = '/agentmemory/observations?' + new URLSearchParams({project, sessionId, limit:String(limit), order:'desc', offset:String(offset)});
+  try { return await getJson(path, timeout); }
+  catch (error) {
+    if (error.status === 404) return {observations:[], total:0, nextOffset:null};
+    throw error;
+  }
 }
 
 async function markSessionExcluded(sessionId, project, cwd, reason, turnId) {
@@ -689,11 +723,11 @@ function mergeGraphs(graphs) {
   return { nodes: [...nodes.values()], edges: [...edges.values()] };
 }
 
-async function queryGraph(project, queries, timeout = scaledBudget(4000)) {
-  const response = await post(
+async function queryGraph(project, queries, timeout = scaledBudget(4000), scope = { project, mode: "current" }) {
+  const response = await recallPost(
     "/agentmemory/graph/query",
     { project, limit: queries ? 160 : 500, maxDepth: 1, ...(queries ? { queries } : {}) },
-    timeout,
+    scope, timeout,
   );
   const graph = await response.json();
   if (graph?.fromSnapshot === true || graph?.warning || graph?.error || graph?.success === false ||
@@ -703,12 +737,12 @@ async function queryGraph(project, queries, timeout = scaledBudget(4000)) {
   return graph;
 }
 
-async function expandGraphSuccessions(prompt, project, graph) {
+async function expandGraphSuccessions(prompt, project, graph, scope) {
   const tokens = graphTokens(prompt);
   const historical = asksForHistoricalContext(prompt);
   const topical = graph.nodes.filter((node) => topicMatches(tokens, graphNodeText(node)).length > 0);
-  const sourceProject = (node) => node.project ?? node.properties?.project;
-  const pending = topical.filter((node) => typeof sourceProject(node) === "string" && sourceProject(node) !== "*")
+  const sourceProject = graphRecordProject;
+  const pending = topical.filter((node) => typeof sourceProject(node) === "string" && scopeAllows(scope, sourceProject(node)))
     .sort((a, b) => (sourceProject(b) === project ? 1 : 0) - (sourceProject(a) === project ? 1 : 0)
       || topicMatches(tokens, graphNodeText(b)).length - topicMatches(tokens, graphNodeText(a)).length
       || String(a.id).localeCompare(String(b.id)))
@@ -725,9 +759,9 @@ async function expandGraphSuccessions(prompt, project, graph) {
     for (const node of batch) visited.add(node.id);
     requests += batch.length;
     const results = await Promise.allSettled(batch.map(async (node) => {
-      const response = await post("/agentmemory/graph/query", {
+      const response = await recallPost("/agentmemory/graph/query", {
         project: sourceProject(node), startNodeId: node.id, maxDepth: 1, limit: 64,
-      }, Math.max(1, Math.min(scaledBudget(1200), deadline - Date.now())));
+      }, scope, Math.max(1, Math.min(scaledBudget(1200), deadline - Date.now())));
       return response.json();
     }));
     results.forEach((result, index) => {
@@ -746,7 +780,7 @@ async function expandGraphSuccessions(prompt, project, graph) {
         const type = String(edge.type).toLowerCase();
         if (type !== "succeeded_by" && type !== "supersedes") continue;
         if (!nodes.has(edge.sourceNodeId) || !nodes.has(edge.targetNodeId)) continue;
-        if (edge.project && edge.project !== sourceProject(seed)) continue;
+        if (!recordMatchesProject(edge, sourceProject(seed))) continue;
         if (edge.sourceNodeId !== seed.id && edge.targetNodeId !== seed.id) continue;
         retainedEdges.push(edge);
         retainedNodes.set(edge.sourceNodeId, nodes.get(edge.sourceNodeId));
@@ -769,30 +803,34 @@ async function expandGraphSuccessions(prompt, project, graph) {
   return { ...mergeGraphs(graphs), incompleteSuccessorNodeIds: [...incomplete] };
 }
 
-async function graphContext(prompt, project) {
+async function graphContext(prompt, project, continuation = {}) {
+  const scope = continuation.scope ?? resolveRecallScope(project, continuation.request ?? prompt);
   if (Date.now() >= (hookBudget.getStore()?.deadline ?? Infinity)) return null;
   const federatedTokens = graphTokens(prompt).slice(0, MAX_FEDERATED_GRAPH_QUERIES);
   if (federatedTokens.length === 0) return null;
   const deadline = Date.now() + scaledBudget(4000);
   try {
-    const current = await queryGraph(project, federatedTokens);
+    const current = await queryGraph(project, federatedTokens, scaledBudget(4000), scope);
     if (!Array.isArray(current?.nodes) || !Array.isArray(current?.edges) || current.error || current.success === false) throw Error("Invalid current-project graph response");
-    const nodes = current.nodes.filter(node => (node.project ?? node.properties?.project) === project);
+    const nodes = current.nodes.filter(node => graphRecordProject(node) === project);
+    const ids = new Set(nodes.map(node => node.id));
+    const edges = current.edges.filter(edge => recordMatchesProject(edge, project) && ids.has(edge.sourceNodeId) && ids.has(edge.targetNodeId));
     const hasLocalTopic = nodes.some(node => topicMatches(federatedTokens, graphNodeText(node)).length > 0);
-    let graph = { ...current, nodes };
-    if (!hasLocalTopic) {
+    let graph = { ...current, nodes, edges };
+    if (!hasLocalTopic && scopeAllows(scope, "*")) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return null;
-      graph = await queryGraph("*", federatedTokens, remaining);
+      graph = await queryGraph("*", federatedTokens, remaining, scope);
+      graph = { ...graph, nodes: graph.nodes.filter(node => graphRecordProject(node) && scopeAllows(scope, graphRecordProject(node))) };
     }
-    return formatGraphContext(prompt, project, await expandGraphSuccessions(prompt, project, mergeGraphs([graph])));
+    return formatGraphContext(prompt, project, await expandGraphSuccessions(prompt, project, mergeGraphs([graph]), scope), scope);
   } catch {
     process.stderr.write("[agentmemory] Graph recall unavailable; no scope fallback after a failed read.\n");
     return null;
   }
 }
 
-function selectRecallSources(entries, project) {
+function selectRecallSources(entries, project, limit = MAX_RECALL_RESULTS) {
   const seen = new Set();
   const ranked = entries.filter(entry => {
     const id = entry.observation?.id ?? entry.obsId;
@@ -801,39 +839,38 @@ function selectRecallSources(entries, project) {
     seen.add(key); return true;
   }).map(entry => ({ ...entry, userSource: entry.sourceKind === "user" || (entry.observation?.codexSource
     ? entry.observation.codexSource.kind === "user" : (entry.observation?.title ?? entry.title) === "prompt_submit") }))
-    .sort((a, b) => Number(b.userSource) - Number(a.userSource) || Number(b.project === project) - Number(a.project === project)
-      || (Number(b.score) || 0) - (Number(a.score) || 0));
-  const groups = new Map();
-  for (const entry of ranked.filter(entry => entry.userSource)) {
-    const rows = groups.get(entry.project) ?? []; rows.push(entry); groups.set(entry.project, rows);
-  }
-  const selected = [], ids = new Set(), derivedCounts = new Map();
-  const add = entry => {
-    if (!entry || selected.length >= MAX_RECALL_RESULTS) return;
-    const key = JSON.stringify([entry.project, entry.sessionId ?? entry.observation?.sessionId, entry.observation?.id ?? entry.obsId]);
-    if (ids.has(key)) return;
-    if (!entry.userSource && (derivedCounts.get(entry.project) ?? 0) >= MAX_RECALL_RESULTS_PER_PROJECT) return;
-    ids.add(key); selected.push(entry);
-    if (!entry.userSource) derivedCounts.set(entry.project, (derivedCounts.get(entry.project) ?? 0) + 1);
-  };
-  // Keep established requirements alongside later corrections before filling by relevance.
-  for (const rows of groups.values()) {
-    rows.sort((a,b) => String(a.timestamp ?? a.observation?.timestamp ?? "").localeCompare(String(b.timestamp ?? b.observation?.timestamp ?? "")));
-    add(rows.at(-1)); add(rows[0]);
-  }
-  for (const entry of ranked) add(entry);
-  return selected;
+    .sort((a, b) => Number(!!b.currentSession) - Number(!!a.currentSession)
+      || Number(!!b.answerReferent) - Number(!!a.answerReferent)
+      || (a.currentSession && b.currentSession ? Number(b.userSource) - Number(a.userSource) : 0)
+      || (a.currentSession && b.currentSession && a.userSource && b.userSource
+        ? String(b.timestamp ?? b.observation?.timestamp ?? "").localeCompare(String(a.timestamp ?? a.observation?.timestamp ?? "")) : 0)
+      || (Number(b.score) || 0) - (Number(a.score) || 0)
+      || Number(b.userSource) - Number(a.userSource) || Number(b.project === project) - Number(a.project === project)
+      || String(b.timestamp ?? b.observation?.timestamp ?? "").localeCompare(String(a.timestamp ?? a.observation?.timestamp ?? "")));
+  const contentSeen = new Set();
+  return ranked.filter(entry => {
+    const text = entry.observation?.narrative ?? entry.sourceText;
+    if (typeof text !== "string" || !text.trim()) return true;
+    const key = JSON.stringify([entry.project, entry.sessionId ?? entry.observation?.sessionId,
+      entry.userSource, text]);
+    if (contentSeen.has(key)) return false;
+    contentSeen.add(key);
+    return true;
+  }).slice(0, limit);
 }
 
-function formatRecallContext(prompt, project, result) {
-  const tokens = graphTokens(prompt);
+function formatRecallContext(prompt, project, result, maxChars = 6144) {
+  const tokens = recallTopicTokens(prompt);
   if (!tokens.length || !Array.isArray(result?.results)) return null;
   const selected = selectRecallSources(result.results.filter(entry => typeof entry.observation?.id === "string"
     && !isInternalCodexAmbientPrompt(entry.observation.narrative ?? "")
     && (entry.discovery === "hybrid" || topicMatches(tokens, observationTopicText(entry.observation)).length > 0)), project);
   if (!selected.length) return null;
+  // Selection stays relevance-ranked; show surviving original requirements newest first.
+  selected.sort((a,b) => Number(b.userSource)-Number(a.userSource)
+    || (a.userSource && b.userSource ? String(b.observation.timestamp ?? "").localeCompare(String(a.observation.timestamp ?? "")) : 0));
   const footer = "\n</agentmemory-recall-context>";
-  const header = `<agentmemory-recall-context current_project="${contextScalar(project)}" scope="federated" history="${result.historyStatus ?? "partial"}" channels="${contextScalar(result.channels ?? "keyword; originals")}" estimated_tokens="ESTIMATE" token_ceiling="CEILING">\nCurrent user request wins. Labelled originals are unverified candidates; derived text is not a user requirement. Missing sources require official expansion.`;
+  const header = `<agentmemory-recall-context current_project="${contextScalar(project)}" scope="${result.scope?.mode === "current" ? "current-project" : "federated"}" history="${result.historyStatus ?? "partial"}" channels="${contextScalar(result.channels ?? "keyword; originals")}" estimated_tokens="ESTIMATE" token_ceiling="CEILING">\nCurrent user request wins. Labelled originals are unverified candidates; derived text is not a user requirement. Missing sources require official expansion.`;
   const lines = selected.map(entry => {
     const o = entry.observation;
     const label = `[${contextScalar(entry.project)}] ${contextScalar(o.id)} @${contextScalar(o.timestamp ?? "unknown")} ${entry.userSource ? "user" : "derived"}:`;
@@ -842,76 +879,121 @@ function formatRecallContext(prompt, project, result) {
   });
   const fullSize = estimateContextTokens(header + lines.map(row => `\n- ${row.label} ${row.text}${row.source}`).join("") + footer);
   const ceiling = RECALL_TOKEN_CEILINGS.find(budget => fullSize <= budget) ?? RECALL_TOKEN_CEILINGS.at(-1);
+  const pointer = row => `\n- needs-expansion ${row.label}${row.source} (original exceeds remaining evidence budget; no excerpt claimed)`;
+  const fullRow = row => `\n- ${row.label} ${row.text}${row.source}`;
+  const minimumRow = row => fullRow(row).length < pointer(row).length ? fullRow(row) : pointer(row);
+  const fits = value => value.length <= maxChars && estimateContextTokens(value) <= ceiling;
+  let omitted = 0;
+  const omission = () => omitted ? `\n- needs-expansion omitted_sources=${omitted}; source identifiers exceed the context budget. Use official search with the current query.` : "";
+  while (lines.length && !fits(header + lines.map(minimumRow).join("") + omission() + footer)) {
+    lines.pop(); omitted++;
+  }
   let context = header;
   for (let index=0; index<lines.length; index++) {
     const row = lines[index];
-    const pendingPointers = lines.slice(index + 1).map(item => `\n- needs-expansion ${item.label}${item.source}`).join("");
-    const full = `\n- ${row.label} ${row.text}${row.source}`;
-    if (estimateContextTokens(context + full + pendingPointers + footer) <= ceiling) context += full;
-    else {
-      const pointer = `\n- needs-expansion ${row.label}${row.source} (original exceeds remaining evidence budget; no excerpt claimed)`;
-      if (estimateContextTokens(context + pointer + footer) <= ceiling) context += pointer;
-    }
+    const pendingPointers = lines.slice(index + 1).map(minimumRow).join("");
+    const full = fullRow(row);
+    context += fits(context + full + pendingPointers + omission() + footer) ? full : pointer(row);
   }
-  context += footer;
+  context += omission() + footer;
   return context.replace("ESTIMATE", String(estimateContextTokens(context))).replace("CEILING", String(ceiling));
 }
 
-async function recallForTurn(prompt, project) {
-  const query = recallQuery(prompt);
-  if (!query || !graphTokens(query).length) return { status: "needs-query", context: null };
+async function recallForTurn(prompt, project, sessionId, continuation = {}) {
+  const access = continuation.scope ?? resolveRecallScope(project, continuation.request ?? prompt);
+  const query = continuation.answerLocator
+    ? [...new Set([...recallTopicTokens(continuation.answerLocator), ...recallTopicTokens(continuation.userContext ?? prompt)])].join(" ")
+    : recallQuery(prompt);
+  if (!query || bareFollowup(query) || !followupSubjectTokens(query, true).length || !recallTopicTokens(query).length) return { status: "needs-query", context: null, scope: access };
+  const historical = access.mode === "all" || /(?:history|historical|previous|past|obsolete|deprecated|supersed|과거|이전|폐기|이력|변천|(?:모든|다른)\s*프로젝트|all\s+projects)/iu
+    .test(scopeRequestText(continuation.userContext ?? continuation.request ?? prompt));
   const deadline = Math.min(Date.now() + scaledBudget(5000), hookBudget.getStore()?.deadline ?? Infinity);
   const discoveryDeadline = deadline - scaledBudget(1000);
   const remaining = maximum => Math.max(1, Math.min(maximum, deadline - Date.now()));
   const search = async (scope, sourceKind, mode = "keyword") => {
     if (Date.now() >= discoveryDeadline) throw Error("Recall discovery deadline exhausted");
-    const response = await post("/agentmemory/search", {
+    const response = await recallPost("/agentmemory/search", {
       query, project: scope, searchMode: mode, retrievalPolicy: "automatic", format: "compact", limit: 12,
       token_budget: 1200, trackAccess: false, ...(sourceKind ? { sourceKind } : {}),
-    }, Math.max(1, Math.min(scaledBudget(2500), discoveryDeadline - Date.now())));
+    }, access, Math.max(1, Math.min(scaledBudget(2500), discoveryDeadline - Date.now())));
     const result = await response.json();
     if (result.format !== "compact" || !Array.isArray(result.results) || result.error || result.success === false) throw Error("Invalid compact recall response");
     const degraded = Object.values(result.retrieval ?? {}).some(value => ["failed", "unavailable", "skipped-scan-bound", "index-not-ready"].includes(value));
     return { ...result, degraded, results: result.results.filter(entry => typeof entry.obsId === "string" && typeof entry.sessionId === "string"
-      && typeof entry.project === "string" && entry.project && entry.project !== "*" && (scope === "*" || entry.project === scope))
+      && typeof entry.project === "string" && entry.project && entry.project !== "*" && scopeAllows(access, entry.project) && recordMatchesProject(entry.observation, entry.project)
+        && (scope === "*" || entry.project === scope))
       .map(entry => ({ ...entry, discovery: mode })) };
   };
   let current;
   try { current = await search(project); }
-  catch { return { status: "unavailable", context: null }; }
-  const localSufficient = !current.truncated && !current.degraded && !asksForHistoricalContext(prompt)
-    && new Set(current.results.filter(entry => entry.sourceKind === "user").map(entry => JSON.stringify([entry.obsId,entry.sessionId]))).size >= 3;
+  catch { return { status: "unavailable", context: null, scope: access }; }
+  const sessionSources = [];
+  let sessionReadFailed = false;
+  if (sessionId && Date.now() < discoveryDeadline) {
+    try {
+      const page = continuation.recentPage ?? await sessionObservationPage(project, sessionId, 0, remaining(scaledBudget(1500)));
+      if (!Array.isArray(page.observations)) throw Error("Invalid same-session source page");
+      const tokens = recallTopicTokens(query);
+      const answerSource = continuation.answerLocator ? [...page.observations]
+        .filter(row => row.project === project && row.sessionId === sessionId && row.title === "assistant_response"
+          && typeof row.narrative === "string" && row.narrative.trim().startsWith(continuation.answerLocator.trim()))
+        .sort((a,b) => String(b.timestamp ?? "").localeCompare(String(a.timestamp ?? "")))[0]?.id : null;
+      for (const row of page.observations) {
+        if (row.project !== project || !recordMatchesProject(row, project) || row.sessionId !== sessionId || typeof row.id !== "string" || typeof row.narrative !== "string"
+            || isInternalCodexAmbientPrompt(row.narrative)) continue;
+        const matches = topicMatches(tokens, observationTopicText(row)).length;
+        if (row.id !== answerSource && matches < Math.min(2, tokens.length)) continue;
+        sessionSources.push({project, sessionId, obsId:row.id, title:row.title, timestamp:row.timestamp,
+          sourceKind:(row.codexSource ? row.codexSource.kind === "user" : row.title === "prompt_submit") ? "user" : "assistant",
+          score:matches, currentSession:true, answerReferent:row.id === answerSource, discovery:"keyword", sourceText:row.narrative});
+      }
+    } catch { sessionReadFailed = true; }
+  }
+  const localSufficient = !current.degraded && !historical
+    && (sessionSources.some(entry => entry.sourceKind === "user")
+      || new Set(current.results.filter(entry => entry.sourceKind === "user").map(entry => JSON.stringify([entry.obsId,entry.sessionId]))).size >= 3);
   const pages = [{ status: "fulfilled", value: current }];
-  if (!localSufficient && Date.now() < discoveryDeadline) pages.push(...await Promise.allSettled([search("*", "user"), search("*")]));
-  else if (!localSufficient) pages.push({ status: "rejected" });
-  let candidates = pages.flatMap(page => page.status === "fulfilled" ? page.value.results : []);
-  if (Date.now() < discoveryDeadline && (!candidates.some(entry => entry.sourceKind === "user") || asksForHistoricalContext(prompt))) {
-    const fallback = await Promise.allSettled([search("*", "user", "hybrid")]);
+  if (!localSufficient && scopeAllows(access, "*") && Date.now() < discoveryDeadline) pages.push(...await Promise.allSettled([search("*", "user"), search("*")]));
+  else if (!localSufficient && scopeAllows(access, "*")) pages.push({ status: "rejected" });
+  let candidates = [...sessionSources, ...pages.flatMap(page => page.status === "fulfilled" ? page.value.results : [])
+    .map(entry => ({ ...entry, currentSession: !!sessionId && entry.project === project && entry.sessionId === sessionId }))];
+  if (Date.now() < discoveryDeadline && (!candidates.some(entry => entry.sourceKind === "user") || historical)) {
+    const fallback = await Promise.allSettled([search(scopeAllows(access, "*") ? "*" : project, "user", "hybrid")]);
     pages.push(...fallback);
     candidates.push(...fallback.flatMap(page => page.status === "fulfilled" ? page.value.results : []));
   }
-  const selected = selectRecallSources(candidates, project);
+  const available = selectRecallSources(candidates, project, Infinity);
+  const selected = available.slice(0, 20);
   const groups = new Map();
   for (const entry of selected) { const rows = groups.get(entry.project) ?? []; rows.push(entry); groups.set(entry.project, rows); }
   const expansions = await Promise.allSettled([...groups].map(async ([scope, rows]) => {
     if (Date.now() >= deadline) throw Error("Original expansion deadline exhausted");
-    const response = await post("/agentmemory/smart-search", {
+    const response = await recallPost("/agentmemory/smart-search", {
       project: scope, exactExpansion: true, expandIds: rows.map(({ obsId, sessionId }) => ({ obsId, sessionId })), trackAccess: false,
-    }, remaining(scaledBudget(2500)));
+    }, access, remaining(scaledBudget(2500)));
     const result = await response.json();
     if (result.mode !== "expanded" || !Array.isArray(result.results) || result.error || result.success === false) throw Error("Invalid original expansion response");
     const originals = rows.flatMap(row => {
-      const entry = result.results.find(item => item.project === scope && item.obsId === row.obsId && item.sessionId === row.sessionId && item.observation?.id === row.obsId);
-      return entry ? [{ ...entry, score: row.score, discovery: row.discovery }] : [];
+      const entry = result.results.find(item => item.project === scope && item.obsId === row.obsId && item.sessionId === row.sessionId && item.observation?.id === row.obsId
+        && recordMatchesProject(item.observation, scope) && (!item.observation.sessionId || item.observation.sessionId === row.sessionId));
+      return entry ? [{ ...entry, score: row.score, discovery: row.discovery, currentSession: row.currentSession, answerReferent: row.answerReferent }] : [];
     });
     return { originals, partial: result.truncated === true || originals.length !== rows.length };
   }));
-  const partial = pages.some(page => page.status !== "fulfilled" || page.value.truncated || page.value.degraded)
+  const partial = sessionReadFailed || pages.some(page => page.status !== "fulfilled" || page.value.degraded)
     || expansions.some(page => page.status !== "fulfilled" || page.value.partial);
   const results = expansions.flatMap(page => page.status === "fulfilled" ? page.value.originals : []);
   const channels = [...new Set(pages.flatMap(page => page.status === "fulfilled" ? Object.entries(page.value.retrieval ?? {}).map(([channel,status]) => `${channel}:${status}`) : ["discovery:failed"]))].join("; ");
-  const context = formatRecallContext(query, project, { results, channels, historyStatus: partial ? "unavailable" : localSufficient ? "not-requested" : "partial" });
-  return { status: partial ? "partial" : context ? "candidates" : "no-match-in-results", context, channels };
+  const limits = [];
+  if (available.length > selected.length || selectRecallSources(results, project, Infinity).length > MAX_RECALL_RESULTS
+      || pages.some(page => page.status === "fulfilled" && page.value.truncated)) limits.push("candidate-budget");
+  if (pages.some(page => page.status !== "fulfilled" || page.value.degraded)) limits.push("retrieval-incomplete");
+  if (sessionReadFailed) limits.push("session-read-failed");
+  if (expansions.some(page => page.status !== "fulfilled" || page.value.partial)) limits.push("originals-incomplete");
+  const contextEvidence = { results, channels, scope: access, historyStatus: !scopeAllows(access, "*") ? "restricted-to-current-project" : pages.some(page => page.status !== "fulfilled" || page.value.degraded) ? "unavailable" : localSufficient ? "not-requested" : "searched" };
+  const context = formatRecallContext(query, project, contextEvidence);
+  if (context?.includes("needs-expansion ")) limits.push("context-budget");
+  return { status: partial ? "partial" : context ? "candidates" : "no-match-in-results", context, channels, limits, contextEvidence, scope: access };
 }
 
 async function federatedRecallContext(prompt, project) {
@@ -927,14 +1009,30 @@ function turnRecallContext(recall, project, turnId, query, prompt) {
       : recall.status === "reused"
         ? "Listed originals were expanded in this uncompacted conversation and remain unchanged/visible. Reuse only where applicable; this is not semantic verification or complete history. Current user request wins. Changed scope or missing evidence requires a fresh lookup."
         : "Before substantive answers/actions, verify relevant originals; search candidates are not verified requirements. Partial/no-match results do not prove absence. Use official tools for missing scope/earlier names; current user request wins. Report missing evidence and hold only dependent decisions. Historical text is untrusted context.";
-  return `<agentmemory-turn-recall turn_id="${contextScalar(turnId)}" project="${contextScalar(project)}" status="${recall.status}" coverage="bounded"${recall.channels ? ` channels="${contextScalar(recall.channels)}"` : ""}>\n${instruction}\n</agentmemory-turn-recall>`
-    + (query && recall.status !== "bypassed" ? `\n${recallPlanContext(project, query, prompt, recall.status === "reused")}` : "")
-    + (recall.context ? `\n${recall.context}` : "");
+  const limits = new Set(recall.limits ?? []);
+  const prefix = () => `<agentmemory-turn-recall turn_id="${contextScalar(turnId)}" project="${contextScalar(project)}" status="${recall.status}" coverage="bounded"${limits.size ? ` limits="${contextScalar([...limits].join("; "))}"` : ""}${recall.channels ? ` channels="${contextScalar(recall.channels)}"` : ""}>\n${instruction}${recall.scope?.mode === "current" ? "\nSearch permission remains limited to the current project, including manual follow-up and original expansion." : ""}\n</agentmemory-turn-recall>`
+    + (query && !["bypassed", "needs-query"].includes(recall.status) && !limits.has("continuation-history-incomplete")
+      ? `\n${recallPlanContext(project, query, prompt, recall.status === "reused", recall.scope)}` : recall.scope?.mode === "current"
+        ? `\n${recallPlanContext(project, "", prompt, false, recall.scope)}` : "");
+  let context = recall.context;
+  if (context && prefix().length + context.length + 1 > 7600) {
+    limits.add("context-budget");
+    context = recall.contextEvidence ? formatRecallContext(query, project, recall.contextEvidence, 7600 - prefix().length - 1)
+      : "Original bodies omitted by the context budget; use official search and expansion for missing evidence.";
+  }
+  return prefix() + (context ? `\n${context}` : "");
 }
 
-function unavailableRecall() {
+export function recallFailureDetails(error) {
+  const reason = error?.code === "AGENTMEMORY_SOURCE_BOUNDARY" && /^[a-z_]{1,48}$/.test(error.reason ?? "")
+    ? `source-boundary:${error.reason}` : ["TimeoutError", "AbortError", "TypeError", "SyntaxError", "Error"].includes(error?.name) ? error.name : "unknown";
+  const origin = /(?:^|[\\/])(codex-[a-z-]+\.mjs):(\d+):\d+/.exec(error?.stack ?? "");
+  return { reason, ...(origin ? { origin: `${origin[1]}:${origin[2]}` } : {}) };
+}
+
+function unavailableRecall(error) {
   return { hookSpecificOutput: { hookEventName: "UserPromptSubmit",
-    additionalContext: turnRecallContext({ status: "unavailable", context: null }, "unknown", "unknown") },
+    additionalContext: turnRecallContext({ status: "unavailable", context: null }, "unknown", "unknown") + (error ? `\n<agentmemory-recall-failure>${JSON.stringify(recallFailureDetails(error))}</agentmemory-recall-failure>` : "") },
     systemMessage: "AgentMemory: 회상 조회를 확인하지 못했습니다. 과거 근거가 필요한 판단은 보류하고, 현재 자료로 가능한 독립 작업과 복구는 진행할 수 있습니다." };
 }
 
@@ -944,23 +1042,75 @@ function requireSessionId(event) {
   return sessionId.trim();
 }
 
+export async function nativeCaptureScope(sessionId) {
+  const result = await getJson(`/agentmemory/sessions?project=*&sessionId=${encodeURIComponent(sessionId)}&limit=1`, 2000);
+  if (!Array.isArray(result?.sessions) || result.error || result.success === false) throw Error("Native session ownership lookup failed");
+  const session = result.sessions.find(row => row.id === sessionId);
+  if (!session?.codexNativeCapture) return null;
+  const owner = process.env.AGENT_ID?.trim();
+  if (session.codexNativeCapture.source?.sessionId !== sessionId || ![1, 2].includes(session.codexNativeCapture.version)
+      || typeof session.project !== "string" || !session.project.trim() || session.project === "*"
+      || typeof session.cwd !== "string" || !session.cwd.trim() || (owner && session.agentId !== owner))
+    throw Error("Native session ownership is inconsistent");
+  return {project: session.project, cwd: session.cwd};
+}
+
 async function handleSessionStart(event) {
   const sessionId = requireSessionId(event);
   const cwd = resolve(typeof event.cwd === "string" && event.cwd.trim() ? event.cwd : process.cwd());
-  await post("/agentmemory/session/start", { sessionId, project: projectFor(cwd), cwd }, 3000);
+  const source = await nativeCaptureScope(sessionId);
+  await post("/agentmemory/session/start", { sessionId, project: source?.project ?? projectFor(cwd), cwd: source?.cwd ?? cwd }, 3000);
 }
 
 async function handleSessionEnd(event) {
   await post("/agentmemory/session/end", { sessionId: requireSessionId(event) }, 3000);
 }
 
-const FRESH_CONTINUATION = /(?:모든|전부|나열|과거|이전|도출|토대|현재|지금|최신|현황|새로|변경|정정|대신|말고|하지\s*마|아니|추가|수정|바꿔|재분석|분석|골|목표|설정|now|status|latest|instead|change|correct|replace|new\b|all\b|past\b|history\b)/iu;
+const FRESH_CONTINUATION = /(?:모든|전부|나열|과거|이전|도출|토대|현재|지금|최신|현황|상태|새로|변경|정정|대신|말고|하지\s*마|아니|추가|수정|바꿔|재분석|분석|골|목표|설정|now|status|latest|instead|change|correct|replace|new\b|all\b|past\b|history\b)/iu;
+
+const STATUS_FOLLOWUP = /^(?:(?:그럼|그러면|그리고|지금|현재|최신)\s*)*(?:현황|상태)\s*(?:확인)?\s*(?:해\s*줘|해\s*봐|해|해주세요|알려\s*줘|보여\s*줘|부탁해)?[.!?。]*$/u;
+
+const PROGRESS_FOLLOWUP = /^(?:(?:네|예|응|좋아|알겠어)[,，]?\s*)?(?:(?:(?:이어서|계속|마저|다음)\s*)?(?:진행|계속|확인|재개)|이어서|마저|이어\s*가)(?:\s*(?:해\s*줘|해\s*봐|해|해주세요|줘|주세요))?[.!?。]*$/u;
+const FOLLOWUP_MODIFIER = /^(?:각종|각각|여러|여러가지|다양한|주요|(?:전반|전체|종합|대략)(?:적(?:인|으로)?)?|자세히|상세히|다시|한번|한번더|쭉|좀|최근|요즘|현재|지금)$/u;
+const FOLLOWUP_INSPECTION = /^(?:살펴|살펴보|알아보|점검|확인|검토)(?:고|자|줘|주세요|해|해줘|해봐|하고|해서|해보고|해보자|해줄래|해볼래|볼래|봐|보자|보고|봐줘|봐주세요|보세요)?$/u;
+const FOLLOWUP_NAMED_SUBJECTS = new Set(["agentmemory", "agentmemorycodex", "qwen", "astra", "sol", "windows", "codex"]);
+function followupSubjectTokens(text, includeNames = false) {
+  text = text.replace(/(현황|상태)\s*확인/gu, "$1 확인");
+  return [...new Set([...graphTokens(text), ...(includeNames ? topicWords(text).filter(token => FOLLOWUP_NAMED_SUBJECTS.has(token)) : [])])]
+    .filter(token => !FOLLOWUP_MODIFIER.test(token) && !FOLLOWUP_INSPECTION.test(token));
+}
+function recallTopicTokens(text) {
+  const tokens = graphTokens(text.replace(/(현황|상태)\s*확인/gu, "$1 확인"));
+  return tokens.length ? tokens : /(?:현황|상태|\bstatus\b|\bstate\b)/iu.test(text) ? followupSubjectTokens(text, true) : [];
+}
+function followupText(value) {
+  return value.trim().replace(/(\*\*|__|~~|\*|_|\x60)([^\r\n]+?)\1/gu, "$2").trim();
+}
+
+const bareFollowup = text => STATUS_FOLLOWUP.test(followupText(text)) || PROGRESS_FOLLOWUP.test(followupText(text))
+  || (/(?:현황|상태)/u.test(followupText(text)) && followupSubjectTokens(text, true).length === 0);
+
+function continuationTopicPrompt(value) {
+  const rows = questionReplyRows(value);
+  const answers = rows?.length === 1 ? [rows[0].answer.trim()] : null;
+  return answers?.every(bareFollowup)
+    ? answers.join("\n") : recallQuery(value);
+}
 
 function omittedSubject(text) {
-  const tokens = graphTokens(text);
+  text = followupText(text);
+  const lines = text.split(/\r?\n/u).filter(line => line.trim());
+  if (lines.length > 1) return lines.every(omittedSubject);
+  if (/^(?:(?:이제|그리고)\s*)?(?:새(?:로운)?\s*(?:주제|프로젝트)|다른\s*주제)(?:로|를|에|\s|:)/u.test(text)) return false;
+  if (/^다음\s*보고(?:에는|에서|에)(?:\s|$)/u.test(text)) return true;
+  if (/^(?:(?:그럼|그러면|그래서|그리고)\s*)?(?:(?:이거|그거|저거|이것|그것|저것)(?:\s|[은는이가을를의도]|$)|(?:남은|나머지|잔여)\s*(?:(?:제약|문제|부분|항목|내용|작업|사항)(?:은|는|을|를|이|가|도)?(?:\s|[?!.]|$)|(?:은|는|도|를|부터)(?:\s|[?!.]|$)))/u.test(text)) return true;
+  if (bareFollowup(text) || scopeOnlyRequest(text)) return true;
+  if (/(?:현황|상태)\s*(?:확인)?\s*(?:해줘|해|해주세요|알려줘|보여줘|부탁해)?[.!?。]*$/u.test(text)
+      && followupSubjectTokens(text, true).length > 0) return false;
+  const tokens = followupSubjectTokens(text);
   const actionOnly = tokens.length > 0 && tokens.every(token => /^(?:적절|적합|구현(?:방안)?|해결방안|수정방안|선정|작업(?:진행)?|진행|계속|수정|실행|처리|검토|방안|진행방안)(?:한|하게|을|를|하고|해|해줘|진행|해봐)?$/u.test(token));
   return tokens.length === 0 || actionOnly
-    || /^(?:(?:그럼|그러면|그래서|그리고)\s*)?(?:해당|이번|방금|아까|(?:이|그|저)\s+|(?:these|those)\b)/iu.test(text)
+    || /^(?:(?:그럼|그러면|그래서|그리고)\s*)?(?:해당|이번(?!에는)|방금|아까|(?:이|그|저)\s+|(?:these|those)\b)/iu.test(text)
     || /^(?:(?:그럼|그러면|그래서|그리고)\s*)?(?:(?:이번|그|이|해당|방금|아까)\s*(?:수정|구현안|방안|설계|작업|변경|결론|문제|결과|답변)|최종적?(?:으로|으론)|(?:this|that)\s+(?:change|plan|implementation|answer))/iu.test(text);
 }
 
@@ -972,90 +1122,132 @@ function unchangedContinuation(text, query) {
 }
 
 function contextualQuery(previous, text) {
-  return unchangedContinuation(text, previous) ? previous : previous + "\n" + text;
+  return bareFollowup(text) || unchangedContinuation(text, previous) ? previous : previous + "\n" + text;
 }
 
 function priorTranscriptPrompt(transcript, text) {
   const users = [...(transcript?.users ?? [])];
-  if (samePrompt(users.at(-1), text)) users.pop();
+  if (transcript?.lastUserAnswered !== true && samePrompt(users.at(-1), text)) users.pop();
   return users.at(-1);
 }
 
-async function retrievalPrompt(text, project, sessionId, transcript) {
-  if (!omittedSubject(text)) return text;
-  const users = [...(transcript?.users ?? [])];
-  if (samePrompt(users.at(-1), text)) users.pop();
-  const prior = users.at(-1);
-  const referent = transcript?.referent;
-  if (prior && referent?.userDigest === promptDigest(prior) && typeof referent.text === "string" &&
-      (graphTokens(text).length > 0 || !transcript?.plan?.complete)) {
-    return `${text}\nPrevious answer topic locator (unverified; current user request wins):\n${referent.text}`;
-  }
+async function retrievalPrompt(text, project, sessionId, transcript, resolution = {}) {
+  resolution.scope = resolveRecallScope(project, text, transcript ?? {});
+  const rawUsers = [...(transcript?.users ?? [])];
+  if (transcript?.lastUserAnswered !== true && samePrompt(rawUsers.at(-1), text)) rawUsers.pop();
+  const prior = rawUsers.at(-1);
+  const users = rawUsers.map(continuationTopicPrompt);
+  text = continuationTopicPrompt(text);
+  resolution.request = text;
+  if (!omittedSubject(text)) { resolution.userContext = text; return text; }
   const concreteIndex = users.findLastIndex(value => !omittedSubject(value));
   const concrete = users[concreteIndex];
   const plan = transcript?.plan;
   const planTokens = graphTokens(plan?.query);
   const concreteTokens = concrete ? graphTokens(concrete) : [];
   const planIsConcrete = prior && plan?.project === project && plan.promptDigest === promptDigest(prior)
+    && typeof plan.query === "string" && !omittedSubject(plan.query)
     && planTokens.length > 0 && (!concrete || (planTokens.length >= Math.min(2, concreteTokens.length)
       && planTokens.every(token => concreteTokens.includes(token))));
-  if (planIsConcrete || concrete) {
-    let topic = planIsConcrete ? plan.query : concrete;
-    for (const value of users.slice(concreteIndex + 1)) {
-      if (!topic.includes(value)) topic = contextualQuery(topic, value);
-    }
-    return contextualQuery(topic, text);
+  let topic = planIsConcrete ? plan.query : concrete;
+  if (topic) for (const value of users.slice(concreteIndex + 1)) {
+    if (!topic.includes(value)) topic = contextualQuery(topic, value);
   }
+  const referent = transcript?.referent;
+  const answerLocator = prior && referent?.userDigest === promptDigest(prior) && typeof referent.text === "string"
+    && recallTopicTokens(referent.text).length > 0 ? referent.text : null;
+  const finishTopic = (userContext, includeAnswer = false) => {
+    resolution.userContext = userContext;
+    if (!includeAnswer || !answerLocator) return userContext;
+    resolution.answerLocator = answerLocator;
+    return `${userContext}\nPrevious answer topic locator (unverified; current user request wins):\n${answerLocator}`;
+  };
+  if (prior && referent?.userDigest === promptDigest(prior) && typeof referent.text === "string" &&
+      topic && !bareFollowup(text) && graphTokens(text).length > 0) {
+    return finishTopic(contextualQuery(topic, text), true);
+  }
+  if (topic) return finishTopic(contextualQuery(topic, text));
   // The canonical conversation supplies omitted context; no hook-local topic cache.
   try {
-    const path = '/agentmemory/observations?project=' + encodeURIComponent(project)
-      + '&sessionId=' + encodeURIComponent(sessionId) + '&limit=12';
-    let page = await getJson(path + '&offset=0', scaledBudget(3000));
-    if (!Array.isArray(page?.observations) || !Number.isSafeInteger(page.total) || page.total < 0) return text;
-    if (page.total > 12) page = await getJson(path + '&offset=' + (page.total - 12), scaledBudget(3000));
-    const previous = [...(page?.observations ?? [])]
-      .filter(row => row?.sessionId === sessionId && (!row.project || row.project === project)
-        && row.title === "prompt_submit")
-      .sort((a, b) => String(b.timestamp ?? "").localeCompare(String(a.timestamp ?? "")));
-    const qualifiers = [];
-    for (const row of previous) {
-      let narrative = row.narrative;
-      if (typeof narrative !== "string") continue;
-      const separator = narrative.indexOf(" | ");
-      if (separator >= 0 && narrative.slice(0, separator).trim().startsWith("{")) narrative = narrative.slice(separator + 3);
-      const prompt = promptText(narrative);
-      if (!prompt || samePrompt(prompt, text)) continue;
-      if (!omittedSubject(prompt)) {
-        let topic = prompt;
-        for (const qualifier of qualifiers.reverse()) topic = contextualQuery(topic, qualifier);
-        return contextualQuery(topic, text);
+    const deadline = Math.min(Date.now() + scaledBudget(3000), hookBudget.getStore()?.deadline ?? Infinity);
+    let offset = 0, exhausted = false;
+    const qualifiers = [], seen = new Set();
+    while (Date.now() < deadline) {
+      const page = await sessionObservationPage(project, sessionId, offset, deadline - Date.now(), 200);
+      if (!Array.isArray(page?.observations) || !Number.isSafeInteger(page.total) || page.total < 0) {
+        throw Object.assign(Error("Invalid continuation source page"), { code: "CONTINUATION_INVALID_PAGE" });
       }
-      qualifiers.push(prompt);
+      if (offset === 0) resolution.recentPage = page;
+      const previous = [...page.observations]
+        .filter(row => row?.sessionId === sessionId && (!row.project || row.project === project)
+          && row.title === "prompt_submit")
+        .sort((a, b) => String(b.timestamp ?? "").localeCompare(String(a.timestamp ?? "")));
+      for (const row of previous) {
+        let narrative = row.narrative;
+        if (typeof narrative !== "string") continue;
+        const separator = narrative.indexOf(" | ");
+        if (separator >= 0 && narrative.slice(0, separator).trim().startsWith("{")) narrative = narrative.slice(separator + 3);
+        const normal = promptText(narrative);
+        if (resolution.scope.mode === "default" && (!row.codexSource || row.codexSource.kind === "user")) {
+          const mode = scopeDirective(normal);
+          if (mode) resolution.scope = Object.freeze({ project, mode });
+        }
+        const prompt = normal ? continuationTopicPrompt(normal) : null;
+        if (!prompt || samePrompt(prompt, text) || seen.has(prompt)) continue;
+        seen.add(prompt);
+        if (!omittedSubject(prompt)) {
+          let topic = prompt;
+          for (const qualifier of qualifiers.reverse()) topic = contextualQuery(topic, qualifier);
+          return finishTopic(contextualQuery(topic, text), prior && !bareFollowup(continuationTopicPrompt(prior)) && !bareFollowup(text));
+        }
+        if (!bareFollowup(prompt)) qualifiers.push(prompt);
+      }
+      const nextOffset = page.nextOffset === undefined
+        ? (offset + page.observations.length < page.total ? offset + page.observations.length : null) : page.nextOffset;
+      if (nextOffset === null) { exhausted = true; break; }
+      if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset || nextOffset >= page.total) {
+        throw Object.assign(Error("Invalid continuation source offset"), { code: "CONTINUATION_INVALID_PAGE" });
+      }
+      offset = nextOffset;
     }
-  } catch {
-    process.stderr.write("[agentmemory] Continuation topic unavailable; current request remains authoritative.\n");
+    if (!exhausted) { resolution.incomplete = true; resolution.failure = "deadline"; }
+  } catch (error) {
+    resolution.incomplete = true;
+    resolution.failure = error?.code === "CONTINUATION_INVALID_PAGE" || error?.name === "SyntaxError" ? "invalid-response"
+      : ["TimeoutError", "AbortError"].includes(error?.name) ? "timeout"
+      : Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? `http-${error.status}`
+      : error?.name === "TypeError" ? "transport" : "unavailable";
+    process.stderr.write(`[agentmemory] Continuation topic unavailable (${resolution.failure}); current request remains authoritative.\n`);
   }
+  if (prior && referent?.userDigest === promptDigest(prior) && typeof referent.text === "string") {
+    return finishTopic([...new Set([text, ...users.filter(value => !bareFollowup(value))])].join("\n"), true);
+  }
+  resolution.unresolved = true;
+  resolution.userContext = text;
   return text;
 }
 
-async function reuseRecall(text, query, project, transcript) {
+async function reuseRecall(text, query, project, transcript, continuation = {}) {
+  const access = continuation.scope ?? resolveRecallScope(project, text, transcript ?? {});
+  if (scopeDirective(text) !== null) return null;
   const prior = priorTranscriptPrompt(transcript, text), plan = transcript?.plan;
   if (!unchangedContinuation(text, query) || !prior || plan?.project !== project || plan.query !== query
     || plan.promptDigest !== promptDigest(prior)) return null;
   const tokens = graphTokens(query);
   if (!tokens.length) return null;
-  const sources = (transcript.sources ?? []).filter(entry => entry.project === project
+  const sources = (transcript.sources ?? []).filter(entry => entry.project === project && recordMatchesProject(entry.observation, project)
     && topicMatches(tokens, observationTopicText(entry.observation)).length > 0).slice(-4);
   if (!sources.length) return null;
   try {
-    const response = await post("/agentmemory/smart-search", {
+    const response = await recallPost("/agentmemory/smart-search", {
       project, exactExpansion: true, expandIds: sources.map(({obsId, sessionId}) => ({obsId, sessionId})), trackAccess: false,
-    }, scaledBudget(3000));
+    }, access, scaledBudget(3000));
     const result = await response.json();
     if (result.mode !== "expanded" || result.truncated !== false || !Array.isArray(result.results)) return null;
     if (sources.some(old => !result.results.some(entry => entry.project === old.project
-      && entry.obsId === old.obsId && entry.sessionId === old.sessionId && evidenceDigest(entry) === old.digest))) return null;
-    return { status: "reused", context: "Original source references (already in context):\n"
+      && entry.obsId === old.obsId && entry.sessionId === old.sessionId && recordMatchesProject(entry.observation, project)
+      && (!entry.observation?.sessionId || entry.observation.sessionId === old.sessionId) && evidenceDigest(entry) === old.digest))) return null;
+    return { status: "reused", scope: access, context: "Original source references (already in context):\n"
       + sources.map(entry => `- ${contextScalar(entry.project)} / ${contextScalar(entry.obsId)}`).join("\n") };
   } catch { return null; }
 }
@@ -1113,14 +1305,25 @@ async function handleTurnWithinBudget(event, eventName) {
   const transcript = isPrompt && !bypass ? readRecallTranscript(event, value => {
     const normal = promptText(value); return normal ? recallRequestText(normal) : null;
   }) : null;
-  const topic = isPrompt && !bypass ? recallQuery(await retrievalPrompt(request, project, sessionId, transcript)) : text;
+  const continuation = {};
+  const topic = isPrompt && !bypass ? recallQuery(await retrievalPrompt(request, project, sessionId, transcript, continuation)) : text;
   // Preserve original evidence before writes; all subsequent stages share the
   // same deadline and cannot erase a successful recall when capture is delayed.
   const recall = isPrompt ? bypass ? { status: "bypassed", context: null }
-    : await reuseRecall(request, topic, project, transcript) ?? await recallForTurn(topic, project) : null;
+    : continuation.unresolved ? { status: "needs-query", context: null }
+    : await reuseRecall(request, topic, project, transcript, continuation) ?? await recallForTurn(topic, project, sessionId, continuation) : null;
+  if (recall && continuation.scope) recall.scope = continuation.scope;
+  if (continuation.incomplete && recall) {
+    recall.status = recall.status === "unavailable" ? "unavailable" : "partial";
+    recall.limits = [...(recall.limits ?? []), "continuation-history-incomplete",
+      ...(continuation.failure ? [`continuation:${continuation.failure}`] : [])];
+  }
   const recallResult = isPrompt ? turnRecallContext(recall, project, turnId, topic, request) : null;
   let observeResult, systemMessage, captureUnconfirmed = false;
   try {
+  const source = await nativeCaptureScope(sessionId);
+  if (source) observeResult = { nativeSourceManaged: true };
+  else {
   const observeResponse = await post("/agentmemory/observe", {
     hookType: isPrompt ? "prompt_submit" : "post_tool_use",
     sessionId,
@@ -1137,13 +1340,19 @@ async function handleTurnWithinBudget(event, eventName) {
         },
   });
   observeResult = await observeResponse.json();
+  if (observeResult?.status === "accepted" && observeResult.state === "completed"
+      && observeResult.skipped === true && observeResult.reason === "native_source_managed") {
+    observeResult = { ...observeResult, nativeSourceManaged: true };
+  }
   if (observeResult?.success === false || observeResult?.error) {
     throw new Error(`/agentmemory/observe failed: ${observeResult.error || "unknown error"}`);
   }
+  }
   if (observeResult?.nativeSourceManaged === true) {
-    const capture = await post("/agentmemory/session/start", { action: "capture-source", project, sessionId });
+    const capture = await post("/agentmemory/session/start", { action: "capture-source", project: source?.project ?? project, sessionId, ...(isPrompt ? { promptTurnId: turnId, promptTextDigest: createHash("sha256").update(stripPrivateData(text)).digest("hex") } : {}) });
     const result = await capture.json();
     if (result?.success === false || result?.error || result?.status === "unknown") throw new Error("Native source capture requires reconciliation");
+    if (isPrompt && result?.promptCaptured === false) throw new Error("Current prompt not yet present in native source; scheduled follow-up required");
     if (isPrompt) systemMessage = await nativeSourceWarning();
   }
   if (observeResult?.skipped === true && observeResult?.nativeSourceManaged !== true) {
@@ -1160,7 +1369,7 @@ async function handleTurnWithinBudget(event, eventName) {
   }
 
   if (isPrompt) {
-    const graphResult = captureUnconfirmed || bypass || ["reused", "unavailable"].includes(recall.status) ? null : await graphContext(topic, project);
+    const graphResult = captureUnconfirmed || bypass || ["reused", "unavailable"].includes(recall.status) ? null : await graphContext(topic, project, continuation);
     const backlog = captureUnconfirmed || bypass || ["reused", "unavailable"].includes(recall.status) ? [] : await curationBacklogSources(project, String(turnId));
     const sources = [];
     const preference = preferenceCandidateText(text);
@@ -1204,15 +1413,17 @@ async function main() {
 
   const eventName = event.hook_event_name ?? event.hookEventName;
   try {
+    assertManagedHookSource(event, process.env, process.argv.slice(2).includes("--managed"));
     if (eventName === "SessionStart") return await withHookBudget(eventName, () => handleSessionStart(event));
     if (eventName === "SessionEnd") return await withHookBudget(eventName, () => handleSessionEnd(event));
     if (eventName === "UserPromptSubmit" || eventName === "Stop") return await handleTurn(event, eventName);
     throw new Error(`Unsupported hook event: ${String(eventName)}`);
   } catch (error) {
     if (!["SessionStart", "UserPromptSubmit", "Stop"].includes(eventName)) throw error;
+    if (error?.code === "AGENTMEMORY_SOURCE_BOUNDARY") process.stderr.write("[agentmemory] Managed Codex source boundary rejected (" + error.reason + "); no memory request was sent.\n");
     process.stderr.write("[agentmemory] Codex capture hook failed; no capture completion is confirmed.\n");
     process.stdout.write(JSON.stringify(eventName === "UserPromptSubmit" && !recallBypass(event.prompt ?? event.userPrompt)
-      ? unavailableRecall()
+      ? unavailableRecall(error)
       : { systemMessage: "AgentMemory: 이번 대화의 자동 수집을 확인하지 못했습니다. 원문 대조로 복구가 필요한 상태일 수 있으므로 서비스 상태를 확인해 주세요. Codex 작업은 계속할 수 있습니다." }));
   }
 }

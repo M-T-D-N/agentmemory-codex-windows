@@ -224,7 +224,7 @@ function resolveDataDir(options = {}) {
 	};
 }
 //#endregion
-//#region src/functions/privacy.ts
+//#region packaging/windows-codex/hooks/codex-privacy.mjs
 const PRIVATE_TAG_RE = /<private>[\s\S]*?<\/private>/gi;
 const SECRET_PATTERN_SOURCES = [
 	/Bearer\s+[A-Za-z0-9._\-+/=]{20,}/gi,

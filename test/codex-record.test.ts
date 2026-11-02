@@ -329,3 +329,50 @@ it("excludes incidental native host events and retains normal source identity an
   expect(parse(record("assistant", "final", final, "final_answer"))).toMatchObject({ status: "message", message: { text: final, kind: "assistant_final" } });
  }
 });
+
+
+describe("native memory citation display mirrors", () => {
+  const citation = "<oai-mem-citation>\n<citation_entries>\nrollout_summaries/synthetic.md:1-2|note=[synthetic]\n</citation_entries>\n<rollout_ids>\nsynthetic-thread\n</rollout_ids>\n</oai-mem-citation>";
+  const mirror = (text: string, id = "msg_final") => ({ type: "event_msg", payload: { type: "item_completed", turn_id: "turn-a",
+    item: { type: "AgentMessage", id, phase: "final_answer", content: [{ type: "Text", text }],
+      memory_citation: { entries: [{ path: "rollout_summaries/synthetic.md", lineStart: 1, lineEnd: 2, note: "synthetic" }], rolloutIds: ["synthetic-thread"] } } } });
+  const complete = (text: string) => ({ type: "event_msg", payload: { type: "task_complete", turn_id: "turn-a", last_agent_message: text } });
+  it.each([true, false])("preserves the full primary and matches its hidden-citation display in either order (%s)", mirrorFirst => {
+    const parse = harness(); parse(turn); parse(record("user", "u", "Synthetic request"));
+    const text = "Synthetic answer\n\n" + citation;
+    if (mirrorFirst) expect(parse(mirror("Synthetic answer\n\n")).status).toBe("excluded");
+    expect(parse(record("assistant", "msg_final", text, "final_answer"))).toMatchObject({ status: "message", message: { text } });
+    if (!mirrorFirst) expect(parse(mirror("Synthetic answer\n\n")).status).toBe("excluded");
+    expect(parse(complete("Synthetic answer\n\n"))).toMatchObject({ status: "excluded", reason: "completion_duplicate" });
+  });
+  it("does not accept a changed canonical citation under the same native message identity", () => {
+    const parse = harness(); parse(turn); parse(record("user", "u", "Synthetic request"));
+    expect(parse(record("assistant", "msg_final", "Answer" + citation, "final_answer")).status).toBe("message");
+    expect(parse(record("assistant", "msg_final", "Answer" + citation.replace("synthetic.md", "other.md"), "final_answer")))
+      .toMatchObject({ status: "unknown", reason: "conflicting_final_message_identity" });
+  });
+  it.each([true, false])("still rejects a changed visible body (%s)", mirrorFirst => {
+    const parse = harness(); parse(turn); parse(record("user", "u", "Synthetic request"));
+    if (mirrorFirst) parse(mirror("Changed")); else parse(record("assistant", "msg_final", "Answer" + citation, "final_answer"));
+    expect(mirrorFirst ? parse(record("assistant", "msg_final", "Answer" + citation, "final_answer")) : parse(mirror("Changed")))
+      .toMatchObject({ status: "unknown", reason: mirrorFirst ? "conflicting_final_message_identity" : "conflicting_final_item_identity" });
+  });
+  it("keeps unmatched mirror multiplicity despite equal display text", () => {
+    const parse = harness(); parse(turn); parse(record("user", "u", "Synthetic request"));
+    parse(record("assistant", "msg_final", "Answer" + citation, "final_answer"));
+    parse(mirror("Answer", "item-1")); parse(mirror("Answer", "item-2"));
+    expect(parse(complete("Answer"))).toMatchObject({ status: "unknown", reason: "completion_has_unmatched_message_mirrors" });
+  });
+  it("uses literal non-nested native citation boundaries without dropping canonical text", () => {
+    const parse = harness(); parse(turn); parse(record("user", "u", "Synthetic request"));
+    const text = "A<oai-mem-citation>one</oai-mem-citation>B<oai-mem-citation>unfinished";
+    parse(mirror("AB"));
+    expect(parse(record("assistant", "msg_final", text, "final_answer"))).toMatchObject({ status: "message", message: { text } });
+    expect(parse(complete("AB")).status).toBe("excluded");
+  });
+  it("does not strip an unrelated or partial opening tag", () => {
+    const parse = harness(); parse(turn); parse(record("user", "u", "Synthetic request")); parse(mirror("Answer"));
+    expect(parse(record("assistant", "msg_final", "Answer<oai-mem-citation", "final_answer")))
+      .toMatchObject({ status: "unknown", reason: "conflicting_final_message_identity" });
+  });
+});

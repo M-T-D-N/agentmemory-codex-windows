@@ -13,12 +13,19 @@
     [switch]$Execute,
     [switch]$Fresh,
     [switch]$ActivatePrepared,
-    [string]$MaintenancePlanPath = ''
+    [string]$MaintenancePlanPath = '',
+    [switch]$EvidenceUtf8,
+    [string]$EvidenceIdentityPath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ($EvidenceUtf8 -or -not [string]::IsNullOrWhiteSpace($EvidenceIdentityPath)) {
+    . (Join-Path $PSScriptRoot 'payload\scripts\agentmemory-evidence.ps1')
+    Initialize-AgentMemoryEvidenceCapture -Utf8:$EvidenceUtf8 -IdentityPath $EvidenceIdentityPath
+}
 
 function Compress-CompletedReleaseBackup {
     param([Parameter(Mandatory)][string]$InstallRoot,
@@ -391,6 +398,70 @@ function Get-NormalizedStringSha256 {
     }
 }
 
+function Wait-OwnedCutoverReadiness {
+    param([string]$Root, [string]$RuntimeStatePath, [string]$PreviousRunId)
+    $deadline = [DateTime]::UtcNow.AddSeconds(780)
+    do {
+        Start-Sleep -Milliseconds 500
+        $healthy = $false; $startupFailure = $null
+        try {
+            $state = Get-Content -Encoding UTF8 -Raw -LiteralPath $RuntimeStatePath | ConvertFrom-Json
+            $fresh = [IO.Path]::GetFullPath([string]$state.root) -eq $Root -and -not [string]::IsNullOrWhiteSpace([string]$state.run_id) -and [string]$state.run_id -ne $PreviousRunId
+            if ($fresh -and [string]$state.status -eq 'failed') {
+                $startupFailure = [string]$state.error_message
+                if ([string]::IsNullOrWhiteSpace($startupFailure)) { $startupFailure = 'The owned runtime reported a failed startup.' }
+            }
+            elseif ($fresh -and [string]$state.status -eq 'active') {
+                $engine = Get-Process -Id ([int]$state.engine.pid) -ErrorAction Stop
+                $worker = Get-Process -Id ([int]$state.worker.pid) -ErrorAction Stop
+                $healthy = -not $engine.HasExited -and -not $worker.HasExited
+            }
+        } catch { $healthy = $false }
+        if ($startupFailure) { throw "AgentMemory failed during cutover startup: $startupFailure" }
+        if ($healthy) { return }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'AgentMemory did not become healthy after cutover.'
+}
+
+function Write-CutoverOutcome {
+    param($Installed, [string]$InstallManifestPath, $OriginalFailure, [string]$Phase,
+        [string]$BackupRoot, [ValidateSet('automatic_rollback','rollback_failed','rollback_withheld')][string]$Outcome,
+        [bool]$RestorationCompleted, [bool]$RuntimeReady, [bool]$RuntimeStopped, [string]$RestoreError = '')
+    $record = [ordered]@{ outcome = $Outcome; phase = $Phase; backup_root = $BackupRoot
+        original_error = $OriginalFailure.Exception.Message; original_error_id = $OriginalFailure.FullyQualifiedErrorId
+        original_error_hresult = $OriginalFailure.Exception.HResult; restoration_completed = $RestorationCompleted
+        runtime_ready = $RuntimeReady; runtime_stopped = $RuntimeStopped }
+    if ($RestoreError) { $record.restore_error = $RestoreError }
+    if ($Outcome -eq 'automatic_rollback' -and (-not $RestorationCompleted -or -not $RuntimeReady)) { throw 'Automatic rollback requires restoration and fresh readiness.' }
+    Set-ObjectProperty -Object $Installed -Name 'cutover_failure' -Value ([pscustomobject]$record)
+    if ($Outcome -ne 'automatic_rollback') {
+        Set-ObjectProperty -Object $Installed -Name 'installation_status' -Value $(if ($Outcome -eq 'rollback_failed') {'rollback_failed'} else {'cutover_failed'})
+    }
+    try { Write-Utf8NoBom -Path $InstallManifestPath -Content ($Installed | ConvertTo-Json -Depth 14) }
+    catch { throw "Cutover outcome could not be recorded. Original ($Phase): $($OriginalFailure.Exception.Message) Restore: $RestoreError State: $($_.Exception.Message)" }
+}
+
+function Invoke-RollbackRestoration {
+    param([scriptblock]$Action, $OriginalFailure, [string]$Phase, [string]$BackupRoot,
+        $Installed, [string]$InstallManifestPath)
+    try { & $Action }
+    catch {
+        $restoreFailure = $_
+        Set-ObjectProperty -Object $Installed -Name 'installation_status' -Value 'rollback_failed'
+        Set-ObjectProperty -Object $Installed -Name 'cutover_failure' -Value ([pscustomobject]@{
+            outcome = 'rollback_failed'; phase = $Phase; backup_root = $BackupRoot
+            original_error = $OriginalFailure.Exception.Message
+            original_error_id = $OriginalFailure.FullyQualifiedErrorId; original_error_hresult = $OriginalFailure.Exception.HResult
+            restoration_completed = $false; runtime_ready = $false
+            restore_error = $restoreFailure.Exception.Message; runtime_stopped = $true
+        })
+        $stateFailure = ''
+        try { Write-Utf8NoBom -Path $InstallManifestPath -Content ($Installed | ConvertTo-Json -Depth 14) }
+        catch { $stateFailure = " Failure-state write also failed: $($_.Exception.Message)" }
+        throw "AgentMemory cutover failed; automatic rollback is incomplete and the owned runtime remains stopped. Preserve data and inspect $BackupRoot. Original ($Phase): $($OriginalFailure.Exception.Message) Restore: $($restoreFailure.Exception.Message)$stateFailure"
+    }
+}
+
 function Set-ObjectProperty {
     param([Parameter(Mandatory = $true)]$Object, [Parameter(Mandatory = $true)][string]$Name, $Value)
     if ($null -ne $Object.PSObject.Properties[$Name]) {
@@ -530,13 +601,11 @@ function Stop-OwnedRuntimeForCutover {
 
     $stopScript = Join-Path $Root 'scripts\agentmemory-stop.ps1'
     $stopFailure = $null
-    if (Test-Path -LiteralPath $stopScript -PathType Leaf) {
+    $alreadyInactive = $runtimeState.PSObject.Properties['status'] -and $runtimeState.status -ceq 'inactive'
+    if (-not $alreadyInactive -and (Test-Path -LiteralPath $stopScript -PathType Leaf)) {
         try { & $stopScript -Root $Root -TimeoutSeconds 30 } catch { $stopFailure = $_ }
     }
-    foreach ($registration in @($Registrations | Where-Object { $_.Name -eq 'task-registration.json' })) {
-        $ownedTask = Get-OwnedTaskForCutover -Root $Root -Registration $registration
-        Stop-ScheduledTask -InputObject $ownedTask -ErrorAction Stop
-    }
+    if ($stopFailure) { throw "Runtime stop is unconfirmed; preserving the daemon and engine. $($stopFailure.Exception.Message)" }
     # Port release and a successful stop command do not prove process exit.
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     try {
@@ -552,6 +621,13 @@ function Stop-OwnedRuntimeForCutover {
     if (-not $runExited) {
         if ($stopFailure) { throw $stopFailure }
         throw 'The recorded AgentMemory run did not exit before the stop confirmation timeout.'
+    }
+    $terminal = Get-Content -Encoding UTF8 -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
+    if (@('run_id','status','terminal_reason') | Where-Object { -not $terminal.PSObject.Properties[$_] }) { throw 'Runtime clean-stop metadata is missing; cold cutover was withheld.' }
+    if (-not $runtimeState.PSObject.Properties['run_id'] -or $terminal.run_id -cne $runtimeState.run_id -or $terminal.status -cne 'inactive' -or $terminal.terminal_reason -cnotin @('authenticated_external_stop','codex_desktop_window_absent')) { throw 'Runtime exited without a clean authenticated stop; cold cutover was withheld.' }
+    foreach ($registration in @($Registrations | Where-Object { $_.Name -eq 'task-registration.json' })) {
+        $ownedTask = Get-OwnedTaskForCutover -Root $Root -Registration $registration
+        Stop-ScheduledTask -InputObject $ownedTask -ErrorAction Stop
     }
 }
 
@@ -702,6 +778,20 @@ if ($Fresh -or $ActivatePrepared -or $automaticFresh) {
         & (Join-Path $root 'scripts\agentmemory-mcp.ps1') -Root $root -ValidateOnly
         if ($LASTEXITCODE -ne 0) { throw 'Fresh installation was activated but its service validation failed.' }
     }
+    if ($Execute -and ($automaticFresh -or $ActivatePrepared)) {
+        $freshQualification = Join-Path (Split-Path -Parent $release) 'qualification.json'
+        if ((Test-Path -LiteralPath $freshQualification -PathType Leaf) -and (Get-Content -LiteralPath $freshQualification -Raw | ConvertFrom-Json).PSObject.Properties['storage_lifecycle']) {
+            if (-not $automaticFresh) {
+                & (Join-Path $root 'scripts\agentmemory-mcp.ps1') -Root $root -ValidateOnly
+                if ($LASTEXITCODE -ne 0) { throw 'Fresh private candidate service validation failed; source acceptance was withheld.' }
+            }
+            . (Join-Path $payload 'scripts\agentmemory-upgrade-retention.ps1')
+            . (Join-Path $payload 'scripts\Complete-PackageCloseout.ps1')
+            $sourceCloseout = Complete-AgentMemoryPrivatePackageCloseout -InstallRoot $root -ReleaseRoot $release
+            $sourceCloseout | ConvertTo-Json -Depth 32
+            if ($sourceCloseout.status -eq 'incomplete') { exit 1 }
+        }
+    }
     return
 }
 
@@ -752,6 +842,8 @@ if (Test-Path -LiteralPath $existingWorkspacePath -PathType Leaf) {
         }
     }
 }
+
+$servicePorts = Get-AgentMemoryServicePorts -Root $root
 
 $existingManagedCopy = Join-Path $root 'config\managed-requirements.toml'
 if (Test-Path -LiteralPath $managedRequirements -PathType Leaf) {
@@ -838,6 +930,7 @@ $distinctRevision = [string]$previousReleaseManifest.release_revision -cne [stri
 $cutoverLock = $null
 $cutoverTouched = $false
 $candidateStartAttempted = $false
+$cutoverPhase = 'stop-and-backup'
 try {
     $cutoverLock = [IO.File]::Open((Join-Path $root 'data\startup.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     Stop-OwnedRuntimeForCutover -Root $root -Registrations $taskRegistrations
@@ -859,6 +952,7 @@ try {
     Set-ObjectProperty -Object $installed -Name 'installation_status' -Value 'cutover'
     Write-Utf8NoBom -Path $installManifestPath -Content ($installed | ConvertTo-Json -Depth 12)
     $packageSource = [System.IO.Path]::GetFullPath((Join-Path $payload ([string]$releaseManifest.package_relative_path)))
+    $cutoverPhase = 'copy-package'
     if (-not $reuseExistingPackage) {
         [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $newPackageRoot))
         $robocopy = Join-Path $env:SystemRoot 'System32\robocopy.exe'
@@ -872,6 +966,7 @@ try {
             throw 'The copied versioned package does not exactly match the release manifest.'
         }
     }
+    $cutoverPhase = 'copy-adapter'
     Copy-Item -Path (Join-Path $payload 'scripts\*') -Destination (Join-Path $root 'scripts') -Recurse -Force
     [void][System.IO.Directory]::CreateDirectory((Join-Path $root 'src'))
     foreach ($file in $releaseManifest.immutable_files) {
@@ -892,6 +987,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $payload "config\$name") -Destination (Join-Path $root "config\$name") -Force
     }
 
+    $cutoverPhase = 'write-install-config'
     $workspaceConfig = [ordered]@{ schema_version = 1; workspace_root = $workspace; project_registry = $registry }
     if ($existingWorkspace) {
         foreach ($property in $existingWorkspace.PSObject.Properties) {
@@ -921,7 +1017,7 @@ try {
         Set-ObjectProperty -Object $installed.security -Name 'automatic_graph_extraction' -Value $true
         Set-ObjectProperty -Object $installed.security -Name 'graph_extraction_mode' -Value 'keyless structural extraction plus exact-provenance local-Qwen typed extraction'
         Set-ObjectProperty -Object $installed.security -Name 'mcp_tool_approval' -Value 'Codex UI approval remains approve for the single complete AgentMemory MCP registration'
-        Set-ObjectProperty -Object $installed.security -Name 'mcp_transport' -Value 'shared Streamable HTTP on http://127.0.0.1:3114/mcp; hidden stdio launcher retained for compatibility'
+        Set-ObjectProperty -Object $installed.security -Name 'mcp_transport' -Value "shared Streamable HTTP on http://127.0.0.1:$($servicePorts.mcp)/mcp; hidden stdio launcher retained for compatibility"
         Set-ObjectProperty -Object $installed.security -Name 'mcp_authentication' -Value 'local OAuth dynamic client registration with S256 PKCE and explicit consent; bearer is domain-separated from the DPAPI backend secret'
         Set-ObjectProperty -Object $installed.security -Name 'mcp_fail_closed' -Value $true
     }
@@ -942,6 +1038,7 @@ try {
         Remove-Item -LiteralPath $legacyInstallStatePath -Force
     }
 
+    $cutoverPhase = 'start-candidate'
     $candidateStartAttempted = $true
     Start-OwnedTasks -Root $root -Registrations $taskRegistrations
 
@@ -951,37 +1048,7 @@ try {
     # that CurrentUser secret, so consume the daemon's fresh readiness result.
     # Covers observed daemon bootstrap (240s), bounded engine cold-start (300s),
     # worker recovery/readiness (180s), and dispatch/cleanup (60s).
-    $deadline = [DateTime]::UtcNow.AddSeconds(780)
-    $healthy = $false
-    do {
-        Start-Sleep -Milliseconds 500
-        $startupFailure = $null
-        try {
-            $runtimeState = Get-Content -Encoding UTF8 -Raw -LiteralPath $runtimeStatePath | ConvertFrom-Json
-            $freshRun = (
-                [System.IO.Path]::GetFullPath([string]$runtimeState.root) -eq $root -and
-                -not [string]::IsNullOrWhiteSpace([string]$runtimeState.run_id) -and
-                [string]$runtimeState.run_id -ne $previousRunId
-            )
-            if ($freshRun -and [string]$runtimeState.status -eq 'failed') {
-                $startupFailure = [string]$runtimeState.error_message
-                if ([string]::IsNullOrWhiteSpace($startupFailure)) { $startupFailure = 'The owned runtime reported a failed startup.' }
-                $healthy = $false
-            }
-            else {
-                $engineProcess = Get-Process -Id ([int]$runtimeState.engine.pid) -ErrorAction Stop
-                $workerProcess = Get-Process -Id ([int]$runtimeState.worker.pid) -ErrorAction Stop
-                $healthy = (
-                    $freshRun -and [string]$runtimeState.status -eq 'active' -and
-                    -not $engineProcess.HasExited -and
-                    -not $workerProcess.HasExited
-                )
-            }
-        }
-        catch { $healthy = $false }
-        if ($startupFailure) { throw "AgentMemory failed during cutover startup: $startupFailure" }
-    } while (-not $healthy -and [DateTime]::UtcNow -lt $deadline)
-    if (-not $healthy) { throw 'AgentMemory did not become healthy after cutover.' }
+    Wait-OwnedCutoverReadiness -Root $root -RuntimeStatePath $runtimeStatePath -PreviousRunId $previousRunId
 
     $summary.backup_root = $backupRoot
     $summary.healthy = $true
@@ -990,13 +1057,14 @@ catch {
     $failure = $_
     if (-not $cutoverLock -or -not $cutoverTouched) { throw $failure }
     try { Stop-OwnedRuntimeForCutover -Root $root -Registrations $taskRegistrations } catch {
+        Write-CutoverOutcome -Installed $installed -InstallManifestPath $installManifestPath -OriginalFailure $failure -Phase $cutoverPhase -BackupRoot $backupRoot -Outcome 'rollback_withheld' -RestorationCompleted $false -RuntimeReady $false -RuntimeStopped $false -RestoreError $_.Exception.Message
         throw "Cutover failed and runtime stop is unconfirmed; no predecessor files were restored. Preserve data and inspect $backupRoot. $($failure.Exception.Message) Stop: $($_.Exception.Message)"
     }
     if ($candidateStartAttempted -or $targetDataContract -gt $currentDataContract) {
-        Set-ObjectProperty -Object $installed -Name 'installation_status' -Value 'cutover_failed'
-        Write-Utf8NoBom -Path $installManifestPath -Content ($installed | ConvertTo-Json -Depth 12)
+        Write-CutoverOutcome -Installed $installed -InstallManifestPath $installManifestPath -OriginalFailure $failure -Phase $cutoverPhase -BackupRoot $backupRoot -Outcome 'rollback_withheld' -RestorationCompleted $false -RuntimeReady $false -RuntimeStopped $true
         throw "Cutover failed after a data-contract transition or candidate start. Automatic rollback was withheld; canonical data and candidate files were preserved and the owned runtime stopped. Complete or repair a compatible release, or review recovery using $backupRoot. $($failure.Exception.Message)"
     }
+    Invoke-RollbackRestoration -OriginalFailure $failure -Phase $cutoverPhase -BackupRoot $backupRoot -Installed $installed -InstallManifestPath $installManifestPath -Action {
     $scriptsBackup = Join-Path $backupRoot 'scripts'
     if (Test-Path -LiteralPath $scriptsBackup) {
         Copy-Item -Path (Join-Path $scriptsBackup '*') -Destination (Join-Path $root 'scripts') -Recurse -Force
@@ -1032,11 +1100,19 @@ catch {
     if (Test-Path -LiteralPath $requirementsBackup -PathType Leaf) {
         Copy-Item -LiteralPath $requirementsBackup -Destination $managedRequirements -Force
     }
-    $restartFailure = $null
-    try { Start-OwnedTasks -Root $root -Registrations $taskRegistrations } catch { $restartFailure = $_.Exception.Message }
-    $rollbackFailureMessage = "AgentMemory cutover failed; owned predecessor files were restored from $backupRoot. $($failure.Exception.Message)"
-    if ($restartFailure) { $rollbackFailureMessage += " Predecessor task restart failed: $restartFailure" }
-    throw $rollbackFailureMessage
+    }
+    $restored = Get-Content -Encoding UTF8 -Raw -LiteralPath $installManifestPath | ConvertFrom-Json
+    try {
+        Start-OwnedTasks -Root $root -Registrations $taskRegistrations
+        Wait-OwnedCutoverReadiness -Root $root -RuntimeStatePath $runtimeStatePath -PreviousRunId $previousRunId
+    } catch {
+        $restartFailure = $_.Exception.Message; $stopped = $false
+        try { Stop-OwnedRuntimeForCutover -Root $root -Registrations $taskRegistrations; $stopped = $true } catch { $restartFailure += " Stop unconfirmed: $($_.Exception.Message)" }
+        Write-CutoverOutcome -Installed $restored -InstallManifestPath $installManifestPath -OriginalFailure $failure -Phase $cutoverPhase -BackupRoot $backupRoot -Outcome 'rollback_failed' -RestorationCompleted $true -RuntimeReady $false -RuntimeStopped $stopped -RestoreError $restartFailure
+        throw "Cutover failed; predecessor files restored but restart failed. Original ($cutoverPhase): $($failure.Exception.Message) Restore: $restartFailure"
+    }
+    Write-CutoverOutcome -Installed $restored -InstallManifestPath $installManifestPath -OriginalFailure $failure -Phase $cutoverPhase -BackupRoot $backupRoot -Outcome 'automatic_rollback' -RestorationCompleted $true -RuntimeReady $true -RuntimeStopped $false
+    throw "AgentMemory cutover failed; owned predecessor files restored and fresh readiness confirmed. Backup: $backupRoot. Original ($cutoverPhase): $($failure.Exception.Message)"
 }
 finally {
     if ($cutoverLock) { $cutoverLock.Dispose() }
@@ -1099,6 +1175,27 @@ try {
         $summary.release_backup_closeout = [ordered]@{ status = 'protected_only'; recycled = @($recycled); retained = $protected; unresolved = @() }
     }
 } catch {
-    $summary.release_backup_closeout = [ordered]@{ status = 'incomplete'; error = $_.Exception.Message; recycled = @() }
+    $summary.release_backup_closeout = [pscustomobject]$summary.release_backup_closeout
+    Set-ObjectProperty -Object $summary.release_backup_closeout -Name 'status' -Value 'incomplete'
+    Set-ObjectProperty -Object $summary.release_backup_closeout -Name 'error' -Value $_.Exception.Message
 }
-$summary | ConvertTo-Json -Depth 10
+$summary.private_package_closeout = [ordered]@{ status = 'not_applicable' }
+if ($summary.release_backup_closeout.status -in @('disposed','protected_only')) {
+    try {
+        $privateHelper = Join-Path $payload 'scripts\Complete-PackageCloseout.ps1'
+        if (Test-Path -LiteralPath $privateHelper -PathType Leaf) {
+            . $privateHelper
+            $summary.private_package_closeout = Complete-AgentMemoryPrivatePackageCloseout -InstallRoot $root -ReleaseRoot $release
+        } else {
+            $privateQualification = Join-Path (Split-Path -Parent $release) 'qualification.json'
+            if ($installed.PSObject.Properties['private_package_retention'] -or
+                ((Test-Path -LiteralPath $privateQualification -PathType Leaf) -and (Get-Content -LiteralPath $privateQualification -Raw | ConvertFrom-Json).PSObject.Properties['storage_lifecycle'])) { throw 'Private source closeout helper is missing; accepted history was preserved.' }
+        }
+    } catch {
+        $summary.private_package_closeout = [pscustomobject]$summary.private_package_closeout
+        Set-ObjectProperty -Object $summary.private_package_closeout -Name 'status' -Value 'incomplete'
+        Set-ObjectProperty -Object $summary.private_package_closeout -Name 'error' -Value $_.Exception.Message
+    }
+}
+$summary | ConvertTo-Json -Depth 32
+if ($summary.release_backup_closeout.status -eq 'incomplete' -or $summary.private_package_closeout.status -eq 'incomplete') { exit 1 }

@@ -1,3 +1,4 @@
+import { WorkerMutationLifecycle } from "../worker-lifecycle.js";
 import { availableParallelism } from "node:os";
 import { getHeapStatistics } from "node:v8";
 import type { IIIClient } from "iii-sdk";
@@ -11,8 +12,11 @@ import type { StreamRelayProbe } from "./stream-relay-probe.js";
 export function registerHealthMonitor(
   sdk: IIIClient,
   kv: StateKV,
-  options: { maintainGraphQueryIndex?: boolean; streamRelayProbe?: StreamRelayProbe } = {},
-): { stop: () => void } {
+  options: { maintainGraphQueryIndex?: boolean; streamRelayProbe?: StreamRelayProbe; lifecycle?: WorkerMutationLifecycle } = {},
+): { stop: () => Promise<void> } {
+  const lifecycle = options.lifecycle ?? new WorkerMutationLifecycle();
+  let pending: Promise<unknown> | undefined;
+  const probes = new Set<Promise<void>>();
   let connectionState = "connected";
   let prevCpuUsage = process.cpuUsage();
   let prevCpuTime = Date.now();
@@ -63,11 +67,14 @@ export function registerHealthMonitor(
     let kvConnectivity: { status: string; latencyMs?: number; error?: string };
     const kvStart = performance.now();
     try {
+      const probe = lifecycle.run(async () => {
+        await kv.set(KV.health, "_probe", { ts: Date.now() });
+        await kv.get(KV.health, "_probe");
+      });
+      probes.add(probe);
+      void probe.then(() => probes.delete(probe), () => probes.delete(probe));
       await Promise.race([
-        (async () => {
-          await kv.set(KV.health, "_probe", { ts: Date.now() });
-          await kv.get(KV.health, "_probe");
-        })(),
+        probe,
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error("timeout")), KV_PROBE_TIMEOUT),
         ),
@@ -155,14 +162,15 @@ export function registerHealthMonitor(
   const collect = () => {
     if (stopped || collecting) return;
     collecting = true;
-    void collectHealth().catch(() => {}).finally(() => { collecting = false; });
+    pending = lifecycle.runRoot(collectHealth);
+    void pending.catch(() => {}).finally(() => { collecting = false; });
   };
   collect();
   const interval = setInterval(collect, 30_000);
   interval.unref();
 
   return {
-    stop: () => { stopped = true; clearInterval(interval); options.streamRelayProbe?.close(); },
+    stop: async () => { stopped = true; clearInterval(interval); options.streamRelayProbe?.close(); await Promise.allSettled([pending, graphRecovery]); while (probes.size) await Promise.allSettled([...probes]); },
   };
 }
 

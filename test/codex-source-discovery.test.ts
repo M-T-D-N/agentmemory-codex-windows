@@ -365,6 +365,36 @@ describe("source discovery without a prior Codex hook", () => {
     expect(await captureCodexSourceWindow(kv as never, scope, managed())).toMatchObject({ inserted: 0, status: "caught_up" });
     for (const row of rows) expect(await kv.get(KV.observations(candidate.sessionId), row.id)).toEqual(row);
   });
+  it.each([false, true])("reconciles a compressed continuation base only with unchanged canonical evidence (changed=%s)", async changed => {
+    const basePath = "sessions/rollout-new-task-base.jsonl";
+    const original = await readFile(join(root, candidate.sourcePath));
+    await rename(join(root, candidate.sourcePath), join(root, basePath));
+    const continued = { ...header(), payload: { ...header().payload, session_id: candidate.sessionId, timestamp: "2026-09-13T02:00:00Z",
+      history_mode: "paginated", history_base: { thread_id: candidate.sessionId,
+        end_ordinal_exclusive: 4, end_byte_offset: original.length } } };
+    await writeSource([continued]);
+    const scope = {sessionId:candidate.sessionId,project:"registered-project"};
+    await discoverCodexSession(kv as never,candidate,managed());
+    await captureCodexSourceWindow(kv as never,scope,managed());
+    const rows=await kv.list(KV.observations(candidate.sessionId));
+    expect(rows).toHaveLength(2);
+    const archived = changed ? Buffer.from(original.toString().replace("agreed parser", "broken parser")) : original;
+    expect(archived.length).toBe(original.length);
+    await writeFile(join(root,basePath+".zst"),zstdCompressSync(archived));
+    await rm(join(root,basePath));
+    await appendFile(join(root,candidate.sourcePath),JSON.stringify({...user,payload:{...user.payload,id:"continued-user"}})+"\n");
+    await expect(captureCodexSourceWindow(kv as never,scope,managed())).rejects.toThrow("reconciliation");
+    const before=structuredClone(kv.store);
+    if(changed) {
+      await expect(discoverCodexSession(kv as never,candidate,managed())).rejects.toThrow("correspondence");
+      expect(kv.store).toEqual(before);
+    } else {
+      expect(await discoverCodexSession(kv as never,candidate,managed())).toMatchObject({status:"initialized"});
+      expect(await captureCodexSourceWindow(kv as never,scope,managed())).toMatchObject({inserted:1,status:"caught_up"});
+      expect(await captureCodexSourceWindow(kv as never,scope,managed())).toMatchObject({inserted:0,status:"caught_up"});
+      for(const row of rows) expect(await kv.get(KV.observations(candidate.sessionId),row.id)).toEqual(row);
+    }
+  });
   it("transitions an already captured hook message only after exact correspondence, preserving its ID and content", async () => {
     await kv.set(KV.sessions, candidate.sessionId, { id: candidate.sessionId, project: "registered-project", cwd,
       agentId: "codex-main", status: "active", startedAt: stamp, observationCount: 1 });
@@ -461,7 +491,9 @@ describe("source discovery without a prior Codex hook", () => {
     vi.mocked(readCodexThreadIndex).mockRejectedValue(Error("index is locked"));
     const sdk = mockSdk(); registerCodexSourceBacklog(sdk as never, kv as never, () => "codex-main");
     sdk.registerFunction("mem::codex-source-capture", input => captureCodexSourceWindow(kv as never, input as never, managed()));
-    expect(await sdk.trigger("mem::codex-source-drain", {})).toMatchObject({ unknown: 1, inserted: 2,
-      discovery: { failures: [{ error: "index is locked" }] } });
+    const result = await sdk.trigger("mem::codex-source-drain", {});
+    expect(result).toMatchObject({ unknown: 1, inserted: 2,
+      discovery: { failures: [{ error: "native_source_discovery_failed" }] } });
+    expect(JSON.stringify(result)).not.toContain("index is locked");
   });
 });

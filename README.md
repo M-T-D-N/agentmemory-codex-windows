@@ -1,5 +1,7 @@
 # AgentMemory for Codex on Windows
 
+> **Preview.19/r269 candidate — locally qualified, not published.** The exact Windows payload was built from `7e66cd75702222aece989ac1c6be4c73aa004e7d`; the public-source documentation below is a later overlay, not a new binary build. See [the final local evidence and limits](docs/PREVIEW_19.md#r269-local-qualification-2026-11-02). The [versioned preview.19 Release target](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) is reserved for publication; its existence and exact-public-commit CI success are not yet claimed.
+
 > **Published preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
 
 <p align="center">
@@ -30,13 +32,21 @@ and Codex CLI.
 Development note: this downstream is AI-generated and user-tested; [read the
 full disclosure](#ai-development-disclosure).
 
+## Candidate preview.19 (unpublished)
+
+Current source prepares `0.1.0-preview.19`; qualified local r269 assets exist,
+but public availability and exact-public-commit CI are not claimed. Compatibility remains AgentMemory 0.9.30 / engine and SDK 0.22.1 /
+data contract 5. See [candidate changes, installation/update/recovery and open
+qualification](docs/PREVIEW_19.md). The published preview.18 assets above remain
+unchanged; use their version-pinned guide for an existing public installation.
+
 ## Start here
 
 The preview.18 release line packages AgentMemory 0.9.30 with the downstream-patched iii engine/SDK 0.22.1. The same installer supports an empty target, an owned managed installation, or an explicitly identified original upstream 0.9.29/0.9.30 file-backed installation. You do not need to install upstream first.
 
 Preview.18 is a Windows technical preview based on the reviewed r223 implementation. The [release page](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) records the four matching assets and actual CI result for its exact public source; the publication and public-download hash checks are complete. Keep the preview.16 launcher and assets together when using that historical release. See the [preview.18 operating and validation notes](docs/PREVIEW_18.md).
 
-1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
+1. Check Windows x64, Node.js 24+, Windows PowerShell 5.1 and Codex desktop, then follow the [pinned installer guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md). The published release includes a prebuilt runtime; source builds are optional.
 2. Preview the selected installation path, then use `--execute`. For an empty target the default path prepares, activates and validates the service; `--fresh` and `--activate-prepared` remain available for separate phases. Connect Codex MCP after service validation.
 3. If a step fails, use [support and recovery guidance](SUPPORT.md). Report the release and failing phase with a short redacted error; do not attach memory databases or credentials.
 
@@ -206,7 +216,7 @@ The exact upstream tag, commit, tree, and pristine package hash are recorded in
 ## Install without building
 
 Use the matching preview.18 GitHub release ZIP or version-pinned TGZ launcher with the
-[pinned npm/npx installation guide](packaging/windows-codex/npm/README.md).
+[pinned npm/npx installation guide](https://github.com/M-T-D-N/agentmemory-codex-windows/blob/v0.1.0-preview.18/packaging/windows-codex/npm/README.md).
 It covers automatic empty-root installation, optional separate preparation/activation,
 managed updates, original upstream adoption, and offline hash verification. The GitHub TGZ can be run with npm without a
 separate npm-registry publication. Users need Windows x64, Node.js 24+, and Codex;
@@ -221,7 +231,7 @@ global npm settings. See the [npm policy](https://docs.npmjs.com/cli/install/#al
 - Windows with PowerShell 5.1 or newer; this preview is qualified on Windows 11
 - Node.js 24 or newer
 - Python 3 on PATH for the plaintext HTTP regression tests (CI uses Python 3.12)
-- pnpm `11.19.0` through the repository's pinned package-manager declaration
+- pnpm `11.25.0` through the repository's pinned package-manager declaration
 - The pinned downstream-patched iii engine `0.22.1` Windows executable whose SHA-256 matches
   [`packaging/windows-codex/config/third-party-inputs.json`](packaging/windows-codex/config/third-party-inputs.json)
 
@@ -310,8 +320,12 @@ pnpm run skills:check
 pnpm run typecheck
 pnpm run build
 pnpm test
-node packaging/windows-codex/tests/codex-turn.test.mjs
 ```
+
+For Windows adapter and packaging checks, use the
+[agent runbook's source-check procedure](INSTALL_FOR_AGENTS.md#2-verify-the-source-checkout).
+It reads the current adapter/packaging lists from `test-suites.json`, keeps
+integration/curation disabled, and uses an explicit synthetic scratch directory.
 
 The repository is marked `private` in package manifests to prevent accidental
 publication under upstream `@agentmemory/*` package names. Contributions should

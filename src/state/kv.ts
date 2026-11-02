@@ -125,6 +125,7 @@ export class StateKV {
   private graphPlanReady?: Promise<void>
   private graphPlanPending = false
   private mutationQueue: Promise<void> = Promise.resolve()
+  private writesClosing = false
   readonly backend: StateBackend
   constructor(private sdk: IIIClient, private options: StateKVOptions & { requireDurability?: boolean } = {}) {
     this.backend = options.backend ?? 'file'
@@ -282,7 +283,18 @@ export class StateKV {
     return scope.startsWith(OBS) && !options?.includeDeleted && isDeletedObservation(row) ? null : row ?? null
   }
 
+  async closeWrites(): Promise<void> {
+    this.writesClosing = true
+    await this.mutationQueue
+    const failures: unknown[] = []
+    if (this.requiresWriteRecovery()) failures.push(new Error('Canonical write recovery is required; shutdown durability is unconfirmed'))
+    try { await this.flush() } catch (error) { failures.push(error) }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length) throw new AggregateError(failures, 'Canonical shutdown drain failed')
+  }
+
   private mutate<T>(functionId: string, payload: { scope: string; [key: string]: unknown }): Promise<T> {
+    if (this.writesClosing) return Promise.reject(new Error("Canonical writes are closed for shutdown"))
     const run = () => this.mutateNow<T>(functionId, payload)
     if (!this.options.requireDurability) return run()
     // Large concurrent writes can stall the managed loopback WebSocket.

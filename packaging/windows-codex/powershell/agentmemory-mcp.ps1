@@ -1,12 +1,19 @@
 param(
     [string]$Root = '',
     [string]$NodePath = '',
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    [switch]$EvidenceUtf8,
+    [string]$EvidenceIdentityPath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ($EvidenceUtf8 -or -not [string]::IsNullOrWhiteSpace($EvidenceIdentityPath)) {
+    . (Join-Path $PSScriptRoot 'agentmemory-evidence.ps1')
+    Initialize-AgentMemoryEvidenceCapture -Utf8:$EvidenceUtf8 -IdentityPath $EvidenceIdentityPath
+}
 
 . (Join-Path $PSScriptRoot 'agentmemory-layout.ps1')
 $layout = Resolve-AgentMemoryLayout -Root $Root -NodePath $NodePath
@@ -75,6 +82,53 @@ function Test-IPv4LoopbackAddress {
     return $parsed.GetAddressBytes()[0] -eq 127
 }
 
+function Test-OwnedServiceConnections {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Connections)
+    try {
+        $statePath = Join-Path $resolvedRoot 'data\runtime-state.json'
+        $state = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
+        if ($state.status -ne 'active' -or [string]$state.root -ine $resolvedRoot -or -not $state.run_id) { return $false }
+        $expectedPaths = @{
+            daemon = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            engine = Join-Path $resolvedRoot 'bin\iii.exe'
+            worker = $NodePath
+        }
+        if ([string]$state.daemon.script_path -ine $daemonScript) { return $false }
+        foreach ($role in @('daemon', 'engine', 'worker')) {
+            $identity = $state.$role
+            if ([int]$identity.pid -le 0 -or [string]$identity.executable_path -ine $expectedPaths[$role]) { return $false }
+            $process = Get-Process -Id ([int]$identity.pid) -ErrorAction Stop
+            try {
+                $observed = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$identity.pid)" -ErrorAction Stop
+                if ($process.HasExited -or [string]$process.Path -ine $expectedPaths[$role] -or
+                    $process.StartTime.ToUniversalTime().Ticks -ne ([DateTimeOffset]$identity.creation_date).UtcDateTime.Ticks -or
+                    [int]$observed.ParentProcessId -ne [int]$identity.parent_pid) { return $false }
+                if ($role -ne 'daemon') {
+                    if ([int]$identity.parent_pid -ne [int]$state.daemon.pid) { return $false }
+                    $arguments = if ($role -eq 'engine') {
+                        @('--config', (Join-Path $resolvedRoot 'data\iii-config.managed.yaml'), '--no-update-check')
+                    } else { @((Join-Path $resolvedRoot 'bin\agentmemory-worker.mjs'), '--no-engine', '--tools', 'all', '--port', [string]$servicePorts.rest) }
+                    $expectedCommand = ((@('"' + $expectedPaths[$role] + '"') + $arguments) -join ' ')
+                    if ([string]$identity.expected_command_line -cne $expectedCommand -or
+                        [string]$observed.CommandLine -cne [string]$identity.command_line) { return $false }
+                }
+            } finally { $process.Dispose() }
+        }
+        $launcher = Get-Process -Id ([int]$state.daemon.parent_pid) -ErrorAction Stop
+        try { if ($launcher.HasExited -or [string]$launcher.Path -ine $hiddenLauncherPath) { return $false } }
+        finally { $launcher.Dispose() }
+        foreach ($connection in $Connections) {
+            $expectedPid = if ($connection.LocalPort -in @($servicePorts.viewer, $servicePorts.mcp)) { $state.worker.pid } else { $state.engine.pid }
+            if (-not (Test-IPv4LoopbackAddress -Address $connection.LocalAddress) -or $connection.LocalPort -notin $reservedPorts -or $connection.OwningProcess -ne $expectedPid) { return $false }
+        }
+        foreach ($port in @($servicePorts.rest, $servicePorts.stream, $servicePorts.engine, $servicePorts.mcp)) {
+            if (-not @($Connections | Where-Object { $_.LocalPort -eq $port })) { return $false }
+        }
+        $current = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
+        return $current.status -eq 'active' -and $current.root -ieq $resolvedRoot -and $current.run_id -ceq $state.run_id
+    } catch { return $false }
+}
+
 function Test-ServiceReady {
     try {
         if (-not (Test-AgentMemoryHealth)) {
@@ -84,18 +138,7 @@ function Test-ServiceReady {
             return $false
         }
         $connections = Get-ReservedConnections
-        if (@($connections | Where-Object { -not (Test-IPv4LoopbackAddress -Address $_.LocalAddress) }).Count -gt 0) {
-            return $false
-        }
-        foreach ($port in @($servicePorts.rest, $servicePorts.stream, $servicePorts.engine)) {
-            if (-not @($connections | Where-Object { $_.LocalPort -eq $port })) {
-                return $false
-            }
-        }
-        if (-not @($connections | Where-Object { $_.LocalPort -eq $servicePorts.mcp })) {
-            return $false
-        }
-        return $true
+        return Test-OwnedServiceConnections -Connections $connections
     }
     catch {
         return $false
@@ -262,12 +305,14 @@ try {
 
         if (-not (Test-ServiceReady)) {
             $occupiedPorts = @(Get-ReservedConnections)
-            if ($occupiedPorts.Count -gt 0) {
-                throw "AgentMemory is unhealthy while reserved ports are occupied ($($occupiedPorts.LocalPort -join ', ')); manual inspection is required."
+            if ($occupiedPorts.Count -eq 0) {
+                $ownedTask = Get-OwnedScheduledTask
+                Start-ScheduledTask -InputObject $ownedTask -ErrorAction Stop
             }
-            $ownedTask = Get-OwnedScheduledTask
-            Start-ScheduledTask -InputObject $ownedTask -ErrorAction Stop
             if (-not (Wait-ServiceReady -TimeoutSeconds 45)) {
+                if ($occupiedPorts.Count -gt 0) {
+                    throw "AgentMemory did not become owned and ready while reserved ports were occupied ($($occupiedPorts.LocalPort -join ', ')); manual inspection is required."
+                }
                 $failureDetail = $null
                 $statePath = Join-Path $resolvedRoot 'data\runtime-state.json'
                 try {

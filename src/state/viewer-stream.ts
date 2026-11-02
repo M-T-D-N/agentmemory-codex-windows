@@ -1,3 +1,4 @@
+import { runWorkerMutation } from "../worker-lifecycle.js";
 import type { IIIClient } from "iii-sdk";
 import { STREAM } from "./schema.js";
 import { generatedIdTime } from "./kv.js";
@@ -89,9 +90,11 @@ async function pruneOverflow(sdk: IIIClient): Promise<void> {
 }
 
 export async function pruneViewerStreamIfDue(sdk: IIIClient): Promise<void> {
-  if (writesSincePrune < PRUNE_BATCH_INTERVAL) return;
-  writesSincePrune = 0;
-  await pruneOverflow(sdk);
+  return runWorkerMutation(sdk, async () => {
+    if (writesSincePrune < PRUNE_BATCH_INTERVAL) return;
+    writesSincePrune = 0;
+    await pruneOverflow(sdk);
+  });
 }
 
 type StoredViewerItem = {

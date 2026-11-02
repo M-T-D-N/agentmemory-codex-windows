@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, cpSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { readChildIdentity, stopOwnedChild, type ChildIdentity } from "./helpers/owned-child.js";
 import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { createInterface } from "node:readline";
@@ -12,17 +13,22 @@ import { III_PINNED_VERSION } from "../src/version.js";
 const root = resolve(__dirname, "..");
 const engineBin = process.env.AGENTMEMORY_TEST_III;
 const children = new Set<ChildProcess>();
+const owners = new Map<ChildProcess, ChildIdentity>();
+const processEvents: object[] = [];
 let sandbox: string;
 
 async function stop(child: ChildProcess) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>((done) => child.once("exit", () => done()));
-  child.kill("SIGTERM");
-  const force = setTimeout(() => child.kill("SIGKILL"), 5000);
-  await exited;
-  clearTimeout(force);
+  const owner = owners.get(child);
+  if (!owner) throw Error("Fixture child has no verified startup identity");
+  await stopOwnedChild(child, owner, readChildIdentity, event => processEvents.push(event));
   children.delete(child);
+  owners.delete(child);
 }
+
+afterAll(() => {
+  if (process.env.AGENTMEMORY_LIVE_PROCESS_REPORT) writeFileSync(process.env.AGENTMEMORY_LIVE_PROCESS_REPORT,
+    JSON.stringify({ events: processEvents, remainingChildren: children.size }, null, 2));
+});
 
 afterEach(async () => {
   await Promise.all([...children].map(stop));
@@ -42,6 +48,13 @@ async function unusedPorts() {
 function launch(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv) {
   const child = spawn(command, args, { cwd, env, stdio: "pipe" });
   children.add(child);
+  const owner = readChildIdentity(child.pid!);
+  if (!owner || owner.parent !== process.pid || resolve(owner.executable).toLowerCase() !== resolve(command).toLowerCase()) {
+    processEvents.push({ phase: "startup-identity-unverified", pid: child.pid });
+    throw Error("Fixture child startup identity cannot be verified; retaining fixture without signalling");
+  }
+  owners.set(child, owner);
+  processEvents.push({ phase: "start", identity: owner });
   let diagnostic = "";
   child.stderr.on("data", (data) => { diagnostic = (diagnostic + data).slice(-6000); });
   return { child, diagnostic: () => diagnostic };
@@ -69,7 +82,7 @@ function mcp(script: string, cwd: string, env: NodeJS.ProcessEnv) {
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: next, method, params }) + "\n");
   });
   const tool = async (name: string, args = {}) => {
-    const reply = await request("tools/call", { name, arguments: args });
+    const reply = await request("tools/call", { name, arguments: { project: "smoke-alpha", ...args } });
     expect(reply.error).toBeUndefined();
     expect(reply.result.isError, JSON.stringify(reply.result)).not.toBe(true);
     return JSON.parse(reply.result.content[0].text);
@@ -126,7 +139,7 @@ describe.skipIf(!engineBin).each(["codex", "copilot", "antigravity"] as const)("
     await anonymous.body?.cancel();
     const claude = mcp(join(root, "dist/standalone.mjs"), sandbox, env);
     await claude.request("initialize", { protocolVersion: "2025-11-25" });
-    expect((await codex.request("tools/list")).result.tools).toHaveLength(54);
+    expect((await codex.request("tools/list")).result.tools).toHaveLength(58);
     expect((await codex.request("resources/list")).result.resources).toHaveLength(3);
     expect((await codex.request("resources/templates/list")).result.resourceTemplates).toHaveLength(3);
     expect((await codex.request("prompts/list")).result.prompts).toHaveLength(3);

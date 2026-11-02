@@ -612,3 +612,24 @@ function Get-AgentMemoryConsumerState {
     }
 }
 
+
+function Get-AgentMemoryShutdownSummary {
+    param($RuntimeState, $Body)
+    if (-not $Body -or -not $Body.PSObject.Properties['shutdown'] -or -not $Body.shutdown) { return $null }
+    $value = $Body.shutdown
+    $unknown = [pscustomobject]@{ state = 'unknown'; stage = 'unknown' }
+    foreach ($name in @('state','stage','workerPid','runId')) { if (-not $value.PSObject.Properties[$name]) { return $unknown } }
+    if (-not $RuntimeState -or -not $RuntimeState.PSObject.Properties['worker'] -or -not $RuntimeState.worker -or
+        -not $RuntimeState.PSObject.Properties['run_id'] -or $value.runId -cne $RuntimeState.run_id -or
+        $value.workerPid -isnot [int] -and $value.workerPid -isnot [long] -or $value.workerPid -ne $RuntimeState.worker.pid -or
+        $value.state -cnotin @('running','stopping','failed','stopped') -or $value.stage -cnotin @('idle','producers','indexes','durability','transports','complete')) { return $unknown }
+    return [pscustomobject]@{ state = [string]$value.state; stage = [string]$value.stage }
+}
+
+function Get-AgentMemoryStopDeliverySummary {
+    param($RuntimeState)
+    if (-not $RuntimeState -or -not $RuntimeState.PSObject.Properties['shutdown_request'] -or -not $RuntimeState.shutdown_request) { return $null }
+    $value = $RuntimeState.shutdown_request
+    if (-not $value.PSObject.Properties['delivery'] -or $value.delivery -cnotin @('pending','not_delivered','delivered','uncertain','failed','identity_changed','exited')) { return 'unknown' }
+    return [string]$value.delivery
+}

@@ -1,3 +1,4 @@
+import { throwIfNativeSourceStopping } from "../shutdown.js";
 import type { CodexSourceFile } from "../functions/codex-source-segments.js";
 
 export interface CodexReadLimits {
@@ -24,9 +25,10 @@ export class CodexReadBudget {
   private readonly startedAt = performance.now();
   private physicalBytes = 0;
   private decodedBytes = 0;
+  private readPhaseFinished = false;
   readonly limits: CodexReadLimits;
 
-  constructor(limits: Partial<CodexReadLimits> = {}) {
+  constructor(limits: Partial<CodexReadLimits> = {}, private readonly signal?: AbortSignal) {
     this.limits = { maxPhysicalBytes: 8 * 1024 ** 3, maxDecodedBytes: 8 * 1024 ** 3,
       maxMilliseconds: 30_000, maxWindowBytes: 128 * 1024 ** 2, ...limits };
     for (const value of Object.values(this.limits)) if (!Number.isSafeInteger(value) || value < 1) throw Error("Invalid Codex read budget");
@@ -38,7 +40,11 @@ export class CodexReadBudget {
       elapsedMilliseconds: Math.ceil(performance.now() - this.startedAt) };
   }
 
+  finishReading() { this.check(); this.readPhaseFinished = true; }
+
   check() {
+    if (this.readPhaseFinished) return;
+    throwIfNativeSourceStopping(this.signal);
     if (performance.now() - this.startedAt >= this.limits.maxMilliseconds)
       throw new CodexReadBudgetError("elapsed_time", this.usage());
   }
@@ -53,8 +59,9 @@ export class CodexReadBudget {
 
   physical(file: CodexSourceFile): CodexSourceFile {
     return {
-      stat: async () => { this.check(); const result = await file.stat(); this.check(); return result; },
+      stat: async () => { if (this.readPhaseFinished) throw Error("Native source read phase is closed"); this.check(); const result = await file.stat(); this.check(); return result; },
       read: async (buffer, offset, length, position) => {
+        if (this.readPhaseFinished) throw Error("Native source read phase is closed");
         this.check();
         if (length > this.limits.maxPhysicalBytes - this.physicalBytes)
           throw new CodexReadBudgetError("physical_bytes", this.usage());

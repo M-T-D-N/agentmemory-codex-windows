@@ -14,6 +14,45 @@ const observation = (id = "legacy-a", timestamp = "2026-09-13T00:00:01Z", narrat
 });
 
 describe("canonical native-to-legacy observation correspondence", () => {
+  it.each(["<oai-mem-citation>synthetic citation</oai-mem-citation>", "<oai-mem-citation>synthetic citation"])("matches a legacy final display only with exact turn and full inventory: %s", citation => {
+    const visible = "Synthetic displayed result " + "x".repeat(500);
+    const native = { ...message("display-final", undefined, visible + citation), kind: "assistant_final" as const };
+    const row = { ...observation("display-row", "2026-09-13T00:00:20Z", visible), project: "a", type: "other" as const,
+      title: "assistant_response", subtitle: JSON.stringify({ turn_id: "turn-a" }), confidence: 0.3,
+      origin: { channel: "tool" as const, detail: "assistant_response", capturedAt: "2026-09-13T00:00:20Z" } };
+    for (const source of [native, codexMessageReference(native)]) {
+      expect(matchCodexMessages([source], [row], scope)[0]).toMatchObject({ action: "adopt", observationId: row.id, contentRepair: "restore_legacy_final_display" });
+      expect(matchCodexMessages([source], [row], { ...scope, completeNativeInventory: false })[0]?.action).toBe("blocked");
+      for (const changed of [{ ...row, subtitle: JSON.stringify({ turn_id: "other" }) }, { ...row, narrative: visible.trimEnd() + " changed" },
+        { ...row, narrative: " " + visible }, { ...row, agentId: "other" }, { ...row, confidence: 0.9 },
+        { ...row, origin: undefined }, { ...row, origin: { ...row.origin, channel: "user" as const } },
+        { ...row, emptyDeletion: { state: "restored" as const, version: 1, changedAt: row.timestamp, reason: "protected", auditId: "audit" } }]) {
+        const before = structuredClone(changed), decisions = matchCodexMessages([source], [changed], scope);
+        expect(decisions[0]?.action).not.toBe("adopt");
+        expect(unmatchedCodexCaptures([changed], decisions)).toHaveLength(1);
+        expect(changed).toEqual(before);
+      }
+      expect(() => matchCodexMessages([source], [{ ...row, project: "other" }], scope)).toThrow("scope");
+      expect(matchCodexMessages([source], [{ ...row, project: undefined }], scope)[0]?.action).toBe("blocked");
+      expect(matchCodexMessages([source], [{ ...row, project: undefined }], { ...scope,
+        canonicalSession: { id: scope.sessionId, project: scope.project, agentId: scope.agentId } })[0]?.action).toBe("adopt");
+      expect(matchCodexMessages([source], [row, { ...row, id: "duplicate" }], scope)[0]?.action).toBe("blocked");
+      const competing = { ...native, key: codexTextDigest("competing"), text: visible + "<oai-mem-citation>different hidden content</oai-mem-citation>" };
+      expect(matchCodexMessages([source, competing], [row], scope).every(result => result.action === "blocked")).toBe(true);
+    }
+    const ref = codexMessageReference(native);
+    expect(ref.legacyFinalDisplayDigest).toBe(codexTextDigest(visible));
+    for (const invalid of [{ ...ref, legacyFinalDisplayDigest: "invalid" }, { ...ref, kind: "user" as const },
+      { ...ref, legacyFinalDisplayDigest: ref.textDigest }]) {
+      expect(() => matchCodexMessages([invalid], [row], scope)).toThrow("Invalid native");
+    }
+    expect(() => matchCodexMessages([ref, { ...ref, legacyFinalDisplayDigest: codexTextDigest("changed") }], [row], scope)).toThrow("Conflicting native");
+    const bound = { ...row, codexSource: { version: 1 as const, key: native.key, nativeMessageId: native.nativeMessageId,
+      kind: native.kind, timestamp: native.timestamp, ordinal: native.ordinal, byteOffset: native.byteOffset, textDigest: codexTextDigest(native.text) } };
+    expect(matchCodexMessages([native], [bound], scope)[0]?.action).toBe("blocked");
+    expect(matchCodexMessages([{ ...native, text: visible + "<arbitrary-tag>hidden</arbitrary-tag>" }], [row], scope)[0]?.action).not.toBe("adopt");
+  });
+
   it("preserves a reviewed final when its exact native source becomes eligible", () => {
     const native = { ...message("created-final", "2026-09-13T00:00:00Z", "Verified task result"), kind: "assistant_final" as const };
     const row = { ...observation("reviewed-final", native.timestamp, native.text), title: "assistant_response", type: "other" as const,

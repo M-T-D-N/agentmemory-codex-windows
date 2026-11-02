@@ -1,9 +1,10 @@
+import { CodexReadBudget } from "./codex-read-budget.js";
 import { createHash } from "node:crypto";
 import type { CodexSourceHold } from "../types.js";
 import { parseCodexRecordWithHolds, validateCodexSourceHolds } from "./codex-source-hold.js";
 import type { CodexSourceIdentity } from "../functions/codex-source-identity.js";
 import type { CodexSourceFile } from "../functions/codex-source-segments.js";
-import { canonicalCodexCwd, withReadOnlyCodexSource } from "../functions/codex-source-identity.js";
+import { canonicalCodexCwd, codexSourceIdentityDigest, withReadOnlyCodexSource } from "../functions/codex-source-identity.js";
 import { initialCodexParseState, pendingCodexMirrors, type CodexNativeMessage, type CodexParseState } from "./codex-record.js";
 
 export interface CodexSourceCursor {
@@ -18,6 +19,36 @@ export interface CodexSourceCursor {
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const maximumRecordBytes = 64 * 1024 * 1024;
+
+export function validCodexCursorParser(parser: CodexParseState): boolean {
+  const validParserCwd = (value: string) => {
+    try { return canonicalCodexCwd(value) === value; } catch { return false; }
+  };
+  return !(!parser ||
+        (parser.cwd !== undefined && (typeof parser.cwd !== "string" ||
+          !validParserCwd(parser.cwd))) ||
+        !Array.isArray(parser.finalDigests) || parser.finalDigests.length > 128 ||
+        parser.finalDigests.some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) ||
+        !Array.isArray(parser.userMessages) || !Array.isArray(parser.userMirrors) ||
+        parser.userMessages.length > 256 || parser.userMirrors.length > 256 ||
+        parser.userMessages.some(value => !value || !/^[a-f0-9]{64}$/.test(value.key) || !/^[a-f0-9]{64}$/.test(value.digest) ||
+          (value.imageReadFailureDisplay !== undefined && (!value.imageReadFailureDisplay ||
+            !/^[a-f0-9]{64}$/.test(value.imageReadFailureDisplay.digest) || typeof value.imageReadFailureDisplay.path !== "string" ||
+            !value.imageReadFailureDisplay.path || value.imageReadFailureDisplay.path.length > 2048 || /[\r\n\0]/.test(value.imageReadFailureDisplay.path)))) ||
+        parser.userMirrors.some(value => !value || typeof value.id !== "string" || !value.id || !/^[a-f0-9]{64}$/.test(value.digest) ||
+          (value.localImagePaths !== undefined && (!Array.isArray(value.localImagePaths) || value.localImagePaths.length > 16 ||
+            value.localImagePaths.some(path => typeof path !== "string" || !path || path.length > 2048 || /[\r\n\0]/.test(path))))) ||
+        !Array.isArray(parser.finalMessages) || !Array.isArray(parser.finalMirrors) ||
+        parser.finalMessages.length > 128 || parser.finalMirrors.length > 128 ||
+        parser.finalMessages.some(value => !value || (value.id !== null && typeof value.id !== "string") || !/^[a-f0-9]{64}$/.test(value.digest) ||
+          (value.displayDigest !== undefined && (typeof value.displayDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.displayDigest)))) ||
+        parser.finalMirrors.some(value => !value || typeof value.id !== "string" || !value.id || !/^[a-f0-9]{64}$/.test(value.digest)) ||
+        !Array.isArray(parser.userInputToolIds) || parser.userInputToolIds.length > 128 ||
+        parser.userInputToolIds.some(value => typeof value !== "string" || !value || value.length > 512) ||
+        typeof parser.normalUserSeen !== "boolean" ||
+        typeof parser.normalSessionSeen !== "boolean" || typeof parser.internalTurn !== "boolean" ||
+        (parser.turnId !== null && (typeof parser.turnId !== "string" || !parser.turnId.trim())));
+}
 
 export interface CodexCursorDiagnostic {
   reason: "version" | "hold_mode" | "file_identity" | "source_identity" | "byte_offset" | "ordinal" | "anchor" | "parser";
@@ -37,6 +68,7 @@ export class CodexCursorValidationError extends Error {
  * all accepted records have a canonical outcome, never merely after this read. */
 export async function readCodexWindow(input: {
   sourceRoot: string; sourcePath: string; sessionId: string;
+  signal?: AbortSignal; readBudget?: CodexReadBudget;
   sourceHolds?: CodexSourceHold[]; discoverSourceHolds?: boolean;
   cursor?: CodexSourceCursor; maxBytes?: number; maxMessages?: number; includeExcludedMessages?: boolean;
 }) {
@@ -48,7 +80,7 @@ export async function readCodexWindow(input: {
       !Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 500 ||
       (input.includeExcludedMessages !== undefined && typeof input.includeExcludedMessages !== "boolean")) throw Error("Invalid Codex read bounds");
   return withReadOnlyCodexSource(input.sourceRoot, input.sourcePath, input.sessionId,
-    (source, file) => readCodexWindowFromFile(input, source, file));
+    (source, file) => readCodexWindowFromFile(input, source, file), input.readBudget ?? new CodexReadBudget({}, input.signal));
 }
 
 export async function readCodexWindowFromFile(input: Parameters<typeof readCodexWindow>[0], source: CodexSourceIdentity, file: CodexSourceFile) {
@@ -59,8 +91,7 @@ export async function readCodexWindowFromFile(input: Parameters<typeof readCodex
   const maxMessages = input.maxMessages ?? 200;
     const snapshot = await file.stat();
     const fileIdentity = snapshot.identity ?? `${snapshot.dev}:${snapshot.ino}`;
-    const sourceIdentity = hash(JSON.stringify([source.sessionId, source.cwd, source.createdAt, source.source,
-      ...(source.fork ? [source.fork] : []), ...(source.continuation ? [source.continuation] : [])]));
+    const sourceIdentity = codexSourceIdentityDigest(source);
     const anchorAt = async (offset: number) => {
       const bytes = Buffer.alloc(Math.min(256, offset));
       const { bytesRead } = await file.read(bytes, 0, bytes.length, offset - bytes.length);
@@ -71,9 +102,6 @@ export async function readCodexWindowFromFile(input: Parameters<typeof readCodex
     const rejectCursor = (reason: CodexCursorDiagnostic["reason"], expected: unknown, observed: unknown): never => {
       throw new CodexCursorValidationError({ reason, expectedDigest: hash(JSON.stringify(expected) ?? "undefined"),
         observedDigest: hash(JSON.stringify(observed) ?? "undefined"), snapshotBytes: snapshot.size });
-    };
-    const validParserCwd = (value: string) => {
-      try { return canonicalCodexCwd(value) === value; } catch { return false; }
     };
     if (previous) {
       if (previous.version !== 1 && previous.version !== 2) rejectCursor("version", [1, 2], previous.version);
@@ -86,29 +114,7 @@ export async function readCodexWindowFromFile(input: Parameters<typeof readCodex
       const observedAnchor = await anchorAt(previous.byteOffset);
       if (previous.anchor !== observedAnchor) rejectCursor("anchor", previous.anchor, observedAnchor);
     }
-    if (previous && (!previous.parser ||
-        (previous.parser.cwd !== undefined && (typeof previous.parser.cwd !== "string" ||
-          !validParserCwd(previous.parser.cwd))) ||
-        !Array.isArray(previous.parser.finalDigests) || previous.parser.finalDigests.length > 128 ||
-        previous.parser.finalDigests.some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) ||
-        !Array.isArray(previous.parser.userMessages) || !Array.isArray(previous.parser.userMirrors) ||
-        previous.parser.userMessages.length > 256 || previous.parser.userMirrors.length > 256 ||
-        previous.parser.userMessages.some(value => !value || !/^[a-f0-9]{64}$/.test(value.key) || !/^[a-f0-9]{64}$/.test(value.digest) ||
-          (value.imageReadFailureDisplay !== undefined && (!value.imageReadFailureDisplay ||
-            !/^[a-f0-9]{64}$/.test(value.imageReadFailureDisplay.digest) || typeof value.imageReadFailureDisplay.path !== "string" ||
-            !value.imageReadFailureDisplay.path || value.imageReadFailureDisplay.path.length > 2048 || /[\r\n\0]/.test(value.imageReadFailureDisplay.path)))) ||
-        previous.parser.userMirrors.some(value => !value || typeof value.id !== "string" || !value.id || !/^[a-f0-9]{64}$/.test(value.digest) ||
-          (value.localImagePaths !== undefined && (!Array.isArray(value.localImagePaths) || value.localImagePaths.length > 16 ||
-            value.localImagePaths.some(path => typeof path !== "string" || !path || path.length > 2048 || /[\r\n\0]/.test(path))))) ||
-        !Array.isArray(previous.parser.finalMessages) || !Array.isArray(previous.parser.finalMirrors) ||
-        previous.parser.finalMessages.length > 128 || previous.parser.finalMirrors.length > 128 ||
-        previous.parser.finalMessages.some(value => !value || (value.id !== null && typeof value.id !== "string") || !/^[a-f0-9]{64}$/.test(value.digest)) ||
-        previous.parser.finalMirrors.some(value => !value || typeof value.id !== "string" || !value.id || !/^[a-f0-9]{64}$/.test(value.digest)) ||
-        !Array.isArray(previous.parser.userInputToolIds) || previous.parser.userInputToolIds.length > 128 ||
-        previous.parser.userInputToolIds.some(value => typeof value !== "string" || !value || value.length > 512) ||
-        typeof previous.parser.normalUserSeen !== "boolean" ||
-        typeof previous.parser.normalSessionSeen !== "boolean" || typeof previous.parser.internalTurn !== "boolean" ||
-        (previous.parser.turnId !== null && (typeof previous.parser.turnId !== "string" || !previous.parser.turnId.trim())))) {
+    if (previous && !validCodexCursorParser(previous.parser)) {
       rejectCursor("parser", "valid bounded Codex parse state", previous.parser);
     }
     let offset = previous?.byteOffset ?? 0;

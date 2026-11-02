@@ -1,7 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import type { CodexSourceHold } from "../types.js";
 import { validateCodexSourceHolds } from "./codex-source-hold.js";
-import { readCodexWindow, type CodexSourceCursor } from "./codex-window.js";
+import { CodexReadBudget } from "./codex-read-budget.js";
+import { withReadOnlyCodexSource } from "../functions/codex-source-identity.js";
+import { readCodexWindow, readCodexWindowFromFile, type CodexSourceCursor } from "./codex-window.js";
 import { codexMessageReference, type CodexMessageReference } from "./codex-match.js";
 
 export function codexInventoryWindowBound(bounds: { maxWindows?: number } = {}) {
@@ -11,11 +13,23 @@ export function codexInventoryWindowBound(bounds: { maxWindows?: number } = {}) 
 }
 
 export async function readCodexInventory(
-  input: { sourceRoot: string; sourcePath: string; sessionId: string; includeExcludedMessages?: boolean; sourceHolds?: CodexSourceHold[]; discoverSourceHolds?: boolean },
+  input: { sourceRoot: string; sourcePath: string; sessionId: string; signal?: AbortSignal; readBudget?: CodexReadBudget; includeExcludedMessages?: boolean; sourceHolds?: CodexSourceHold[]; discoverSourceHolds?: boolean },
   readWindow: typeof readCodexWindow = readCodexWindow,
   bounds: { maxWindows?: number } = {},
 ) {
   const maxWindows = codexInventoryWindowBound(bounds);
+  if (readWindow === readCodexWindow) {
+    if (input.discoverSourceHolds !== undefined && typeof input.discoverSourceHolds !== "boolean") throw Error("Invalid source hold review option");
+    if (input.includeExcludedMessages !== undefined && typeof input.includeExcludedMessages !== "boolean") throw Error("Invalid Codex read bounds");
+    validateCodexSourceHolds(input.sourceHolds, input.sessionId);
+    const budget = input.readBudget ?? new CodexReadBudget({}, input.signal);
+    return withReadOnlyCodexSource(input.sourceRoot, input.sourcePath, input.sessionId,
+      (source, file) => readCodexInventoryWithReader(input, options => readCodexWindowFromFile(options, source, file), maxWindows), budget);
+  }
+  return readCodexInventoryWithReader(input, readWindow, maxWindows);
+}
+
+async function readCodexInventoryWithReader(input: Parameters<typeof readCodexInventory>[0], readWindow: typeof readCodexWindow, maxWindows: number) {
   let cursor: CodexSourceCursor | undefined;
   let last: Awaited<ReturnType<typeof readCodexWindow>> | undefined;
   const messages: CodexMessageReference[] = [];

@@ -30,6 +30,7 @@ export async function inspectCodexSource(
   if (!session || session.id !== input.sessionId || session.project !== input.project ||
       typeof session.cwd !== "string" || isExcludedCodexAmbientSession(session)) throw Error("Canonical session does not permit source inspection");
   if (session.agentId && session.agentId !== managed.agentId) throw Error("Session belongs to a different agent");
+  const canonicalSession = { id: session.id, project: session.project, agentId: session.agentId };
   const { messages, legacyMessages, last, exclusions } = await readCodexInventory({ sourceRoot: managed.sourceRoot,
     sourcePath: input.sourcePath, sessionId: input.sessionId, includeExcludedMessages: true, sourceHolds: session.codexNativeCapture?.sourceHolds }, readWindow);
   const canonicalCwd = canonicalCodexCwd(session.cwd);
@@ -39,13 +40,13 @@ export async function inspectCodexSource(
   const captureExclusions = await kv.list<CodexCaptureExclusion>(KV.codexCaptureExclusions);
   const unresolvedCaptures = session.codexNativeCapture?.unresolvedCaptures;
   let compared = [...messages, ...legacyMessages];
-  let decisions = matchCodexMessages(compared, observations, { ...input, agentId: managed.agentId,
+  let decisions = matchCodexMessages(compared, observations, { ...input, agentId: managed.agentId, canonicalSession,
     completeNativeInventory: last.caughtUp, exclusions: captureExclusions, unresolvedCaptures });
   const unresolved = new Set(unmatchedCodexCaptures(observations, decisions).map(row => row.observationId));
   const retained = last.caughtUp ? await readCodexRetainedSources({ sourceRoot: managed.sourceRoot, sourcePath: input.sourcePath, sessionId: input.sessionId },
     compared, observations.filter(row => unresolved.has(row.id)), readWindow) : { messages: [], singlePhysicalSource: false };
   compared = [...compared, ...retained.messages];
-  decisions = matchCodexMessages(compared, observations, { ...input, agentId: managed.agentId,
+  decisions = matchCodexMessages(compared, observations, { ...input, agentId: managed.agentId, canonicalSession,
     completeNativeInventory: last.caughtUp, exclusions: captureExclusions, unresolvedCaptures,
     singlePhysicalSource: retained.singlePhysicalSource, sourceCreatedAt: last.source.createdAt });
   const unmatched = unmatchedCodexCaptures(observations, decisions);

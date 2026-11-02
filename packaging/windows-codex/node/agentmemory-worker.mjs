@@ -40,8 +40,10 @@ if (!stopPath || !stopToken) {
 
 // The upstream CLI returns after starting its imported worker. Keep one owned
 // event-loop reference and translate an authenticated local stop request into
-// the SIGTERM event handled by AgentMemory's graceful shutdown path.
-const signalBaseline = process.listenerCount("SIGTERM");
+// the shared entry handled by AgentMemory's graceful shutdown path.
+const bridgeKey = Symbol.for("agentmemory.managed-shutdown.v1");
+const bridge = globalThis[bridgeKey] ??= { version: 1, requested: false, stoppers: [], listeners: new Set() };
+
 process.argv = [process.execPath, cliPath, ...process.argv.slice(2)];
 await import(pathToFileURL(cliPath).href);
 
@@ -75,16 +77,14 @@ if (mcpHttp.resourceUrl !== mcpUrl) {
 }
 
 let stopping = false;
-let validStopSeenAt = 0;
-async function stopGracefully() {
-  clearInterval(keepAlive);
-  try {
-    await mcpHttp.stop();
-  } catch {
-    process.exit(1);
-    return;
+let mcpStop;
+bridge.stoppers.push(() => mcpStop ??= Promise.resolve().then(() => mcpHttp.stop()));
+function stopGracefully() {
+  bridge.requested = true;
+  for (const listener of bridge.listeners) {
+    try { listener(); } catch { bridge.stoppers.push(async () => { throw Error("Managed admission stop failed"); }); }
   }
-  if (!process.emit("SIGTERM")) process.exit(1);
+  if (bridge.request) void bridge.request();
 }
 const keepAlive = setInterval(() => {
   if (stopping || !existsSync(stopPath)) return;
@@ -96,14 +96,6 @@ const keepAlive = setInterval(() => {
     return;
   }
   if (request.token !== stopToken || request.worker_pid !== process.pid) return;
-  if (!validStopSeenAt) validStopSeenAt = Date.now();
-  if (process.listenerCount("SIGTERM") <= signalBaseline) {
-    if (Date.now() - validStopSeenAt < 2_000) return;
-    stopping = true;
-    clearInterval(keepAlive);
-    void mcpHttp.stop();
-    process.exit(1);
-  }
   stopping = true;
-  void stopGracefully();
+  stopGracefully();
 }, 250);

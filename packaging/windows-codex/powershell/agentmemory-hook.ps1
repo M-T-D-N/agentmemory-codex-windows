@@ -22,5 +22,7 @@ else {
     $scriptPath = Join-Path $layout.PackageRoot "plugin\scripts\$ScriptName"
 }
 
-& $NodePath $scriptPath
+$hookArguments = @($scriptPath)
+if ($ScriptName -eq 'codex-turn.mjs') { $hookArguments += '--managed' }
+& $NodePath @hookArguments
 exit $LASTEXITCODE

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GraphRetrieval } from "../src/functions/graph-retrieval.js";
+import { graphQueryDocument, graphQueryEdgeRef, queryIndexShardFor, queryIndexShardKey } from "../src/functions/graph-query-index.js";
 import type { GraphNode, GraphEdge } from "../src/types.js";
 
 function mockKV(
@@ -443,4 +444,25 @@ describe("GraphRetrieval", () => {
     expect(readSession).toHaveBeenCalledTimes(3);
   });
 
+});
+
+
+describe("indexed graph retrieval work", () => {
+  it.each([0, 1, 2].flatMap(depth => ["entities", "chunks"].map(kind => ({depth, kind}))))("matches canonical traversal without hydrating unrelated nodes ($kind/$depth)", async ({depth, kind}) => {
+    const nodes = [makeNode("entry", "Entry", "concept", ["seed"]), ...Array.from({length: 4}, (_, i) => makeNode(`path-${i}`, `Step ${i}`, "concept", [`result-${i}`])), ...Array.from({length: 200}, (_, i) => makeNode(`other-${i}`, `Other ${i}`, "concept", [`other-result-${i}`]))];
+    const edges = [makeEdge("edge-0", "entry", "path-0"), ...Array.from({length: 3}, (_, i) => makeEdge(`edge-${i+1}`, `path-${i}`, `path-${i+1}`))];
+    const canonical = mockKV(nodes, edges), indexed = mockKV(nodes, edges);
+    const stamp = "2026-10-23T00:00:00.000Z";
+    await indexed.set("mem:graph:snapshot", "current", {dirty: false, updatedAt: stamp, stats: {totalNodes: nodes.length, totalEdges: edges.length}});
+    await indexed.set("mem:graph:query-manifest", "current", {version: 1, shardCount: 64, dirty: false, updatedAt: stamp, totalNodes: nodes.length, totalEdges: edges.length});
+    for (let shard = 0; shard < 64; shard++) {
+      await indexed.set("mem:graph:query-documents", queryIndexShardKey(shard), nodes.filter(n => queryIndexShardFor(n.id) === shard).map(graphQueryDocument));
+      await indexed.set("mem:graph:query-adjacency", queryIndexShardKey(shard), Object.fromEntries(nodes.filter(n => queryIndexShardFor(n.id) === shard).map(n => [n.id, edges.filter(e => e.sourceNodeId === n.id || e.targetNodeId === n.id).map(graphQueryEdgeRef)])));
+    }
+    const read = vi.spyOn(indexed, "get");
+    const run = (kv: ReturnType<typeof mockKV>) => kind === "entities" ? new GraphRetrieval(kv as never).searchByEntities(["Entry"], depth) : new GraphRetrieval(kv as never).expandFromChunks(["seed"], depth);
+    expect(await run(indexed)).toEqual(await run(canonical));
+    expect(read.mock.calls.filter(([scope]) => scope === "mem:graph:nodes").map(([,id]) => id).sort()).toEqual(["entry", ...Array.from({length: depth}, (_,i) => `path-${i}`)].sort());
+    expect(read.mock.calls.filter(([scope]) => scope === "mem:graph:edges")).toHaveLength(depth);
+  });
 });

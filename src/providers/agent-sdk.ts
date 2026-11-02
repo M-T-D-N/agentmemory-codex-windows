@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { MemoryProvider } from '../types.js'
+import { loadAgentSdk } from './agent-sdk-loader.js'
 
 const sdkChildContext = new AsyncLocalStorage<true>()
 
@@ -25,7 +26,7 @@ export class AgentSDKProvider implements MemoryProvider {
 
   private loadSdk(): Promise<ClaudeAgentSdkModule> {
     if (!this.sdkPromise) {
-      this.sdkPromise = import('@anthropic-ai/claude-agent-sdk')
+      this.sdkPromise = loadAgentSdk()
     }
     return this.sdkPromise
   }

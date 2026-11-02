@@ -203,6 +203,28 @@ function Read-AgentMemoryLegacyColdRecovery {
     return $manifest
 }
 
+function Get-AgentMemoryFailureEvidence {
+    param([string]$InstallRoot, $Manifest)
+    if (-not $Manifest.PSObject.Properties['cutover_failure']) { return '' }
+    $failure = $Manifest.cutover_failure
+    if ($null -eq $failure -or $failure.outcome -cne 'automatic_rollback' -or
+        $failure.restoration_completed -ne $true -or $failure.runtime_ready -ne $true -or
+        $failure.runtime_stopped -ne $false -or $failure.phase -notin @('copy-package','copy-adapter','write-install-config') -or
+        [string]::IsNullOrWhiteSpace([string]$failure.original_error) -or
+        [string]::IsNullOrWhiteSpace([string]$failure.original_error_id)) { throw 'Unproven failed-cutover evidence.' }
+    $raw = [string]$failure.backup_root
+    if (-not [IO.Path]::IsPathRooted($raw) -or $raw.Replace('\','/').Split('/') -contains '..') { throw 'Failure evidence path escapes installation.' }
+    $path = [IO.Path]::GetFullPath($raw).TrimEnd('\')
+    if ((Split-Path -Parent $path) -ine (Join-Path $InstallRoot 'backups/releases') -or
+        (Split-Path -Leaf $path) -notmatch '^[0-9]{8}T[0-9]{9}Z$') { throw 'Failure evidence is not a direct release backup.' }
+    $snapshot = Read-AgentMemoryColdRecoveryDirectory -Path $path -Nonce $Manifest.install_nonce
+    $owner = Get-Content -LiteralPath (Join-Path $path '.agentmemory-install-owner.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($owner.install_nonce -cne $Manifest.install_nonce -or
+        [string]::IsNullOrWhiteSpace([string]$snapshot.install_root) -or
+        [IO.Path]::GetFullPath([string]$snapshot.install_root).TrimEnd('\') -ine $InstallRoot.TrimEnd('\')) { throw 'Failure evidence installation ownership mismatch.' }
+    return $path
+}
+
 function Complete-AgentMemoryAutomaticRetention {
     param([string]$InstallRoot, $CurrentManifest, [string]$TransientBackup = '')
     $result = [ordered]@{ status = 'incomplete'; attempted = @(); recycled = @(); retained = @(); unresolved = @() }
@@ -227,6 +249,12 @@ function Complete-AgentMemoryAutomaticRetention {
         $previousRuntime = [IO.Path]::GetFullPath((Split-Path -Parent (Join-Path $InstallRoot $predecessor.package_relative_path)))
         $protected = @($currentRuntime,$previousRuntime,$archive,(Join-Path $InstallRoot 'data'),(Join-Path $InstallRoot 'config'),(Join-Path $InstallRoot 'home'),(Join-Path $InstallRoot '.agentmemory-install-owner.json'))
         foreach ($path in $protected) { Assert-AgentMemoryRetentionPath $path }
+        $failureEvidence = Get-AgentMemoryFailureEvidence -InstallRoot $InstallRoot -Manifest $live
+        if ($failureEvidence) {
+            if ($TransientBackup -and [IO.Path]::GetFullPath($TransientBackup).TrimEnd('\') -ieq $failureEvidence) { throw 'Failure evidence cannot be transient.' }
+            $protected += $failureEvidence
+            $result.retained += $failureEvidence
+        }
         $manifests = @($live,$predecessor)
         $backups = @()
         foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $InstallRoot 'backups') -Force | Where-Object Name -ne 'releases')) {
@@ -240,7 +268,7 @@ function Complete-AgentMemoryAutomaticRetention {
             } catch { $result.unresolved += [pscustomobject]@{path=$entry.FullName;reason=$_.Exception.Message} }
         }
         foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $InstallRoot 'backups/releases') -Force)) {
-            if ($entry.FullName -ieq $archive -or $entry.FullName -ieq $TransientBackup) { continue }
+            if ($entry.FullName -ieq $archive -or $entry.FullName -ieq $TransientBackup -or $entry.FullName -ieq $failureEvidence) { continue }
             try {
                 if ($entry.PSIsContainer -or $entry.Name -notmatch '^[0-9]{8}T[0-9]{9}Z\.zip$') { throw 'Unknown backup is protected.' }
                 $old = Read-AgentMemoryRecoveryArchive -Path $entry.FullName -Nonce $live.install_nonce

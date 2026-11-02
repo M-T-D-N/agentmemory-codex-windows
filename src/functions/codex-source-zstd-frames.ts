@@ -3,15 +3,17 @@ import { constants, createZstdDecompress } from "node:zlib";
 import type { CodexSourceFile } from "./codex-source-segments.js";
 import type { CodexReadBudget } from "../replay/codex-read-budget.js";
 
-interface Frame { start: number; end: number; size?: number }
+export interface CodexZstdFrame { start: number; end: number; size?: number }
 
 // RFC 8878 container boundaries keep Node's single-frame decoder from dropping later frames.
-export async function* codexZstdFrames(file: CodexSourceFile, physicalSize: number): AsyncGenerator<Frame> {
-  let position = 0, windowAt = -1, window = Buffer.alloc(0);
+export async function* codexZstdFrames(file: CodexSourceFile, physicalSize: number): AsyncGenerator<CodexZstdFrame> {
+  let position = 0, windowAt = -1, previousEnd = -1, capacity = 256, window = Buffer.alloc(0);
   const bytes = async (at: number, length: number) => {
     if (at + length > physicalSize) throw Error("Codex compressed source is truncated");
     if (at < windowAt || at + length > windowAt + window.length) {
-      windowAt = at; window = Buffer.alloc(Math.min(64 * 1024, physicalSize - at));
+      const nearbyHeader = previousEnd >= 0 && at >= previousEnd && at - previousEnd < 4096;
+      capacity = nearbyHeader ? Math.min(64 * 1024, capacity * 4) : 256;
+      windowAt = at; window = Buffer.alloc(Math.min(Math.max(physicalSize <= 4096 ? physicalSize : capacity, length), physicalSize - at));
       let count = 0;
       while (count < window.length) {
         const result = await file.read(window, count, window.length - count, at + count);
@@ -19,6 +21,7 @@ export async function* codexZstdFrames(file: CodexSourceFile, physicalSize: numb
         count += result.bytesRead;
       }
     }
+    previousEnd = at + length;
     return window.subarray(at - windowAt, at - windowAt + length);
   };
   while (position < physicalSize) {
@@ -54,18 +57,18 @@ export async function* codexZstdFrames(file: CodexSourceFile, physicalSize: numb
   }
 }
 
-export async function* decodeCodexZstdFrame(file: CodexSourceFile, frame: Frame, budget?: CodexReadBudget): AsyncGenerator<Buffer> {
+export async function* decodeCodexZstdFrame(file: CodexSourceFile, frame: CodexZstdFrame, budget?: CodexReadBudget): AsyncGenerator<Buffer> {
   const stream = Readable.from((async function* () {
     let position = frame.start;
     while (position < frame.end) {
-      const bytes = Buffer.alloc(Math.min(64 * 1024, frame.end - position));
+      const bytes = Buffer.alloc(Math.min(256 * 1024, frame.end - position));
       const { bytesRead } = await file.read(bytes, 0, bytes.length, position);
       if (!bytesRead) throw Error("Codex compressed source shrank while reading");
       position += bytesRead; yield bytes.subarray(0, bytesRead);
     }
   })());
   const windowLogMax = budget ? Math.log2(budget.limits.maxWindowBytes) : 27;
-  const decoder = createZstdDecompress({ params: { [constants.ZSTD_d_windowLogMax]: windowLogMax } });
+  const decoder = createZstdDecompress({ chunkSize: 256 * 1024, params: { [constants.ZSTD_d_windowLogMax]: windowLogMax } });
   stream.on("error", error => decoder.destroy(error)); stream.pipe(decoder);
   let count = 0;
   try {

@@ -3,6 +3,15 @@ import { stem } from "./stemmer.js";
 import { getSynonyms } from "./synonyms.js";
 import { segmentCjk, hasCjk } from "./cjk-segmenter.js";
 
+function sentenceWord(term: string): string {
+  return /^([a-z0-9_-]{2,})\.+$/i.exec(term)?.[1] ?? term;
+}
+
+function restoredTerm(term: string): string {
+  const word = sentenceWord(term);
+  return word === term ? term : stem(word);
+}
+
 interface IndexEntry {
   obsId: string;
   sessionId: string;
@@ -449,6 +458,7 @@ export class SearchIndex {
         const terms: string[] = data.terms;
         if (idx.entries.size !== documents.length || terms.some(term => typeof term !== "string") ||
             new Set(terms).size !== terms.length) throw new Error("Invalid index dictionary");
+        const canonicalTerms = terms.map(restoredTerm);
         const documentAt = (position: number): string => {
           if (!Number.isInteger(position) || position < 0 || position >= documents.length) {
             throw new Error("Invalid index document reference");
@@ -459,16 +469,20 @@ export class SearchIndex {
           if (!Number.isInteger(position) || position < 0 || position >= terms.length) {
             throw new Error("Invalid index term reference");
           }
-          return terms[position]!;
+          return canonicalTerms[position]!;
         };
         for (let position = 0; position < terms.length; position++) {
-          idx.invertedIndex.set(terms[position]!, new Set(data.postings[position].map(documentAt)));
+          const term = canonicalTerms[position]!;
+          const postings = idx.invertedIndex.get(term) ?? new Set<string>();
+          for (const document of data.postings[position].map(documentAt)) postings.add(document);
+          idx.invertedIndex.set(term, postings);
         }
         for (const [position, counts] of data.docTerms) {
           const decoded = new Map<string, number>();
           for (const [term, count] of counts) {
             if (!Number.isInteger(count) || count < 1) throw new Error("Invalid index term frequency");
-            decoded.set(termAt(term), count);
+            const canonical = termAt(term);
+            decoded.set(canonical, (decoded.get(canonical) ?? 0) + count);
           }
           idx.docTermCounts.set(documentAt(position), decoded);
         }
@@ -476,8 +490,20 @@ export class SearchIndex {
       } else {
         if (!data?.entries || !data?.inverted || !data?.docTerms) return idx;
         for (const [key, val] of data.entries) idx.entries.set(key, val);
-        for (const [term, ids] of data.inverted) idx.invertedIndex.set(term, new Set(ids));
-        for (const [id, counts] of data.docTerms) idx.docTermCounts.set(id, new Map(counts));
+        for (const [term, ids] of data.inverted) {
+          const canonical = restoredTerm(term);
+          const postings = idx.invertedIndex.get(canonical) ?? new Set<string>();
+          for (const id of ids) postings.add(id);
+          idx.invertedIndex.set(canonical, postings);
+        }
+        for (const [id, counts] of data.docTerms) {
+          const decoded = new Map<string, number>();
+          for (const [term, count] of counts) {
+            const canonical = restoredTerm(term);
+            decoded.set(canonical, (decoded.get(canonical) ?? 0) + count);
+          }
+          idx.docTermCounts.set(id, decoded);
+        }
       }
       const rawLen = Number(data.totalDocLength);
       idx.totalDocLength =
@@ -511,11 +537,11 @@ export class SearchIndex {
           if (seg.length >= 1) out.push(seg);
         }
       } else {
-        out.push(stem(raw));
+        out.push(stem(sentenceWord(raw)));
         if (raw.includes("\\_") && !raw.includes("/") && !raw.startsWith("\\")) {
           const unescaped = raw.replace(/\\_/g, "_").replace(/\\+$/, "");
           if (!unescaped.includes("\\") && unescaped.length >= 2) {
-            out.push(stem(unescaped));
+            out.push(stem(sentenceWord(unescaped)));
           }
         }
       }

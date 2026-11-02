@@ -503,7 +503,7 @@ describe("status wiring", () => {
     expect(api).toMatch(/run: singleFlight\(async \(\) => \{\s*const value = await findUnindexedObservations\(kv\);/);
     const handler = api.slice(api.indexOf('registerFunction("api::status"'), api.indexOf('function_id: "api::status"'));
     expect(reporter).toMatch(/valueWithin\(\s*kv\.get<AuditMigrationState>\(KV\.auditMonths, AUDIT_MIGRATION_STATE_KEY\),\s*STATUS_CHECK_TIMEOUT_MS,\s*\)/);
-    expect(handler).toContain("const report = await statusReport({ nativeSelection: selection });");
+    expect(handler).toMatch(/\.\.\.await statusReport\(\{ nativeSelection: selection \}\)/);
   });
 
   it("streams the same report to the viewer on every health tick and in the snapshot", () => {

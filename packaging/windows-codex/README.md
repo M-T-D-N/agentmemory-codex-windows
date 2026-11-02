@@ -1,6 +1,14 @@
 # AgentMemory for Codex on Windows
 
+> **Preview.19/r269 candidate — locally qualified, not published.** The exact Windows payload was built from `7e66cd75702222aece989ac1c6be4c73aa004e7d`; the public-source documentation below is a later overlay, not a new binary build. See [the final local evidence and limits](../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02). The [versioned preview.19 Release target](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.19) is reserved for publication; its existence and exact-public-commit CI success are not yet claimed.
+
 > **Published preview.18/r225:** The [fixed Release](https://github.com/M-T-D-N/agentmemory-codex-windows/releases/tag/v0.1.0-preview.18) provides the four verified assets, hashes and installation instructions. Tagged public source: `6359546a`; payload workspace source: `3632849b`. This post-publication main documentation and its CI are separate from the unchanged binary build source. Historical preview.17/r216 remains preserved.
+
+Current source prepares unpublished `0.1.0-preview.19`. The exact r269 local
+Windows/native/Qwen/distribution checks are complete within the recorded scope;
+public-source review, CI and publication remain pending. See [candidate evidence
+and remaining publication steps](../../docs/PREVIEW_19.md). Published preview.18 remains available through
+its fixed tag and matching assets; do not substitute a development build for it.
 
 Preview.18 qualification and release identities are summarized in [the operating and validation notes](../../docs/PREVIEW_18.md). The detailed lifecycle commands below remain the authority for installation, cutover, data preservation and recovery.
 
@@ -8,7 +16,7 @@ Preview.18 qualification and release identities are summarized in [the operating
 
 > [!IMPORTANT]
 > This is the source and operating guide for independent downstream Technical
-> Preview `0.1.0-preview.18`, based on upstream AgentMemory `v0.9.30`. It is not the
+> Preview candidate `0.1.0-preview.19`, based on upstream AgentMemory `v0.9.30`. It is not the
 > official upstream repository, an `@agentmemory/*` npm release, or a promise
 > of upstream support. Use this downstream
 > npm launcher or source builder; an upstream `npx` command installs a different product.
@@ -75,6 +83,286 @@ clearer boundaries without changing the upstream-compatible API or data model:
 
 The detailed failure lessons later in this guide explain why these constraints
 exist. They are operational history, not additional product surfaces.
+
+## User-rebuilt compatible libvips inputs (source implementation)
+
+The optional source-builder argument `-UserLibvipsInputDirectory` stages user
+supplied Windows x64 C DLL and/or MSVC wrapper bytes into a **new** candidate
+after frozen dependency deployment and before immutable manifest generation.
+Without that argument the default build branch is unchanged. This implementation
+has synthetic staging/repackaging verification only; it has not established
+native ABI/image processing, a completed corresponding-source offer or a tested
+Windows install of a user-rebuilt library. Immutable r254 and earlier artifacts
+remain unchanged and do not contain this implementation.
+
+The input root must be a physical local directory containing `libvips-input.json`
+and the selected `libvips-42.dll` and/or `libvips-cpp-8.18.7.dll`. Other file
+names, `.node` replacements, MinGW C++ wrappers, redirected directories and
+arbitrary overlays are unsupported. Unverified internal junctions fail safely.
+The current profile requires sharp 0.35.5 and libvips 8.18.7. A valid C ABI does
+not make the removed MinGW C++ wrapper compatible with the MSVC addon.
+The unchanged native addon is exactly `sharp-win32-x64-0.35.5.node`, selected by
+the captured package's `./sharp.node` export through its versioned `index.cjs`
+entry. Layout regression expectations come from those preserved package bytes
+and their r254 inventory binding, rather than the staging helper's constants.
+No wildcard native-addon replacement is accepted.
+
+The descriptor has exactly these top-level fields: `schema_version` (1), `kind`
+(`user-built-libvips`), `platform` (`win32-x64`), `sharp_version` (`0.35.5`),
+`libvips_version` (`8.18.7`), `files` and `sources`. Each `files` item contains
+`component` (`vips-c` or `vips-cpp-msvc`), its fixed `file` name, positive integer
+`size_bytes` and lowercase SHA-256 `sha256`. Provide exactly one source item per
+selected component with `component`, `version` (`8.18.7`), `source_url`,
+`source_revision`, `recipe_url`, `recipe_revision`, `patches` (an array of
+`{url,sha256}` objects, possibly empty), and `verification` (`declared`). Source
+revisions are git/release identifiers. URLs must be HTTPS without embedded
+credentials, query parameters or fragments. Only supply public source references
+without secrets; syntax checks do not independently verify source publication
+or contents. Do not include a username, local path, token or free-form notes.
+The validated descriptor is packaged verbatim, so review its actual contents.
+
+For an intentionally separate candidate, choose unused owned output/revision
+values and pass the input directory explicitly:
+
+```powershell
+& .\packaging\windows-codex\Build-WindowsCodex.ps1 -Offline `
+  -OutputDirectory $newOutput -ScratchDirectory $taskScratch `
+  -ReleaseRevision $newRevision -IiiEnginePath $pinnedEngine `
+  -UserLibvipsInputDirectory $userInputs
+```
+
+The builder locks input reads, verifies physical paths and hashes, creates new
+files and atomically replaces only candidate directory entries. It does not
+write through pnpm cache hardlinks or fall back to in-place overwrite. Failure
+leaves an unqualified owned candidate for diagnosis. The runtime's
+`user-libvips-input.json` and `user-libvips-provenance.json`, external input digest,
+`distribution_variant: user-libvips`, DLL hashes and qualification are bound to
+the new manifest. Provenance keeps `native_api_abi: not-verified` and source
+verification `declared`. Existing code source identity keeps its original
+meaning. Old manifests/receipts cannot qualify the changed bytes.
+
+The installer's existing `-ReleaseRoot` and file-hash/ownership checks remain in
+place; no signature, integrity, version or policy exception is added. A future
+authorized isolated installation/native test must validate the actual compatible
+libraries. Do not modify operating DLLs or an existing immutable payload. See
+[the source/patch and ABI notes](licenses/THIRD-PARTY-NOTICES.md#sharp--libvips-source-and-replacement-investigation)
+for the remaining LGPL/MPL source and notice work.
+
+## Windows Node dependency shipping profile
+
+The source builder now narrows only its freshly deployed Windows copy, before
+manifest or ZIP creation. It excludes guid-typescript 1.0.9 and the pinned
+ONNX Web all/WebGL bundles, their five maps, and the vendor development lib tree.
+The original dependency store, source checkout, published packages, immutable
+candidates and operating installation are not modified. Metadata is replaced
+through new files so pnpm hardlinks cannot modify the source store.
+
+The transformation is bound to the reviewed input hashes, exact removal set,
+metadata shapes and physical staging path. Unexpected versions, new GUID
+references, redirected paths or missing retained export/map/assets fail the
+build and leave the incomplete staging output for diagnosis. It reconciles
+package dependencies, exports, ambient types and pnpm's package map together.
+
+The retained profile includes ordinary Transformers Node ESM/CJS, ORT
+node/common/native providers, sharp, and dedicated WASM, WebGPU and JSPI
+entries/assets. The vendor imports `onnxruntime-web/all` and
+`onnxruntime-web/webgl` are intentionally unavailable; applications using
+those subpaths or injected/custom ORT runtimes are outside this shipping profile.
+The retained upstream build scripts are provenance, not a complete vendor
+development/rebuild environment. Upstream dependencies and notices remain
+identified; this profile does not relicense them.
+
+The existing payload smoke verifies retained references and runs real native
+CPU MatMul plus synthetic image resize, without downloading pretrained models.
+These checks do not establish pretrained embedding/CLIP/reranker semantics or
+WASM/WebGPU/GPU execution. The implementation was exercised on a disposable copy
+of r264, not a new qualified release. Fixed r264 and its accepted operating
+receipt retain their original contents; a final new candidate still requires
+its own scoped verification and recipient-source review.
+
+## Native corresponding-source evidence input (partial)
+
+Current status (2026-11-02): the partial v4 assembly with selected/conditional
+Rust sources and exact upstream build-tree delivery is the tracked input below.
+Its exact input bytes passed the bounded SOURCE80 review and are bound to the
+r269 manifest and qualified Windows ZIP; limitations below remain. Historical v2 remains bound to the fixed
+r267 candidate; private v3 is retained separately. The original research ZIP
+contains private retrieval records; do not publish it as-is. See the
+[current recipient-source input](licenses/THIRD-PARTY-NOTICES.md#current-recipient-source-input-2026-11-02)
+for bundled versus external sources, exact downloads and recipient-delivery
+limits. Source-input review alone does not qualify a product candidate; r269
+has separate linked functional and distribution evidence.
+
+The source builder accepts `-NativeSourceEvidenceArchive <reviewed-local-zip>`.
+It never downloads, unpacks or executes that archive. The tracked
+`licenses/native-source-evidence.json` pins the 95,754,646-byte v4 input
+to SHA-256 `feb32a6ee7f17de11c9eb9bb6cbf38ff497d9d55a6cc3927e911ddbfabb7029d`.
+Without the option, the existing default branch adds no source-evidence files
+or manifest field. The input must be outside a fresh exclusively owned physical
+candidate directory. Existing output files are never overwritten. A failed copy
+leaves an unqualified partial candidate for diagnosis; it is not retried or published.
+
+With the input, `NATIVE-SOURCE-EVIDENCE.zip` and `NATIVE-SOURCE-EVIDENCE.json`
+are release-root files. Their size/hashes enter `release_files`; the explicit
+`native_source_evidence` record binds the partial descriptor to those entries.
+The existing distributor checks that inventory and includes the entire release
+directory in the Windows ZIP. The small npm TGZ downloads that ZIP and does not
+need another archive copy. These external bytes are bound by the manifest hash,
+not by the tracked source-input digest or immutable payload digest.
+
+The archive contains nine component source archives, cairo file notices,
+pinned GLib GVDB with its notices, fixed recipes/patches, and a patched librsvg
+source map with 167 base Windows gnullvm Rust crates and 17 conditional AVIF
+crates. License metadata and supplemental notice provenance are bound to members
+of checksum-verified original crates. Cargo tree analysis and this conservative
+AVIF superset do not prove the historical binary's exact compilation graph.
+`complete=false` is mandatory: the descriptor verifies copied bytes, not complete
+historical binary reconstruction or blanket redistribution rights. The exact guid 1.0.9 notice
+remains unresolved where that package is shipped; the separate Windows Node
+profile's exclusions must be verified against each final payload. No
+license-clearance or production-qualification result is created.
+Historical container-digest uncertainty is recorded without inventing a new
+independent release blocker. Sources, patches and build instructions are read
+from the enclosed README/component map by recipients; this byte-copy helper
+does not attest their completeness or execute them.
+
+The earlier Windows Library materialization failed while applying xattrs; that
+failure remains in the investigation history. Source assembly alone did not
+qualify a distribution. The later r269 descriptor, manifest and final ZIP now bind
+the exact archive below, with recipient paths and bounded audit reviewed.
+r260 remains fixed and is not relabelled; public availability is still pending.
+
+### Current recipient-source input (2026-11-02)
+
+The new partial source archive contains 859 files, 95,754,646 bytes,
+SHA-256 `feb32a6ee7f17de11c9eb9bb6cbf38ff497d9d55a6cc3927e911ddbfabb7029d`.
+Its descriptor pins these bytes inside the locally qualified r269 Windows ZIP.
+It is not yet published. The earlier v2/v3 archives and r267 candidate are unchanged.
+
+The archive retains 855 source/notice files byte-for-byte, including the nine
+component archives, GVDB, 167 base and 17 conditional AVIF Rust crates. It keeps
+five patches with explicit MXE license references and the corresponding MXE
+license. Thirteen other selected build-win64-mxe files are supplied through
+the complete fixed upstream tree rather than copied into this new ZIP.
+BUILD-SOURCE-MAP.json lists those individual paths/hashes and full-tree downloads;
+SOURCE-MAP.json explicitly marks bundled versus externally provided patches.
+This is a delivery distinction, not permission to omit required scripts,
+patches or non-patch edits from a recipient's reconstruction.
+
+| Exact source download | Bytes | SHA-256 |
+| --- | ---: | --- |
+| [libvips/build-win64-mxe ef19ca09](https://codeload.github.com/libvips/build-win64-mxe/tar.gz/ef19ca09af2453d127453d677c849ccb37cf5694) | 65766 | `f52864572e6df6e549016369fdb2705aa195a837bd7bc8c52e45f42b59ef97a7` |
+| [kleisauke/mxe c36160b2](https://codeload.github.com/mxe/mxe/tar.gz/c36160b231e66e1cbe032ed54aef7617e8b259da) | 2666414 | `b71d435d977b64f56b048c948a7649892fc36a1977ecd30ca0e7fe3c21b2f607` |
+| [lovell/sharp-libvips ebb95f8a](https://codeload.github.com/lovell/sharp-libvips/tar.gz/ebb95f8add54eee8bed840e3fb587e4cbec857d7) | 24490 | `65fdb633c2d97626352a3771b7a0ce30b6a89af03d2a1238491c8b068e6b8dad` |
+
+Verify the archive digest, preserve each full directory layout and notices, and
+follow the reconstruction instructions below. The MXE source is the
+kleisauke fork selected by the pinned recipe; the recorded mxe/mxe archive URL
+retrieves the same inspected Git object. Historical build provenance is not
+inferred from the recipe's moving branch.
+
+The distributor remains responsible for equivalent recipient access. Before
+publication, verify these exact downloads and place this guide/source archive
+beside the binary download. If a route becomes unavailable, provide an authorized
+equivalent source location; a repository homepage or moving branch is not a
+substitute. The descriptor's `complete: false` describes the byte verifier's
+limited scope. Review items may change without turning that verifier into a
+license-clearance decision.
+
+A maintainer's repository-wide republication answer is not a prerequisite to
+this external-source delivery route. Original license and delivery obligations
+still apply. Historical inquiries and findings below remain dated evidence.
+The r269 Windows payload's GUID exclusion and exact source archive were checked
+separately; this native source archive contains no guid-typescript. The final
+local Windows/native/Qwen and distribution evidence is recorded in
+[the r269 qualification](../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02).
+Public-source CI and recipient access through a published Release remain pending.
+
+### Recipient reconstruction needs complete build repositories
+
+`NATIVE-SOURCE-EVIDENCE.zip` is a selected source/notice collection, not a
+standalone build workspace. Do not run its selected recipe files as if the
+whole build repository were included. Before reconstruction, obtain complete
+copies of these upstream trees at the fixed revisions:
+
+- [build-win64-mxe ef19ca09af2453d127453d677c849ccb37cf5694](https://github.com/libvips/build-win64-mxe/tree/ef19ca09af2453d127453d677c849ccb37cf5694).
+  Keep the entire `build/`, `container/` and `packaging/` trees.
+  The selected packet omits `build/patches/libtool-2-fixes.patch`,
+  `build/settings/release.mk` and `packaging/`; the ordinary release recipe
+  uses them. `build/settings/debug.mk` is additionally needed only for a
+  selected debug build.
+- [kleisauke/mxe c36160b231e66e1cbe032ed54aef7617e8b259da](https://github.com/kleisauke/mxe/tree/c36160b231e66e1cbe032ed54aef7617e8b259da).
+  The pinned build-win64-mxe tree selects this fork's `llvm-mingw-20260924`
+  branch in `container/base.Dockerfile:14`; that branch reference is not a
+  commit pin or proof of the historical binary's build. The source map retains
+  the original download URL through `mxe/mxe` for the same Git object.
+  The four selected base recipes are not the complete toolchain/build tree.
+- [sharp-libvips ebb95f8add54eee8bed840e3fb587e4cbec857d7](https://github.com/lovell/sharp-libvips/tree/ebb95f8add54eee8bed840e3fb587e4cbec857d7),
+  the commit referenced by tag `v1.3.4`. Keep its full packaging layout,
+  including `versions.properties`, sourced by `build/win.sh` through the
+  recipe's `/packaging` mount; this file is not in the selected packet.
+
+Use a full checkout/archive of each fixed tree, rather than copying a single
+linked script or using the moving default branch. A Git checkout must report
+the listed commit from `git rev-parse HEAD`. These paths and the sharp-libvips
+tag-to-commit mapping were read from the official repositories; the commands
+and container builds were not executed during this review. Follow their
+included build/mount instructions and preserve the component patches,
+non-patch edits, GVDB and selected Rust sources described in the source map.
+Keep the sharp 0.35.5 MSVC wrapper source and ABI requirements in the linked
+native notes when replacing libraries.
+
+This documents an accessible pinned reconstruction route, not a fully offline
+toolchain bundle, historical container-digest proof, bit-identical rebuild or
+validated replacement DLL. The final distributed ZIP must still expose this
+guide and the source archive/descriptor with their manifest-bound hashes.
+The current source input and descriptor are the v4 bytes identified above;
+historical v2/v3 archives and the fixed r267 candidate remain unchanged.
+
+## Optional Agent SDK provider (candidate source)
+
+An offline production dependency fixture excluded
+`@anthropic-ai/claude-agent-sdk` and its proprietary native CLI packages. The
+MIT-licensed `@anthropic-ai/sdk` remains an independent dependency. SDK types and
+synthetic provider tests retain the exact development version `0.3.296`; this is
+not a change to provider selection, the published preview.18 assets, or operating
+configuration. Managed Windows still uses local-qwen/noop as documented above.
+
+For a portable deployment that deliberately selects `agent-sdk`, separately
+install the optional peer `@anthropic-ai/claude-agent-sdk@0.3.296` under its own
+terms, or install it in `~/.agentmemory/extensions/agent-sdk/node_modules`.
+For example, after reviewing those terms, run your package manager's explicit
+`npm install --prefix <extension-root> --save-exact @anthropic-ai/claude-agent-sdk@0.3.296`
+yourself. AgentMemory does not run this command, accept terms, download SDKs,
+or configure credentials. On managed Windows the process home is installation
+`home`, so the extension root is `home/.agentmemory/extensions/agent-sdk`.
+This is outside the immutable `runtime` payload and must remain in its owned
+home backup/recovery set; do not install into the versioned managed runtime.
+
+The loader checks the exact package name/version, ESM entrypoint, physical path
+boundary and exported query function before use. An existing extension takes
+precedence; invalid extensions, redirected roots and escaping module paths fail
+explicitly rather than falling back. An absent SDK produces an actionable
+`agent_sdk_optional_provider_unavailable` error when requested; local-qwen/noop
+do not load it. Loading an extension executes user-installed code: metadata/API
+checks do not authenticate its publisher or prove its safety. Only use a package
+you have independently chosen and verified. Portable opt-in remains explicit
+through `AGENTMEMORY_ALLOW_AGENT_SDK=true`; existing provider precedence is
+unchanged. Do not add this opt-in to the managed profile to bypass its capabilities.
+
+That fixture used an interim lock. The preserved-version lock initially failed
+offline policy verification because registry metadata was missing. A subsequent
+supported metadata-only refresh passed the policy check and an offline frozen
+lockfile check without changing lock bytes or downloading package payloads.
+This does not qualify a final build or distribution artifact. The import-safe internal `dist/providers/index.mjs`
+entry enables synthetic tests of the same bundler settings without starting the
+worker or CLI.
+
+Only synthetic module loading/provider regressions and offline dependency
+checks are in scope for this change. Real SDK authentication/model execution,
+Windows extension preservation across install/recovery, and a new qualified
+distribution remain separate acceptance work; historical r253 results do not
+qualify changed source bytes.
 
 ## AI development disclosure and validation limits
 
@@ -162,7 +450,15 @@ installation, security, retention, and rollback commands.
 
 ## Build
 
-Run from Windows PowerShell 5.1 or newer. The output directory must not exist.
+Run from Windows PowerShell 5.1 or newer with Node.js 24+ and pnpm 11.25.0,
+matching this downstream's package.json#packageManager and Windows CI.
+The builder checks the selected PATH launcher's actual version before dependency
+installation or creating build output. A mismatch, failed version probe or
+unpinned declaration stops the build. The version probe disables package-manager
+auto-selection; the builder does not install/downgrade pnpm or modify shared
+shims/settings. pnpm 11.19.0 compatibility is unverified. The original
+upstream-source.json#build_runtime is historical upstream provenance, not the
+current downstream build-tool requirement. The output directory must not exist.
 
 ```powershell
 & .\packaging\windows-codex\Build-WindowsCodex.ps1 `
@@ -222,6 +518,217 @@ bind `source_commit`, `source_input_digest`, `manifest_sha256` and the four
 `windows_e2e.evidence` identifies that result by path and SHA-256.
 `operating_e2e` identifies the existing native evidence root and successful
 wrapper `process_outcome`. Do not copy internal evidence into public assets.
+
+### Windows evidence schema 2 and synthetic contracts
+
+Windows distribution acceptance now requires schema 2 with
+`evidence_kind: "windows_execution"` and `synthetic: false`.
+`verifySyntheticWindowsScenarioEvidence` checks the same action/state/observation
+contract for explicitly labelled synthetic fixtures and always returns
+`production_qualified: false`. Neither that result nor
+`verifyQualificationRecordContract` can be supplied as a verified Windows result
+to `verifyQualificationRecords`. The CLI verifies Windows evidence in its own
+process before consuming the unchanged, separate confirmed native operating gate.
+
+The Windows record carries an execution UUID and the same candidate source,
+input digest and raw manifest hash as qualification. The caller supplies the
+actual release directory and raw release-manifest bytes. The qualification's
+`windows_e2e.installations` maps installation IDs to exact local roots, install
+nonces, exact projects, loopback REST origins and distinct predecessor manifest
+hashes for updates. `windows_e2e.powershell` pins the executable path and hash.
+These are expectations to fix in the approved test plan, not values inferred
+from a success label.
+
+Each scenario has explicit start/end times and ordered phase records:
+prepare/activate/start, stop/start, update, inject/recover. Fresh startup invokes
+the installed MCP script with `-ValidateOnly` after task/hook activation; a
+public package has no private-source closeout side effect to start it.
+Historical two-phase private evidence remains valid only when its activation
+snapshot and original receipts already prove the active runtime.
+Each phase references a
+hashed raw process receipt with execution/installation/scenario/phase identity,
+PID/parent/creation time, argument array, actual executable and script
+path/hash references, raw stdout/stderr and an integer exit code. The supported
+profile uses PowerShell `-File` and the manifest-bound installer or installed
+stop/MCP scripts. Installer actions require `-Execute` and the corresponding
+Fresh/ActivatePrepared switch; no-op commands, dry runs and foreign roots or
+scripts do not qualify. This does not execute any command while verifying.
+
+After each action, a hashed timestamped snapshot references the installed
+manifest (root, nonce, release and source hashes) and applicable runtime state.
+Updates also require the distinct predecessor before the action; restart must
+observe a clean inactive run followed by a different active run. The memory
+created/search/detail references are timestamped API capture envelopes with
+unique capture IDs, execution/installation identity, method, loopback URL,
+project, HTTP status and a reference to the original response. Search/detail
+must follow the last action; an existing row must predate restart/update/recovery.
+The full ID/content/project/origin comparison remains required. Original
+injection/restore errors and their raw streams remain attached, even when a
+later updater retry succeeds. Structured stdout must be captured as UTF-8 with
+an explicit encoding: "utf-8" on its raw reference. Decoding is fatal on invalid
+UTF-8; a BOM is accepted and Korean paths are preserved. The future executor must
+configure its output encoding before the command, retaining the captured raw
+bytes and hash; labelling old host-code-page output as UTF-8 is not conversion.
+Opaque stderr may retain its host code page and is not decoded by the verifier.
+A rollback failure's restoration stream must be the same failed installer child's
+stderr reference (which contains that installer's rollback errors). Unrelated
+streams, even nonempty ones, do not qualify; separate rollback processes are not
+supported by this profile without a separately verified receipt.
+
+The updater may preserve only bin/agentmemory-hidden-launcher.exe when the
+installed manifest reports that actual result and the verified updater output
+reports preservation. A snapshot's launcher_preservation references that exact
+validated update/recovery action, the preceding installed manifest, timestamped
+captures of the previous binary/source and current binary at their fixed original
+paths, and the candidate's manifest-bound C# source. Previous manifest hashes must
+match captured bytes; normalized UTF-8 C# source (BOM and CR/LF normalization) must
+match the candidate adapter source hashes; unchanged binary bytes must match the
+new installed manifest. Other files retain exact candidate hashes. A declaration
+without those byte/transition proofs does not qualify. Runtime process creation
+must not postdate runtime.updated_at, which must not postdate the snapshot.
+
+This validates the consistency and meaning of trusted local execution records.
+It is not cryptographic host attestation: a party able to fabricate all input
+records and timestamps is outside this verifier's trust boundary. A marker or
+JSON schema alone cannot prove a command ran. Collect these records from the
+approved executor, retain raw bytes and review the actual run. Old phase labels,
+r255/r257 synthetic drivers and their prior PASS labels cannot be upgraded by
+editing a marker. No schema 2 Windows production execution has been performed
+for this change.
+
+The [collector implementation and remaining integration plan](verification/WINDOWS-EVIDENCE-COLLECTOR-PLAN.md)
+separates two import-safe APIs. The existing synthetic-only assembler accepts
+supplied benign bytes/receipts and cannot emit production evidence or execute
+actions. The new `windows-evidence-host.mjs` defines manifest-pinned host actions,
+fixed state/launcher captures and loopback API capture. Its actual factory is
+disabled unless explicitly enabled; its separate synthetic factory requires all
+fake effects and always emits synthetic, non-production evidence. This code has
+only been exercised with fake host effects, plus an own-process UTF-8/identity
+PowerShell fixture. Installer/stop/start scripts were parsed, not executed.
+
+The separate `windows-evidence-production.mjs` producer now supplies a fixed
+candidate execution interface and an ownership-checked cleanup backend. Import
+does not start it. The real factory requires explicit execution, manifest-pinned
+tools, isolated targets and the permissions for each actual action. A distinct
+fake-effects harness always retains `synthetic_contract` and
+`production_qualified=false`; those markers cannot promote its results.
+Fresh preparation pauses after one-use nonce enrollment for explicit activation
+and configuration. This unit has executed only fake installer/API/process/task
+effects. Its PowerShell regression extracts three allowlisted pure functions
+from the backend AST and uses fake process probes; it does not execute the
+backend's top-level commands or query real tasks/processes.
+
+Prepared-state resumption uses the separate `createWindowsPreparedResumeProducer`
+factory and `resumePrepared()` admission. It does not rerun fresh preparation,
+reset an old guard, replace its nonce, or recreate a root. The read-only
+`windows-prepared-resume.mjs` verifier requires pinned original plan/controller,
+successful prepare command and child identity, original enrollment and installed
+inventory, prepared snapshot/ownership receipt, and the conclusively closed failed
+configuration receipt. Candidate, slot, owner, source and unchanged execution-tool
+pins must match; only the separately pinned preparation backend revision may
+change. Creation FILETIME numbers are read losslessly and compared with BigInt,
+not rounded through JavaScript Number.
+
+A new attempt keeps the original execution identity for the original prepare
+receipt and records its own resume UUID, output and durable create-new claim.
+The claim is keyed by execution/slot/nonce/candidate and is never automatically
+deleted, reset or reused, including after an admission failure. Current ownership
+must show the same empty prepared slot with both tasks absent. The read-only
+preparation admission additionally checks an unmodified original installed
+manifest, an unconfigured config with the pinned fresh installer's five-port
+profile, no partial config temp, and absence of the exact prior producer PID.
+A present/reused PID or an unavailable lookup holds admission. This observation
+does not decrypt a credential, register tasks, alter ACLs or configure the slot.
+It pins config bytes for the following explicit configuration action. A claim
+alone is not admission or authority to activate.
+
+The final partial/full verifier rechecks the original evidence and the durable
+claim; it allows original capture/identity paths only from that verified prior
+root alongside the new recorder root. New records retain the failed attempt and
+their link to it. Synthetic resumption remains synthetic/non-production, and the
+full Windows/native gates remain required. A separate fixed-candidate run reached
+prepared state and failed before activation; it is not a completed Windows
+scenario. The new resume path has only fake-effects/pure regression evidence,
+plus read-only validation of closed original records, until an approved actual
+admission and continuation succeed.
+
+The [closed configuration continuation contract](verification/WINDOWS-CONFIG-CONTINUATION.md)
+records the typed-null Windows replacement fix, bounded safe diagnostics and
+the separate single-ordinal retained-temp continuation factory and native
+source-handle replacement contract. It preserves the original claim and failures;
+only generated-file/fake-effect regressions have run. No actual held-slot retry
+or lifecycle acceptance is claimed.
+
+Preparation input sizes remain bounded: only `install-manifest.json` receives a
+32 MiB limit because the complete installed inventory exceeds the ordinary
+1 MiB input limit. Config, contract, owner and credential inputs retain that
+ordinary limit. SHA256 comparisons first require exactly 64 hex digits and then
+ignore hex case; nonce, owner and path matching is unchanged. These external
+verification tools are pinned separately from an already immutable candidate;
+changing a tool does not relabel the candidate as built from the new source.
+
+Cleanup must re-observe every previously captured role/PID, including identities
+omitted or null in later runtime state. Missing records are not absence proof;
+changed identities and unknown outcomes hold cleanup. Both observations must
+cover the same roles, and active runtime evidence requires daemon, worker and
+engine to be present. A stop retains its pre-action proof and passes it to the
+backend inspection; every previous PID must be explicitly absent before the new
+observation replaces that proof or cleanup proceeds. Identity reuse, missing
+roles and unknown outcomes hold the producer. Prepared installations may retire with genuinely absent
+tasks; an activated task disappearing is rejected. Explicitly requested removal
+also rejects redirected trees rather than weakening ownership checks.
+
+These initial synthetic protocol results are not real lifecycle acceptance.
+Later WINDOWS35 and NATIVE56 separately established fixed r267's Windows
+four-scenario and isolated native/v2 results, including owned-resource cleanup;
+see the [current candidate evidence](../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02).
+The later exact r269 candidate also passed its separately recorded Windows,
+native/v2, real operating/Qwen and distribution checks. Public-source review,
+exact-public-commit CI and publication remain pending. No default installer
+failure seam was added, and the synthetic coordinator itself does not execute
+real installation or cleanup actions.
+
+Paired opt-in `EvidenceUtf8`/`EvidenceIdentityPath` parameters capture the child
+itself before an approved action; they never change execution policy, ACLs or
+authentication. Default script invocations do not load the capture helper. A new
+candidate must include the helper and bind every changed script before any live
+run. Archived raw inputs retain their original identity paths and immutable
+hashes; the verifier confines archive storage to the expected capture root.
+
+The import-safe `windows-evidence-scenarios.mjs` now coordinates four independent
+synthetic contract cases through the existing synthetic adapter and semantic
+verifier. It requires all fake effects, enforces fixed phase order and returns
+only synthetic/non-production acceptance. It is not a Windows execution runner
+or proof that the same host installation moved between independent fixtures.
+It preserves original failure causes and refuses failed API captures before
+continuing. This synthetic coordinator does not execute real Windows actions or
+authorize them. The API cannot authorize actions, create a qualification
+receipt by itself or replace the native gate. It rejects concurrent actions and
+blocks further actions after unknown/nonzero outcomes. All asynchronous capture,
+API and assembly methods now share the same operation guard as action dispatch:
+capture-first and action-first orderings both refuse overlapping work. Child
+environment normalization preserves an inherited Process execution-policy value;
+it does not remove or override it while clearing Node/AgentMemory overrides.
+Any post-dispatch evidence failure latches the recorder, including stdout,
+stderr and receipt storage. Original failures remain available as Error.cause;
+if even their error receipt cannot be saved, evidence_storage_error retains that
+second failure without claiming a saved receipt. Timeout/output-limit
+receipts remain incomplete; pending owned children are not silently killed or
+claimed absent. A separately approved owner must resolve them before proceeding.
+No production host action or Windows scenario is qualified by this change.
+
+A future Windows run must first fix its exact new candidate, isolated roots,
+ports, task names and predecessor, capture the above process/state/API evidence,
+and obtain the required authentication/ACL/task permissions. The existing
+incident a/b roots and rejected queries are outside the current code/test scope.
+Native Codex Memory v2 and AgentMemory are separate systems; configuration or
+automatic v2 reading alone does not prove hook coexistence. The later NATIVE56
+test used the approved synthetic profile and established its same-request
+v2/recall and capture/source scope without changing the user's native memory.
+That separate diagnostic does not convert these synthetic coordinator results
+into Windows or real-model acceptance. Artifact-specific GUID exclusion and
+component-specific sharp/libvips source/build/patch closure still require final
+qualification; this verifier change does not clear those requirements.
 
 This produces the versioned Windows ZIP, npm-compatible tarball, release
 descriptor and SHA256SUMS.txt, without publishing. It uses the existing pnpm
@@ -379,6 +886,18 @@ new and projectless chats. The prompt hook retrieves current-project context,
 widening to historical user originals and other records when local originals
 are insufficient or historical scope is requested. It can instead validate
 originals already expanded in the same uncompacted conversation.
+Explicit current-project-only requests take precedence over historical intent,
+insufficient local results, and retrieval failures. A request-scoped permission
+is carried through keyword/hybrid discovery, original expansion, graph queries
+and source reuse. A scope-only follow-up retains the concrete topic; a later
+explicit all-project request can reopen federation. Contradictory scope in one
+request stays narrow. Quoted text, tool output and assistant wording cannot
+authorize broader scope.
+The deterministic Korean/English scope grammar is bounded: it does not prove
+understanding of every natural-language paraphrase. Scope enforcement is separate
+from that interpretation. Restrictions use existing conversation/recall-plan
+evidence, without a new user-data store. Local function tests do not qualify a
+new operating installation or replace the Windows distribution scenarios.
 It reports lookup status separately from evidence coverage; successful search or
 injected graph text does not prove that a relevant original was read or applied.
 Concrete identifiers anchor retrieval, including identifiers within hostnames;
@@ -1071,6 +1590,12 @@ leave lexical evidence usable while reporting unavailable/degraded channels.
 An automatic cold read does not initiate a full index rebuild. Omitted policies
 keep existing manual hybrid and expansion behavior.
 
+Managed source validation and transcript reuse use the native realpath API so Windows extended-length paths from Codex remain readable. Equivalent ordinary/namespace spellings must resolve to the same actual file and root; source metadata, file identity and foreign-home/reparse rejection remain enforced.
+
+Hooks recognize the completed capture API outcome `skipped: true, reason: native_source_managed` as canonical source ownership. They continue source capture and retain recalled context; excluded or incomplete skips are not promoted to that outcome.
+
+Failures before context generation include a bounded `agentmemory-recall-failure` diagnosis with the exception category or source-boundary reason and adapter basename/line, when available. It excludes raw input, arbitrary exception messages, credentials and absolute host paths. A diagnosis does not confirm capture or recovery.
+
 A failed current-project read does not silently broaden scope. Discovery,
 expansion, filtered/missing sources and skipped semantic channels are reported as
 partial coverage; successful originals from another source remain usable.
@@ -1092,13 +1617,17 @@ source pairs are emitted once. Graph lookup retains its current-project-first
 fallback and expands succession through each node's exact source project.
 When a follow-up gives only scope or an operation, the hook keeps the recent
 concrete user topic in the same session and retains intervening scope, history,
-status, and correction instructions. Generic service names and operational words
-alone do not qualify recalled text or graph nodes as topical evidence. It reads
+status, and correction instructions. Operational words alone do not qualify
+recalled text or graph nodes as topical evidence. Explicit service status recall
+queries use that service name to match originals; graph matching keeps its
+existing stricter topic rule. The hook reads
 at most the last 1 MiB of the canonical host transcript, verifying the session
 header and source-root boundary. A small hook plan must bind to the prior user
 prompt and retain a concrete subject; a generic or incomplete plan falls back
-to actual user prompts, then to at most two existing observation-page reads of
-12 rows (base 3,000 ms each). Explicit new topics remain independent.
+to actual user prompts, then to canonical observation pages of 200 rows within
+one base 3,000 ms continuation deadline (also bounded by the whole hook budget).
+The first page is reused for same-session source selection. Explicit new topics
+remain independent. Incomplete paging does not publish a complete reusable plan.
 
 Only full `expanded` observation results in tool outputs qualify as retained
 originals. User quotations, compact results, assistant summaries and compacted
@@ -1384,6 +1913,244 @@ Use the normal `-OutputDirectory` and `-IiiEnginePath` invocation once the sourc
 ready for final packaging. That mode still requires a clean Git checkout and
 creates the same self-contained release. Validation does not activate a runtime.
 
+### Continuation topic recovery in local r252
+
+Modified and joined status requests, such as `각종 현황 확인` and
+`전반적인 현황확인`, retain the concrete task. A multiline plan made entirely
+of generic follow-ups cannot become a new topic. Instructions about the next
+report remain qualifiers, including publication holds, while named new subjects
+remain independent. Canonical paging still preserves intervening user changes.
+
+An immediately preceding final answer bound to the prior user prompt may locate
+the subject of an anaphoric request. It does not replace the recovered user task
+or its constraints. Its search terms are taken from the existing bounded topic
+tokenizer; the full answer and internal locator label are not sent as a search
+query. A matching original from the same session is expanded through the normal
+API and retained as derived evidence alongside user originals. Incidental final
+answers cannot override a concrete task on a bare status/progress request.
+
+History discovery follows the current and still-applicable prior user scope,
+including explicit past/all-project requests. The internal phrase “Previous
+answer” or a failure mentioned only in an assistant answer cannot silently
+request cross-project history and hybrid retrieval. A current failure by itself
+does not request all past history; inadequate local evidence still widens through
+the normal discovery path. Named-service status requests use consistent tokens
+for retrieval, same-session matching and evidence rendering.
+
+Continuation lookup reports bounded, non-sensitive causes (`deadline`, `timeout`,
+`http-NNN`, `transport`, `invalid-response` or `unavailable`) separately from a
+valid empty page. Unknown or incomplete history is not absence. Candidate and
+context budgets remain limits on evidence coverage, not retrieval failures or
+proof that every prior requirement has been recalled. No separate topic cache,
+model invocation, schema migration or increased hook deadline is introduced.
+
+### Completed compressed source checks in local r251
+
+Periodic capture reuses a previously committed EOF checkpoint when the compressed
+source's path, device/file identity, physical size and modification time still
+match. It checks the source path without opening a plain replacement or following
+links, preserves the cursor and original rows, and keeps pending index publication
+on its existing retry path. This avoids scanning every Zstd block header and
+decoding the whole unchanged archive merely to recheck its final 256 bytes.
+Changed, replaced, missing, incomplete or segmented sources use the existing
+full reader and reconciliation rules. Snapshot identity has the same metadata
+trust boundary as the existing compressed reader cache; it is not a cryptographic
+proof against an adversarial same-identity rewrite.
+
+A fresh canonical source-read failure remains its specific capture cause; the
+backlog does not label that same application failure as a second RPC failure.
+Unconfirmed transport failures still retain their RPC diagnostic and retries.
+Read-budget diagnostics expose validated numeric usage/limits and the recorded
+elapsed-time, physical-byte or decoded-byte reason, without source text or paths.
+Legacy records without that reason remain unspecified rather than inferred.
+Read limits, source correspondence, original retention and decoder limits remain
+enforced on reads that need source bytes.
+
+### Recall evidence budgets in local r250
+
+Recall output retains one representative of byte-identical original bodies per
+project, session and speaker, with existing ordering choosing the representative.
+It does not delete stored observations or combine different corrections, sessions,
+projects or speakers. Compact candidates are expanded before the eight-source
+presentation limit; at most 20 exact originals are requested per discovery batch.
+The same-session page can identify repeated bodies before expansion. Bounded
+candidate omissions remain explicit and do not claim exhaustive history coverage.
+
+Long originals retain exact source pointers, with identical pointer lengths used
+for reservation and emission. If source identities themselves exceed the budget,
+the output reports the omitted count and requires official search/expansion. The
+complete turn wrapper and recall plan share the 7,600-character ceiling; the
+renderer reduces body space before output rather than truncating source records.
+Pointers do not qualify as read originals for reuse. Current user instructions
+continue to take precedence over historical candidates. These bounded changes do
+not guarantee semantic recall of every instruction or every historical turn.
+
+### Automatic recall channel status in local r249
+
+When both the embedding provider and vector index are intentionally absent,
+automatic hybrid retrieval reports `vector:disabled`. Successful keyword
+search and original expansion can then return candidates, or a bounded
+no-match result, without a false `retrieval-incomplete` warning. This does
+not enable semantic search or imply complete history coverage.
+
+A missing provider/index counterpart, configured empty vector index, vector
+request failure, scan bound, keyword index not ready, transport failure and
+incomplete original expansion retain their existing degraded status. Qwen
+graph extraction is a separate capability; its availability does not enable
+vector embeddings. Manual search ranking and stored observations are unchanged.
+
+### Native capture and recall corrections in local r240–r247 candidates
+
+r241 treats joined status requests such as `현황확인` and `상태확인` as
+subjectless follow-ups and requests fresh evidence for status. If the bounded
+1 MiB transcript tail has lost the topic, the hook reads the newest 48 canonical
+observations of the same project/session in explicit descending order. It stops
+at the newest concrete user subject, preserving intervening corrections, instead
+of reading the oldest page. A missing subject remains `needs-query`; this bounded
+fallback does not claim to reconstruct every earlier turn. Named new topics keep
+their own query. Source identity and source-reuse checks remain unchanged.
+
+The r241 native status trial exposed another context-selection error: the previous
+final answer's incidental transport/UI explanation displaced the user's task.
+r242 prioritizes the latest concrete user task for bare status/progress requests,
+even without a complete reuse plan. Explicit references to a previous answer still
+use that answer as an unverified locator; when no concrete task is recoverable,
+the existing preceding-answer fallback remains available.
+Transcript message order distinguishes an already answered identical follow-up
+from the current input, so repeated `진행` does not discard its prior plan.
+
+r243 also resolves demonstrative and residual references such as `이거` and
+`남은 제약` against the user task plus intervening corrections. Repeated bare
+status/progress requests keep a stable topic query; status still requires a fresh
+read. Relevant originals from the newest 48 same-session observations take
+precedence over generic commands from other conversations. Explicit new topics
+remain independent. r244 ignores inline Markdown emphasis/code only when classifying
+continuations, preserving original input and source digests. Bare 확인 follows
+the current task; approval replies still retain their question context.
+In r245 the 48-row window is a page, not the end of continuation history.
+When the transcript has lost the task, canonical pages are followed backwards
+until the latest concrete user task is found, preserving intervening corrections
+and deduplicating repeated control prompts. Paging shares a bounded time budget;
+failure or exhaustion reports `continuation-history-incomplete` and does not
+emit a reusable complete recall plan. A visible session with no originals is
+distinct from authorization, transport, or server failure.
+The previous assistant answer is only a fallback locator after canonical task
+recovery; an incidental answer cannot displace a recoverable user task.
+
+Relevant same-session originals are considered for fully worded requests as well
+as short continuations. Within that relevant set, latest user instructions precede
+older high-scoring records and assistant reports. Named new topics remain independent
+and unavailable local history may still require wider discovery. The 2,048-token
+original-evidence ceiling and explicit expansion pointers remain: a finite hook
+response cannot prove complete history or semantic understanding. Neither the
+1 MiB transcript tail nor output limits are treated as proof of memory absence.
+
+Recall reports candidate/context budget limits separately from actual failed
+retrieval, missing originals or a failed same-session read. Candidate results still
+require source verification, and oversized originals retain expansion pointers.
+
+r247 also treats bare resume variants such as `이어서 진행`, `마저 진행`, and
+`재개` as continuations. Repeated variants cannot become the new task when the
+original user request has left the transcript tail. A previous recall plan whose
+query contains only a continuation is discarded as a task locator, allowing the
+canonical history to recover the task and intervening corrections. Named new
+subjects remain independent; these wording rules do not remove the time or
+evidence-output bounds described above.
+
+An authenticated prompt capture includes its exact `promptTurnId` and, in r244,
+a SHA-256 of the privacy-redacted input. Codex can deliver multiple different user
+inputs within one turn; confirmation also matches the digest in the canonical
+parser. The hook and parser share the unchanged privacy transform. No raw prompt
+is added to this request, and pending hints distinguish replacement digests.
+This confirms matching content in the turn, not a unique occurrence of identical
+repeated text; canonical source IDs still govern occurrence capture and deduplication.
+A cursor
+that has not yet observed that turn's ordinary user message reports
+`promptCaptured: false`; an available scheduler queues up to four follow-up
+attempts with 250 ms, 1 s, 3 s and 10 s inter-attempt delays. At most two due
+sessions run before each regular fair drain, with at most 64 pending sessions and
+one latest turn per session. Shutdown clears this in-memory priority hint;
+restarts, exhaustion and queue saturation rely on the regular source drain.
+These delays are scheduling intervals, not end-to-end latency guarantees. Hooks
+retain independently recalled evidence while capture remains unconfirmed.
+No source cursor is jumped and no observation is synthesized from the hook body.
+
+r246 creates that same scheduler before exposing native capture APIs and starts
+its execution after index loading. A prompt observed before its native row is
+appended therefore keeps its exact retry request during cold startup instead of
+falling back to the full session sweep. Multiple inputs for one active turn keep
+the latest digest; canonical window capture still collects all intervening rows.
+Shutdown before startup completes discards pending work without starting timers;
+the next process recovers from the preserved native source. Search can still
+report `index-not-ready` during initialization; a current-session original remains
+usable, but this does not claim complete historical search while indexes load.
+
+Structured question replies use an explicit answer topic as the search query.
+A single bare status/progress answer continues the existing task in transcript
+and canonical-history lookup, without promoting the assistant's question into a
+new task. Confirmations and other subjectless answers retain question context.
+Transport identifiers remain in the retained original, not the query. Automatic
+recall selects by retrieval relevance, then presents selected user originals with
+newer entries first. Candidates are unverified evidence, not established facts.
+
+A moved Codex conversation keeps its canonical session project. Hooks resolve the
+exact native session through the existing scoped API and request native capture
+under that identity; they do not rename the project or submit another legacy
+observation. Failed or inconsistent ownership reads remain visible failures.
+Previously failed hook jobs require the existing explicit retry with exact native
+turn/content/stored-source correspondence.
+
+r244 increases compressed input and decoder output chunks to 256 KiB, reducing
+stream iteration overhead on large cold sources. The 30-second read deadline,
+8 GiB physical/decoded budgets and 128 MiB decoder window remain unchanged.
+Frame/checksum validation, source identity and exact cursor anchors still apply;
+this is not a guarantee for arbitrary source size or machine load.
+
+When a continued conversation's retained base becomes compressed, discovery can
+recover it through the existing complete correspondence preview and bound apply.
+The source identity, canonical observations and historical privacy protections
+must still match. This is not permission to skip an invalid cursor or accept
+changed source content. Local operating verification and public distribution
+qualification are separate; preview.19 remains an unreleased candidate.
+
+## Independent non-live validation
+
+The builder's `-Offline` mode passes pnpm `--offline` to frozen installation
+and production deployment, using only the existing pinned cache. Cache misses
+fail without downloading; source, adapter, packaging and payload checks remain
+mandatory. This prepares a candidate for subsequent acceptance, not a release
+already qualified for operation or publication.
+
+`test-suites.json` lists the current independent adapter and packaging checks.
+These exercise bounded synthetic hook, launcher, payload, archive, ownership,
+lifecycle, recovery-copy, receipt and qualification contracts. They do not
+assert equivalence to removed historical tests or replace actual Windows
+fresh-install/update/restart/failure-recovery and native/Qwen receipts.
+The builder sets both live gates to zero and supplies its owned scratch root;
+CI uses runner.temp. The PowerShell wrapper uses the launcher's existing
+environment normalization and trusted module search path, without invoking
+its ExecutionPolicy argument generator or changing machine security settings.
+Child failures are failures, never skipped checks. See INSTALL_FOR_AGENTS.md
+for the same suite entrypoint outside the builder.
+
+The payload smoke resolves exports and syntax-checks worker/CLI entrypoints,
+then imports only the documented import-safe diagnostics API. It never starts
+a worker. A diagnostic candidate remains unqualified; successful non-live
+checks alone do not produce a confirmed operating receipt or public eligibility.
+
+Windows scenario acceptance requires hash-bound original child-process receipts
+with integer exit codes, phase completion, and saved creation/search/detail API
+responses. Compare the exact memory ID, full content, project and origin; a
+matching string alone proves neither row identity nor complete preservation.
+The search projection omits origin, so the matching ID's detail response is
+required too. A null exit code or missing raw response leaves acceptance
+incomplete. Preserve prior receipts when correcting a qualification record.
+Automatic rollback, withheld rollback, failed restoration and recovery by a
+later normal updater retry are different outcomes. A failed restoration records
+the original cutover error, restoration error, phase and backup location, and
+keeps the owned runtime stopped. Synthetic tests of these checks do not qualify
+an earlier Windows run or a new product candidate.
+
 ## Build artifact closeout
 
 When a package must be exercised during development, use the existing builder's
@@ -1442,6 +2209,94 @@ Release/backups still follow the separate rules below; failed staging is retaine
 until its diagnosis/resume owner has finished and the workspace policy permits
 its disposition.
 
+### Private source candidates for local installation
+
+For ordinary local managed updates, explicitly pass the owning task directory as
+`-ScratchDirectory D:\Workspace\scratch\agentmemory\<task-UUID>` (or its child)
+and put `-OutputDirectory` beneath it. The builder classifies only newly created
+outputs under that supplied owner boundary as private installation candidates;
+no additional option is needed. Historical scratch/workspace outputs stay unclassified; new local installation builds must use the AgentMemory task boundary above. `-PrivateInstallCandidate` requires this same
+boundary explicitly; `-PinPrivateInstallCandidate` protects an exceptional source.
+The new qualification record binds exact scratch/release paths, source/manifest
+identity and the `private-install-candidate-rolling-v1` storage declaration.
+The build result says `pending_acceptance`: building alone retires nothing.
+`-ValidationOnly` and `-DiagnosticOnly` retain their existing disposable behavior.
+
+After managed candidate readiness and completed owned backup/runtime retention,
+the installer records an accepted private source in `install-manifest.json`'s
+`private_package_retention`. Activated fresh private installs register only after
+service validation; bare fresh preparation never accepts a source. A later
+accepted handover invokes the existing package closeout on recorded private
+sources outside the current and actual distinct predecessor revisions. All source
+copies of those two revisions remain protected, including same-revision duplicate
+builds; this is not a bound of exactly two expanded payloads. Explicit pins,
+unknown schemas, missing proof and uncertain outcomes remain protected.
+
+Acceptance history is preserved across upgrades and saved before disposal. Writes
+use the existing startup lock and exact manifest stamp; a concurrent accepted
+upgrade stops stale metadata writes. The package helper keeps its qualification
+journal, source shells and suite logs and records original/recycle/receipt mapping.
+An absent payload is reconciled only from its unique completed journal entry;
+uncertain outcomes are never blindly retried. Source closeout reports separately
+as `private_package_closeout`; incomplete source or backup closeout exits nonzero
+while the healthy installation remains active. Canonical data/authentication,
+installed runtimes and cold recovery are outside source-payload disposal.
+
+r248 fixes private source staging that could itself exceed the Windows Shell
+path limit: automatic closeout uses `s/<unique-leaf>` directly under the declared
+AgentMemory task scratch boundary, independent of nested revision/build folders.
+The existing physical-path, protected-path and longest-path checks still apply.
+An existing staging parent is preserved; only an empty parent created by this
+operation is removed. Historical uncertain attempts still require explicit
+review and the existing older-package closeout procedure.
+
+Unclassified public outputs and legacy packages are never adopted by path or age.
+Public distributions must be built outside this owned scratch output boundary;
+the distribution builder rejects private candidate qualification. It does not
+silently remove the declaration or infer publication completion. The explicit
+older-payload review below remains available for separately authorized history.
+
+### Explicit older package payload closeout
+
+After accepting the current release, use the existing builder's
+-CloseoutPackages mode to review exact older package roots. It does not build,
+activate a runtime, discover packages recursively, or change installed data.
+-ScratchDirectory is the explicit D-owned task boundary; pass the installation
+with -InstallRoot and literal package roots with -RetirePackageRoots.
+Only each selected root's payload is eligible. Manifests, installer shells,
+sibling qualification records and logs remain in place.
+
+The default is a read-only plan. After reviewing actual consumers, publication
+and completed failure diagnosis, add -ConsumersPublicationDiagnosisEnded -Execute.
+The current revision and actual predecessor are protected by installation
+metadata. Pass exceptional retained history through -ProtectedPackagePaths;
+installation recovery archives and metadata pins remain protected independently.
+Legacy, failed, unqualified and mismatched packages stay protected: this mode
+requires a release-candidate manifest and matching successful source, adapter and
+packaging qualification plus unchanged suite-log hashes. It checks declared
+payload names/sizes and physical paths; unknown data and external/unproven
+reparse entries stop the operation. It does not requalify the package or certify
+historical data preservation.
+
+Execution holds the existing installation startup lock, installation-manifest
+read lock and exclusive qualification-record handles. It rechecks identity and
+process/task/configuration consumers before each effect. Qualification evidence
+raw bytes and fields remain unchanged; the existing record gains a unique package_closeout_<operationid>
+field for this package under its exclusive handle. Only that new field is updated during this operation; prior record bytes are preserved. An incomplete operation stops the
+remaining selected targets and records its actual partial result. The existing
+Windows recycle-only operation and matching receipt are required; permanent
+deletion and fallback are unavailable.
+
+For paths too long for Windows Shell, optionally pass an existing physical
+-RecycleStagingDirectory in an explicitly supplied D task scratch on the same volume (which may belong to the current cleanup task). Its physical ancestors and separation from packages, installation and pins are checked. The mode
+records the original/staged/recycle mapping, chooses an absent eight-character
+leaf and requires the longest staged path to be below 260 characters. Absolute
+junction payloads are protected from staging. A failed recycle restores a
+definitely retained staged directory to its vacant original path; uncertain
+outcomes stop for review. Keep the existing qualification record and returned
+result; do not create another backup ZIP or cleanup runner.
+
+
 ## Release retention and cleanup
 
 A successful distinct revision update keeps the installed runtime, its actual
@@ -1466,7 +2321,13 @@ It recognizes the prior cold-snapshot descriptor format only after checking its
 owner, revision, complete recorded file inventory and every byte. The legacy producer may keep the owner marker outside its file list; only that exact marker is accepted separately after independent nonce validation. Unknown,
 foreign, unreadable or pinned sets preserve all retirement candidates and report
 `release_backup_closeout.status=incomplete`. Historical audit and published source
-artifacts remain outside automatic retention.
+artifacts remain outside automatic retention. After recovery from a verified
+pre-start automatic rollback, the exact cold backup referenced by
+`cutover_failure` remains protected failure evidence. Its direct release-backup
+path, reparse-free inventory, owner nonce, installation identity and original
+failure record must validate. It is never a transient recycle candidate;
+missing, changed, foreign or unreferenced directories still hold closeout.
+The original failure and its nonzero exit remain historical failures.
 
 Eligible inactive older installed runtimes and recovery copies go through the
 existing Windows recycle-only operation, with no permanent-delete fallback.
@@ -1478,7 +2339,10 @@ subsequent operations and reports actual attempts and partial results. A normal
 managed update converges to two runtimes and one complete recovery ZIP. Fresh
 installation has no predecessor. Reinstalling the same revision preserves its
 recorded distinct predecessor and recovery ZIP and recycles only its transient
-rollback copy, without creating another lasting archive. Failed cutovers retire
+rollback copy, without creating another lasting archive. An incomplete
+post-readiness closeout emits the installation summary and exits nonzero; the
+healthy candidate remains activated. Earlier attempted/recycled entries survive
+a later closeout error. Failed cutovers retire
 nothing and retain recovery material. Pending transition metadata keeps the
 original cold predecessor set for a retry; a data-contract transition or candidate
 start still prevents silent automatic data rollback.
@@ -1698,6 +2562,14 @@ returns `totalsExact: false`; zero fallback matches are not proof of no matching
 canonical records. Empty extraction batches and merges outside the top-degree
 snapshot still close their index update, so later exact queries remain usable.
 
+Indexed graph queries recheck the snapshot and manifest revision after node and
+edge hydration. A concurrent publication discards the mixed read and permits at
+most three attempts within a one-second retry window, polling the existing
+writer state without queuing lock work. Clean indexes remain readable while
+graph extraction waits for its model. A persistent unavailable index or a writer
+that outlasts the retry window retains the bounded, inexact snapshot fallback;
+queries never enumerate canonical graph scopes or repair the index themselves.
+
 Managed health snapshots expose `cpu.percent` as the process's share of available
 CPU capacity, plus `cpu.corePercent` and `cpu.availableParallelism` for the original
 core-equivalent measurement and denominator. Portable profiles preserve their
@@ -1721,9 +2593,16 @@ bypass. Three consecutive failures end that owned run with
 uses the existing exact process identity checks and graceful-stop timeout.
 The existing watchdog can restart only after the reserved ports are clear and
 the Codex consumer is present. No second watchdog or memory store is added.
-Authenticated stop requests use the same bounded cleanup even when the worker
-cannot process its stop file. This limits the impact of a stalled worker; it
-does not establish or repair the underlying cause of the stall.
+Authenticated stops and the normal Desktop-consumer exit path preserve the owned
+worker and engine while shutdown is unconfirmed. Native reads receive a cooperative
+shutdown signal; new native work is refused, accepted canonical commits finish, and
+the managed durability barrier completes before SDK shutdown. The eight-second
+managed warning does not force process exit. Stop callers still have a bounded
+wait and report failure if completion is unconfirmed. The installer withholds cold
+backup and cutover on that failure, missing or mismatched terminal identity, or an
+unclean exit. A clean already-inactive installation remains eligible for update.
+Stall recovery retains its separate exact-owner cleanup behavior; this does not
+repair an underlying stall or authorize automatic data recovery.
 
 The liveness response retains HTTP 200 and `status: ok` to identify a running
 worker, and includes a database-free `writeRecoveryRequired` flag. An uncertain
@@ -1843,6 +2722,12 @@ tool result. Verified task metadata now makes their own final answers eligible
 for capture, even after a large tool-only prefix. Tool output itself is not
 copied into conversation memory, internal tasks remain excluded, and previous
 reviewed-final provenance is retained on an exact correspondence.
+
+Cursor identity changes and verification limits are documented in
+[Cursor and Qwen verification](../../docs/CURSOR_AND_QWEN_VERIFICATION.md).
+The read-only capture status reports validated cursor rejection metadata; a
+physical identity change is not proof of content loss and never authorizes
+resetting a cursor or suppressing the warning.
 
 Managed native capture publishes a bounded, in-memory diagnostic summary through
 the existing `/agentmemory/livez` and `/agentmemory/health` responses. `nativeCapture`
@@ -1979,7 +2864,12 @@ of chunk data so other readers evicting shared ranges cannot restart its
 sequential prefetch. This buffer is released with the decoder. Decoded ranges
 may prefetch up to the existing
 4 MiB capture window and are shared across unchanged file identities; a single
-Zstd frame still requires sequential decoding for an uncached later offset. Concatenated frames, skippable metadata frames and
+Zstd frame still requires sequential decoding for an uncached later offset.
+Decoded prefixes before the requested offset are counted and validated without
+copying them into the range cache or decoder tail. This reduces avoidable replay
+work; it does not make seeking constant-time or remove the existing time/byte
+budgets. Backward reads restart decoding when their exact range is unavailable.
+Concatenated frames, skippable metadata frames and
 frames without a declared original size are supported. RFC 8878 container
 boundaries are checked before decoding each frame independently, avoiding Node's
 concatenated-stream truncation. Declared sizes are summed across frames; absent
@@ -2047,3 +2937,176 @@ with original observation links; an old extraction is never labelled fresh.
 ### Codex additional tool declarations
 
 The parser validates the current Codex AdditionalTools shape (type/id/role/tools) before excluding developer/system tool declarations. Conversation-bearing, malformed or unrecognized variants stop at their original boundary. No unknown-type blanket skip is used. A supported adapter update retries the saved cursor through the normal source-capture path; never edit originals or jump cursors. Unsupported diagnostics expose only a sanitized record/payload type, ordinal/byte offset and update-and-retry guidance; no tool definitions or message bodies are exposed.
+
+
+## Owned runtime continuation after an activation timeout
+
+An action timeout is an unknown outcome, not a failed or successful installation.
+The original host receipt and the failed producer remain immutable and held.
+`windows-owned-process.mjs` keeps the original child handle's `exit` and `close`
+events after returning the initial timeout or output-limit result. It writes
+separate create-new terminal JSON and bounded late stdout/stderr files in the
+same capture directory. The receipt includes the original PID, parent, command,
+identity hash and creation FILETIME. Late output is limited to 1 MiB across both
+streams and marks truncation. Missing identity or storage failure is explicit;
+terminal evidence never resumes a producer or upgrades its primary result.
+This cannot recover a historical exit whose original handle was already lost.
+
+`createWindowsActiveTimeoutProducer` is a separate, narrow continuation for the
+same already-active isolated slot. Construction verifies the original prepared
+history, consumed configure-2 ordinal, successful exact configuration, immutable
+activation TIMEOUT, closed original driver and pinned runtime anchor. Admission
+consumes one create-new `.active-after-timeout.json` claim without changing the
+original claim or ordinal. It rechecks the exact owner/nonce/candidate/config,
+two task registrations/actions, and current daemon/worker/engine PID, creation,
+parent, executable and command against the anchor. A scoped read-only backend
+must explicitly observe both old driver/installer PIDs absent; PID reuse,
+unknown/unsupported observation, changed processes/configuration or stale data
+holds the continuation before credential/API or restart effects.
+
+The API exposes only admission, one runtime restart sequence, status and the
+existing ownership-safe cleanup. It does not expose prepare, activation,
+configuration, full assembly or the fresh/restart partial qualification gate.
+The new restart records a new synthetic memory API operation and normal
+stop/start with exact ID/content/project/origin preservation. Its acceptance is
+`owned_runtime_restart_after_timeout`, with `production_qualified=false` and
+`original_activation_exit=unknown`. Existing Windows distribution and native
+operating qualification requirements remain unchanged.
+
+The restart start budget is 180 seconds: the supported ValidateOnly path can
+sequentially wait 10 seconds for a trusted consumer, 60 seconds for the startup
+lock, 3 seconds for port drain and 45 seconds for readiness (118 seconds total).
+Health and MCP HTTP checks each allow 2 seconds; deadline loops can finish a
+last check after their deadline. A conservative 32-second HTTP/check allowance
+plus 30 seconds for setup/identity/task/port operations gives the fixed 180-second
+outer budget. The two-request readiness probe is not a nested 45-second wait;
+the lock wait is not multiplied by readiness. Unbounded Windows task/CIM/FS
+latency is not claimed to have a mathematical total bound.
+
+Normal runtime stop gets 60 seconds for its 30-second graceful stop window,
+one final 2-second liveness diagnostic and setup/identity/polling overhead.
+Ownership inspect/preflight remain 45 seconds; stop-watchdog gets 60 seconds
+for its 15-second graceful window and before/after ownership observations.
+Cleanup-retain gets 60 seconds and cleanup-remove 120 seconds for the checked
+two task removals and two ownership observations, plus traversal/removal of this
+fixed payload for remove. These are finite collection budgets, not termination
+or success criteria. A timeout still means held/unknown, with late terminal
+capture and no kill or automatic continuation. Preparation remains 15 seconds;
+unused installer prepare/activate/update/recovery budgets remain unchanged at
+30 seconds. The active-runtime route cannot call those installer phases.
+The new code is tested with fake effects and pure backend functions; actual
+active admission, credential use, API/restart/cleanup and full candidate rebuild
+remain separate reviewed execution steps. Synthetic PASS is not Windows,
+native Memory v2 coexistence, Qwen, license clearance or release qualification.
+
+
+### Windows path spelling in owned argv
+
+Owned daemon/watchdog argument comparison treats only executable, script and
+root tokens (indices 0, 7 and 9) as Windows paths. They must be explicit local
+canonical paths, pass the existing Same-Path and physical/reparse checks, and
+resolve to the same volume/file ID through read-only Windows handles. This
+accepts C:\WINDOWS versus C:\Windows for the identical file. Every option,
+non-path value, parent PID and token count remains exact. Other paths, relative
+paths, parent traversal and extra tokens remain rejected. Existing process
+birth, parent, command and installed-script checks remain in force.
+
+The observed admission failure before this fix consumed its handoff claim but
+performed only ownership reads. That producer remains held: the claim is never
+deleted/reset and the old driver cannot be rerun. Any continuation requires
+reviewed, closed failure evidence and an explicit one-use continuation record;
+the fixed continuation below implements that reviewed code path.
+
+
+`createWindowsActiveAdmissionContinuationProducer` accepts only the closed v31
+inspect-only argv failure profile. It verifies the old executed plan, exact
+driver, immutable old ownership helper, terminal exit/close 1, consumed active
+claim and absence of a completed runtime/API phase in the closed driver. The
+original prepare/configure/timeout proof is still verified under its historical
+ownership pin; only the current ownership-tool revision is rebound separately.
+Candidate, slot, owner, nonce, config and process anchor remain unchanged.
+
+Admission creates exactly one `.argv-case-fix.json` sibling of the consumed
+active claim, linking its hash and the closed inspect failure to the current
+tool pin. Existing claims/ordinals and the failed producer are never reset.
+Competing or repeated attempts fail; altered, pending, successful, effectful or
+unknown closed records are rejected. Fresh current ownership and config/writer
+checks still precede credential/API or runtime actions. The reviewed fixed
+continuation subsequently completed same-slot synthetic-memory API validation,
+normal stop/start, exact memory preservation and ownership-checked cleanup.
+Create returned 201 and search/detail 200; the memory ID, content, project and
+origin matched after restart. The trial root/key and two tasks were removed,
+with a separate read-only absence check. This is an owned-runtime restart
+result, not the original fresh activation: its final exit remains UNKNOWN.
+Full Windows/native/Memory-v2/Qwen and distribution qualification remain
+incomplete. See [the dated release limits](../../docs/PREVIEW_19.md#historical-private-candidate-and-release-limits-2026-10-29)
+and [dependency evidence checklist](licenses/THIRD-PARTY-NOTICES.md#dated-distribution-evidence-checklist-2026-10-29).
+
+
+### Native memory citation display compatibility
+
+Codex keeps `<oai-mem-citation>` blocks in canonical assistant response records
+while removing those literal blocks from the displayed `AgentMessage` and
+completion text. The adapter retains the full canonical text, source key and
+content digest, and records an optional display digest only for mirror
+correspondence. Different canonical content under the same native message ID
+still blocks collection, including changes confined to a citation. Unknown
+record types, changed visible text and unmatched mirror multiplicity remain
+blocking. The matching follows the native literal, non-nested citation tags,
+including its EOF auto-close behavior; it does not strip arbitrary markup.
+
+A saved cursor containing a prior display mirror can resume through the normal
+capture path after this reader update. Saved primary-first cursors that lack
+the new display digest may still require the existing complete-source
+inspection/initialization procedure; never jump the cursor or erase records.
+The same normal procedure handles an actual physical source-file replacement
+after complete correspondence verification. Read-only preview is not a repair
+or successful collection. Final-message conflict and unmatched-mirror reasons
+are now exposed as bounded diagnostic codes instead of being collapsed into
+`capture_issue_unclassified`.
+
+The immutable r263 candidate includes the native mirror correction and has
+reviewed Windows fresh/restart/update/failure-recovery evidence. Its operating
+update and one explicitly synthetic native UI/Qwen sample were also reviewed.
+At that r263 checkpoint the full operating verifier failed at discovery and
+had no confirmed receipt. That historical failure is preserved. It does not
+establish complete Memory v2/hook coexistence.
+
+The subsequent legacy-final compatibility change addresses old hook observations
+that retained the displayed answer without its hidden memory citation. It requires
+a complete native inventory, one-to-one correspondence, the same session, owner,
+project and exact turn, the known hook shape/origin, and an exact display digest.
+The display digest is comparison-only: preview/apply re-read and verify the full
+canonical text before restoring that text in the same observation ID. Existing
+facts, timestamps and origin remain; canonical key/digest and the bounded repair
+audit are attached through normal initialization. Stale previews, ambiguous or
+changed text, existing canonical conflicts, and deletion/exclusion protections
+remain blocking. It does not trim text, strip arbitrary tags or jump a cursor.
+This later change is not in the frozen r263 bytes. It is included in fixed r264
+source `8b46bbae`. The supported automatic initialization restored the exact
+canonical response in the same observation ID, and r264 passed its seven-stage
+operating E2E with a separately confirmed, consumed exit receipt. The new
+explicitly synthetic normal-chat sample was automatically collected and linked
+to fresh Qwen extraction before manual capture. That reviewed operating scope
+does not qualify the final Windows matrix or positive Memory v2/hook coexistence.
+See the [current candidate evidence and limits](../../docs/PREVIEW_19.md#r269-local-qualification-2026-11-02).
+Later documentation changes do not relabel the immutable r264 source or payload.
+
+
+### Single-source Qwen citation regeneration
+
+When local Qwen rejects a source citation by emitting an ID outside its input,
+the existing one-time regeneration for a single original observation uses the
+temporary citation `source_1`. Only that retry enables the alias. The parser
+resolves it to the sole exact original observation ID before graph persistence,
+including relationship provenance, and collapses duplicate alias/exact citations.
+Ordinary parsing and multi-source extraction do not enable the alias. Other
+IDs and invalid retained provenance still reject the provider result: provider
+graph changes are not committed and semantic completion/cursor progress is
+withheld. Existing structural-graph heuristics and error/attempt metadata may
+still change. The existing repair path can omit relationships whose endpoints
+are absent; this is not a guarantee that every relationship defect fails the
+whole extraction. Original observations, capture cursors and source text are
+not rewritten or inferred from invalid output. The retry retains its input budget and
+at most one additional model request. This source change needs its own candidate
+and actual Qwen validation; synthetic success is not operating qualification.

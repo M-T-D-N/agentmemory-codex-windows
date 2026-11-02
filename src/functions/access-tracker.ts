@@ -1,3 +1,4 @@
+import { runWorkerMutation } from "../worker-lifecycle.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
@@ -84,10 +85,12 @@ export async function recordAccessBatch(
   memoryIds: string[],
   timestampMs?: number,
 ): Promise<void> {
-  if (!memoryIds || memoryIds.length === 0) return;
-  const ts = timestampMs ?? Date.now();
-  const unique = Array.from(new Set(memoryIds.filter(Boolean)));
-  await Promise.allSettled(unique.map((id) => recordAccess(kv, id, ts)));
+  return runWorkerMutation(kv, async () => {
+    if (!memoryIds || memoryIds.length === 0) return;
+    const ts = timestampMs ?? Date.now();
+    const unique = Array.from(new Set(memoryIds.filter(Boolean)));
+    await Promise.allSettled(unique.map((id) => recordAccess(kv, id, ts)));
+  });
 }
 
 export async function deleteAccessLog(

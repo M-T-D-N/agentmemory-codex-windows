@@ -113,6 +113,7 @@ export interface Session {
     snapshotBytes?: number;
     cursorDiagnostic?: import("./replay/codex-window.js").CodexCursorDiagnostic;
     readBudget?: import("./replay/codex-read-budget.js").CodexReadUsage;
+    readBudgetReason?: import("./replay/codex-read-budget.js").CodexReadBudgetError["reason"];
     unresolvedCaptures?: CodexUnresolvedCapture[];
     lastFailure?: { reason: string; observedAt: string };
   };

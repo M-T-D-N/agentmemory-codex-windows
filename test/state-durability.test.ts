@@ -1,3 +1,6 @@
+import { finishShutdown } from "../src/shutdown.js";
+import { SearchIndex } from "../src/state/search-index.js";
+import { IndexPersistence } from "../src/state/index-persistence.js";
 import { describe, expect, it, vi } from "vitest";
 import { changeArchiveState, archiveTargetAddress } from "../src/functions/archive.js";
 import { StateKV } from "../src/state/kv.js";
@@ -33,6 +36,50 @@ function fixture() {
 }
 
 describe("StateModule durability boundaries", () => {
+  it("persists the final derived index before closing canonical writes and SDK transports", async () => {
+    const f = fixture(), kv = f.kv(); let transportsClosed = false;
+    const persistence = new IndexPersistence(kv, new SearchIndex(), null); persistence.stop();
+    await finishShutdown([], () => persistence.save({ requireSuccess: true }),
+      () => kv.closeWrites(), async () => { transportsClosed = true; });
+    expect(transportsClosed).toBe(true);
+    expect(f.disk.at(-1)?.get(f.address(KV.bm25Index, "data:manifest"))).toMatchObject({ v: 1 });
+    await expect(kv.set(KV.bm25Index, "late", {})).rejects.toThrow("closed for shutdown");
+  });
+
+  it("holds shutdown through the accepted mutation and final flush while refusing new mutations", async () => {
+    const f = fixture(), kv = f.kv(); await kv.initializeObservationRecovery();
+    let setDone!: () => void, flushDone!: () => void;
+    const heldSet = new Promise<void>(resolve => { setDone = resolve; }), heldFlush = new Promise<void>(resolve => { flushDone = resolve; });
+    const original = f.trigger.getMockImplementation()!;
+    let flushes = 0;
+    f.trigger.mockImplementation(async request => {
+      if (request.function_id === "state::set") await heldSet;
+      if (request.function_id === "state::flush" && ++flushes === 2) await heldFlush;
+      return original(request);
+    });
+    const accepted = kv.set(KV.config, "accepted", { value: 1 });
+    await vi.waitFor(() => expect(f.trigger.mock.calls.some(([r]) => r.function_id === "state::set")).toBe(true));
+    let complete = false; const stopping = kv.closeWrites().then(() => { complete = true; });
+    await expect(kv.set(KV.config, "late", { value: 2 })).rejects.toThrow("closed for shutdown");
+    expect(complete).toBe(false); setDone(); await accepted;
+    await vi.waitFor(() => expect(flushes).toBe(2)); expect(complete).toBe(false);
+    flushDone(); await stopping; expect(f.get(KV.config, "accepted")).toEqual({ value: 1 });
+    expect(f.get(KV.config, "late")).toBeUndefined(); expect(f.disk).toHaveLength(2);
+  });
+
+  it("does not report clean shutdown when its final durability barrier fails", async () => {
+    const f = fixture(), kv = f.kv(); await kv.set(KV.config, "accepted", 1); f.failAt(2);
+    await expect(kv.closeWrites()).rejects.toThrow("disk unavailable"); expect(kv.requiresWriteRecovery()).toBe(true);
+  });
+
+  it("still attempts a final flush after an earlier uncertain mutation, while retaining its recovery fence", async () => {
+    const f = fixture(), kv = f.kv(); f.failAt(1);
+    await expect(kv.set(KV.config, "accepted", 1)).rejects.toThrow("disk unavailable");
+    expect(kv.requiresWriteRecovery()).toBe(true); f.failAt(0);
+    await expect(kv.closeWrites()).rejects.toThrow("shutdown durability is unconfirmed");
+    expect(f.disk).toHaveLength(1); expect(kv.requiresWriteRecovery()).toBe(true);
+  });
+
   it("holds already queued writes after the first durability failure", async () => {
     const f = fixture(), kv = f.kv();
     await kv.initializeObservationRecovery();

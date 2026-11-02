@@ -9,7 +9,7 @@ function Get-AgentMemoryServicePorts {
         if ($workspace.PSObject.Properties['service_ports']) {
             foreach ($key in @($ports.Keys)) {
                 $value = $workspace.service_ports.PSObject.Properties[$key]
-                if (-not $value -or $value.Value -isnot [int] -or $value.Value -lt 1 -or $value.Value -gt 65535) { throw 'Invalid AgentMemory service port.' }
+                if (-not $value -or ($value.Value -isnot [int] -and $value.Value -isnot [long]) -or $value.Value -lt 1 -or $value.Value -gt 65535) { throw 'Invalid AgentMemory service port.' }
                 $ports[$key] = [int]$value.Value
             }
         }

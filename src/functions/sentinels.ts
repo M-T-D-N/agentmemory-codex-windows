@@ -1,3 +1,4 @@
+import { workerMutationTimeout } from "../worker-lifecycle.js";
 import type { IIIClient } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
@@ -138,7 +139,7 @@ export function registerSentinelsFunction(sdk: IIIClient, kv: StateKV): void {
 
       if (data.type === "timer") {
         const durationMs = (data.config as { durationMs: number }).durationMs;
-        setTimeout(async () => {
+        workerMutationTimeout(kv, async () => {
           try {
             await withKeyedLock(`mem:sentinel:${sentinel.id}`, async () => {
               const fresh = await kv.get<Sentinel>(KV.sentinels, sentinel.id);

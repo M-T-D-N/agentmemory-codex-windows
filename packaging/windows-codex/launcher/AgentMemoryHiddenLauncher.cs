@@ -256,7 +256,7 @@ namespace AgentMemoryCodex
                 if (mode == "mcp") return RunMcp(root, powershellPath);
                 string[] baseArguments = new[] {
                     "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
-                    "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Root", root
+                    "-File", scriptPath, "-Root", root
                 };
                 string[] childArguments;
                 if (mode == "task")
@@ -305,7 +305,7 @@ namespace AgentMemoryCodex
 
             string[] validationArguments = new[] {
                 "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
-                "-ExecutionPolicy", "Bypass", "-File", validationScript,
+                "-File", validationScript,
                 "-Root", root, "-NodePath", nodePath, "-ValidateOnly"
             };
             int validationExitCode = RunOwnedChild("mcp", root, powershellPath, validationArguments, null);

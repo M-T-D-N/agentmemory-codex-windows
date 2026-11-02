@@ -3,6 +3,42 @@ import { isAbsolute, join, parse, posix, relative, resolve, sep, win32 } from "n
 import { withCodexSourceSegments, type CodexSourceFile } from "./codex-source-segments.js";
 import { withCodexCompressedFile } from "./codex-source-compressed.js";
 import { CodexReadBudget } from "../replay/codex-read-budget.js";
+import { createHash } from "node:crypto";
+
+export const codexSourceIdentityDigest = (source: CodexSourceIdentity) => createHash("sha256").update(JSON.stringify([
+  source.sessionId, source.cwd, source.createdAt, source.source,
+  ...(source.fork ? [source.fork] : []), ...(source.continuation ? [source.continuation] : []),
+])).digest("hex");
+
+/** Only reuses a committed EOF snapshot, with the same physical identity used by
+ * the compressed reader cache. A changed/replaced file takes the full reader. */
+export async function unchangedCodexCompressedSnapshot(sourceRoot: string, relativePath: string,
+  expectedIdentity: string, budget: CodexReadBudget): Promise<boolean> {
+  if (!expectedIdentity.startsWith("zstd:")) return false;
+  const plainPath = resolve(sourceRoot, relativePath);
+  if (codexSourceRelativePath(sourceRoot, plainPath) !== relativePath) return false;
+  budget.check();
+  try { await lstat(plainPath); return false; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const path = plainPath + ".zst";
+  try {
+    await rejectLinkedComponents(path);
+    if (canonicalCodexCwd(await realpath(path)) !== canonicalCodexCwd(path)) return false;
+    const file = await open(path, "r");
+    try {
+      const before = await file.stat();
+      if (!before.isFile() || expectedIdentity !== "zstd:" + JSON.stringify([path, before.dev, before.ino, before.size, before.mtimeMs])) return false;
+      await rejectLinkedComponents(path);
+      const after = await lstat(path);
+      if (canonicalCodexCwd(await realpath(path)) !== canonicalCodexCwd(path)) return false;
+      try { await lstat(plainPath); return false; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      budget.check();
+      return !after.isSymbolicLink() && after.dev === before.dev && after.ino === before.ino &&
+        after.size === before.size && after.mtimeMs === before.mtimeMs;
+    } finally { await file.close(); }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+}
 
 export interface CodexSourceIdentity {
   sessionId: string;
@@ -212,7 +248,7 @@ export async function withReadOnlyCodexPhysicalSource<T>(
 }
 
 export async function readCodexSourceIdentity(
-  sourceRoot: string, relativePath: string, sessionId: string,
+  sourceRoot: string, relativePath: string, sessionId: string, signal?: AbortSignal,
 ): Promise<CodexSourceIdentity> {
-  return withReadOnlyCodexSource(sourceRoot, relativePath, sessionId, async source => source);
+  return withReadOnlyCodexSource(sourceRoot, relativePath, sessionId, async source => source, new CodexReadBudget({}, signal));
 }

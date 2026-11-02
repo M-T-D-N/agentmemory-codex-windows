@@ -62,6 +62,14 @@ if ($stateFilePresent) {
         [System.IO.Path]::GetFullPath([string]$runtimeState.root) -eq $resolvedRoot
     )
 }
+. (Join-Path $PSScriptRoot 'agentmemory-lifecycle.ps1')
+$shutdown = $null
+try {
+    $body = Invoke-RestMethod -Uri "http://127.0.0.1:$($servicePorts.rest)/agentmemory/livez" -Headers @{ Authorization = "Bearer $($env:AGENTMEMORY_SECRET)" } -TimeoutSec 2
+    $shutdown = Get-AgentMemoryShutdownSummary -RuntimeState $runtimeState -Body $body
+} catch {}
+if ($shutdown -and $shutdown.state -cne 'running') { $health = $false }
+$stopDelivery = Get-AgentMemoryStopDeliverySummary -RuntimeState $runtimeState
 $installManifest = $null
 $installManifestPresent = Test-Path -LiteralPath $installManifestPath -PathType Leaf
 $installManifestValid = $false
@@ -92,6 +100,8 @@ if ($runtimeState -and $runtimeState.run_id) {
 
 [ordered]@{
     healthy = $health -and $mcpHealth -and $runtimeStateValid -and $installManifestValid
+    shutdown = $shutdown
+    shutdown_delivery = $stopDelivery
     service_healthy = $health
     mcp_http_healthy = $mcpHealth
     state_file_present = $stateFilePresent
@@ -105,7 +115,11 @@ if ($runtimeState -and $runtimeState.run_id) {
     runtime_status = if ($runtimeState) { [string]$runtimeState.status } else { $null }
     active_package = if ($installManifest) { [string]$installManifest.package_relative_path } else { $null }
     release_revision = if ($installManifest) { [string]$installManifest.release_revision } else { $null }
-    install_manifest_verified_at_utc = if ($installManifest) { [string]$installManifest.verified_at_utc } else { $null }
+    install_manifest_verified_at_utc = if ($installManifest -and $installManifest.PSObject.Properties['verified_at_utc'] -and $null -ne $installManifest.verified_at_utc) {
+        $verifiedAt = $installManifest.verified_at_utc
+        if ($verifiedAt -is [DateTime] -or $verifiedAt -is [DateTimeOffset]) { $verifiedAt.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture) }
+        else { [string]$verifiedAt }
+    } else { $null }
     legacy_install_state_present = Test-Path -LiteralPath $legacyInstallStatePath -PathType Leaf
     child_log_policy = 'quiet; zero-byte stream logs mean the child emitted no console output'
     current_run_logs = $runLogs

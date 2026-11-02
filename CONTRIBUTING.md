@@ -24,7 +24,7 @@ Requirements:
 
 - Windows
 - Node.js 20 or newer
-- pnpm 11.19.0
+- pnpm 11.25.0
 
 From the repository root:
 

@@ -1,3 +1,4 @@
+import { WorkerMutationLifecycle } from "../worker-lifecycle.js";
 import { resolveStoredNativeCapture, type NativeRecoveryInventories } from "./capture-native-recovery.js";
 import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { createHash, randomBytes } from "node:crypto";
@@ -189,14 +190,15 @@ export interface CaptureController {
   status(): Promise<CaptureStatus>;
   durability(): SentMark;
   start(): void;
-  stop(): void;
+  stop(): Promise<void>;
 }
 
 export function registerCaptureFunctions(
   sdk: IIIClient,
   kv: StateKV,
-  options: { restPort?: number; durableAfterMs?: number } = {},
+  options: { restPort?: number; durableAfterMs?: number; lifecycle?: WorkerMutationLifecycle } = {},
 ): CaptureController {
+  const lifecycle = options.lifecycle ?? new WorkerMutationLifecycle();
   const policy = capturePolicy();
   const mark: SentMark = {
     bootId: randomBytes(12).toString("hex"),
@@ -218,6 +220,10 @@ export function registerCaptureFunctions(
   let sweeping: Promise<{ processed: number; recovered: number; deadLettered: number }> | null = null;
   let inboxSize: number | null = null;
   const timers: Array<ReturnType<typeof setInterval>> = [];
+  const capture = (input: Parameters<typeof captureAccepted>[0]) => lifecycle.run(() => captureAccepted(input));
+  const prune = () => lifecycle.run(() => pruneAccepted());
+  const settleRetained = () => lifecycle.run(() => settleRetainedAccepted());
+  const drainLocalSpool = () => lifecycle.run(() => drainLocalSpoolAccepted());
   const spoolTargets = options.restPort ? serverSpoolTargets(options.restPort) : [];
 
   async function currentInboxSize(): Promise<number> {
@@ -303,7 +309,7 @@ export function registerCaptureFunctions(
     return { status: "accepted", state: "retrying", eventId: rec.eventId, observationId: rec.observationId, attempts: rec.attempts, nextAttemptAt, error: message };
   }
 
-  async function capture(input: { payload: HookPayload; eventId?: string }): Promise<CaptureResult> {
+  async function captureAccepted(input: { payload: HookPayload; eventId?: string }): Promise<CaptureResult> {
     const payload = input.payload;
     const clientEventId = isValidEventId(input.eventId) ? input.eventId : undefined;
     const eventId = clientEventId ?? generateId("evs");
@@ -422,15 +428,19 @@ export function registerCaptureFunctions(
   }
 
   function sweep() {
+    return lifecycle.run(() => sweepAccepted());
+  }
+
+  function sweepAccepted() {
     if (!sweeping) {
-      sweeping = runSweep().finally(() => {
+      sweeping = lifecycle.run(runSweep).finally(() => {
         sweeping = null;
       });
     }
     return sweeping;
   }
 
-  async function prune(): Promise<number> {
+  async function pruneAccepted(): Promise<number> {
     const cutoff = Date.now() - policy.dedupRetentionHours * 3600_000;
     const perShard = Math.max(1, Math.ceil(policy.eventsMax / EVENT_SHARDS));
     let removed = 0;
@@ -475,7 +485,7 @@ export function registerCaptureFunctions(
     };
   }
 
-  async function settleRetained(): Promise<number> {
+  async function settleRetainedAccepted(): Promise<number> {
     let requeued = 0;
     for (const target of spoolTargets) {
       const { url, dir } = splitTarget(target);
@@ -488,7 +498,7 @@ export function registerCaptureFunctions(
     return requeued;
   }
 
-  async function drainLocalSpool(): Promise<DrainResult[]> {
+  async function drainLocalSpoolAccepted(): Promise<DrainResult[]> {
     const results: DrainResult[] = [];
     for (const target of spoolTargets) {
       const { url, dir } = splitTarget(target);
@@ -548,7 +558,7 @@ export function registerCaptureFunctions(
 
   sdk.registerFunction("mem::capture", async (input: { payload: HookPayload; eventId?: string }) => capture(input));
 
-  sdk.registerFunction("mem::capture-retry", async (input: { eventId?: string; key?: string; all?: boolean } = {}) => {
+  sdk.registerFunction("mem::capture-retry", async (input: { eventId?: string; key?: string; all?: boolean } = {}) => lifecycle.run(async () => {
     const records = (await kv.list<InboxRecord>(KV.captureInbox)).filter(Boolean);
     const targets = records.filter((r) => {
       if (input.key) return r.key === input.key;
@@ -564,7 +574,7 @@ export function registerCaptureFunctions(
       else if (outcome === "waiting") outcomes.waiting++;
     }
     return { matched: targets.length, ...outcomes };
-  });
+  }));
 
   sdk.registerFunction("mem::capture-list", async (input: { status?: InboxState; limit?: number } = {}) => {
     const limit = Math.min(Math.max(1, Number(input.limit) || 50), 500);
@@ -592,20 +602,21 @@ export function registerCaptureFunctions(
     status,
     durability: () => ({ ...mark }),
     start() {
-      if (timers.length) return;
-      const sweepTimer = setInterval(() => {
-        void sweep().catch(() => {});
-        void settleRetained().catch(() => {});
+      if (timers.length || lifecycle.closing) return;
+      const sweepTimer = lifecycle.interval(async () => {
+        await sweep();
+        await settleRetained();
       }, policy.retryIntervalMs);
       sweepTimer.unref();
-      const pruneTimer = setInterval(() => {
-        void prune().catch(() => {});
+      const pruneTimer = lifecycle.interval(async () => {
+        await prune();
       }, 60 * 60 * 1000);
       pruneTimer.unref();
       timers.push(sweepTimer, pruneTimer);
     },
     stop() {
       for (const t of timers.splice(0)) clearInterval(t);
+      return lifecycle.stop();
     },
   };
   activeController = controller;

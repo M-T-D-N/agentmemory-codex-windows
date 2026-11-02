@@ -1,11 +1,18 @@
 param(
     [string]$Root = '',
-    [int]$TimeoutSeconds = 30
+    [int]$TimeoutSeconds = 30,
+    [switch]$EvidenceUtf8,
+    [string]$EvidenceIdentityPath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ($EvidenceUtf8 -or -not [string]::IsNullOrWhiteSpace($EvidenceIdentityPath)) {
+    . (Join-Path $PSScriptRoot 'agentmemory-evidence.ps1')
+    Initialize-AgentMemoryEvidenceCapture -Utf8:$EvidenceUtf8 -IdentityPath $EvidenceIdentityPath
+}
 
 function Get-StopReservedConnections {
     foreach ($line in @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p TCP)) {
@@ -65,6 +72,9 @@ do {
     $listeners = @(Get-StopReservedConnections)
     $runExited = Test-AgentMemoryRecordedRunExited -RuntimeState $state -Probe { param($ProcessId) Get-AgentMemoryProcessIdentity -ProcessId $ProcessId }
     if ($listeners.Count -eq 0 -and $runExited) {
+        $terminal = Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json
+        if (@("run_id","status","terminal_reason") | Where-Object { -not $terminal.PSObject.Properties[$_] }) { throw "Recorded runtime clean-stop metadata is missing; no process was force-terminated." }
+        if ($terminal.run_id -cne $state.run_id -or $terminal.status -cne "inactive" -or $terminal.terminal_reason -cnotin @("authenticated_external_stop","codex_desktop_window_absent")) { throw "Recorded runtime exited without a confirmed clean authenticated stop; no process was force-terminated." }
         [ordered]@{
             stopped = $true
             daemon_pid = [int]$state.daemon.pid
@@ -75,4 +85,13 @@ do {
     Start-Sleep -Milliseconds 250
 } while ([DateTime]::UtcNow -lt $deadline)
 
-throw 'AgentMemory did not stop gracefully before the timeout; no process was force-terminated.'
+$shutdown = $null
+try {
+    $body = Invoke-RestMethod -Uri "http://127.0.0.1:$($servicePorts.rest)/agentmemory/livez" -Headers @{ Authorization = "Bearer $($env:AGENTMEMORY_SECRET)" } -TimeoutSec 2
+    $shutdown = Get-AgentMemoryShutdownSummary -RuntimeState $state -Body $body
+} catch {}
+$delivery = $null
+try { $delivery = Get-AgentMemoryStopDeliverySummary -RuntimeState (Get-Content -Encoding UTF8 -Raw -LiteralPath $statePath | ConvertFrom-Json) } catch {}
+$detail = if ($shutdown) { " Worker shutdown=$($shutdown.state), stage=$($shutdown.stage)." } else { '' }
+if ($delivery) { $detail += " Delivery=$delivery." }
+throw "AgentMemory did not stop gracefully before the timeout;$detail no process was force-terminated."

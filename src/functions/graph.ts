@@ -2,7 +2,7 @@ import { runtimeDiagnosticPhase } from "../telemetry/runtime-diagnostics.js";
 import { sessionLifecycleLockKey } from "./session-lifecycle.js";
 import { inObservationRecovery, registerObservationWriter, withObservationWrite } from "../state/observation-write.js";
 import type { IIIClient } from "iii-sdk";
-import { readArchiveVisibility, archiveTargetAddress } from "./archive.js";
+import { readArchiveVisibility, archiveTargetAddress, type ArchiveVisibility } from "./archive.js";
 import { prepareArchiveTargetForget } from "./archive-forget.js";
 import type {
   GraphNode,
@@ -23,7 +23,7 @@ import {
 } from "../prompts/graph-extraction.js";
 import { isGraphExtractionEnabled } from "../config.js";
 import { recordAudit, safeAudit } from "./audit.js";
-import { withKeyedLock, tryWithKeyedLock } from "../state/keyed-mutex.js";
+import { withKeyedLock, tryWithKeyedLock, keyedLockBusy } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
 import { scrubRecord } from "./privacy.js";
 import { isCodexInternalAmbientText, isCodexApprovalReviewText } from "./observation-visibility.js";
@@ -84,6 +84,17 @@ const MAX_GRAPH_PURGE_EDGES = 1000;
 const MAX_GRAPH_PROVENANCE_TARGETS = 100;
 const MAX_GRAPH_PROVENANCE_OBSERVATION_REFERENCES = 500;
 export const GRAPH_WRITE_LOCK = "mem:graph-write";
+const GRAPH_QUERY_MAX_ATTEMPTS = 3;
+const GRAPH_QUERY_RETRY_WINDOW_MS = 1000;
+
+async function waitForGraphPublication(deadline: number): Promise<boolean> {
+  while (keyedLockBusy(GRAPH_WRITE_LOCK)) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return false;
+    await new Promise<void>(resolve => setTimeout(resolve, Math.min(20, remaining)));
+  }
+  return performance.now() < deadline;
+}
 
 function withGraphWriterLock<T>(deferIfBusy: boolean, work: () => Promise<T>) {
   if (!deferIfBusy) return withKeyedLock(GRAPH_WRITE_LOCK, work);
@@ -2834,8 +2845,10 @@ function singleSourceCitationRegeneration(
     && /^(?:entity|relationship) .+ cites an observation outside the input batch: [^\r\n]+$/.test(message);
 }
 
+const SINGLE_SOURCE_CITATION_ALIAS = "source_1";
+
 function graphSourceRegenerationPrompt(originalPrompt: string, observationId: string): string {
-  return `The previous extraction cited an observation outside the input batch. Regenerate a fresh result using only the original observations below. Do not infer or substitute an intended citation from the previous output. Every entity and relationship must cite one or more of these exact source_observation_ids: ${observationId}. Return only valid <entities>...</entities><relationships>...</relationships> XML.\n\nORIGINAL OBSERVATIONS:\n${originalPrompt}`;
+  return `The previous extraction cited an observation outside the input batch. Regenerate a fresh result using only the original observation below. Do not infer or substitute an intended citation from the previous output. For this single-source regeneration, the temporary citation ID ${SINGLE_SOURCE_CITATION_ALIAS} identifies only original observation ${observationId}. Use source_observation_ids="${SINGLE_SOURCE_CITATION_ALIAS}" for every entity and relationship instead of copying its long ID. Return only valid <entities>...</entities><relationships>...</relationships> XML.\n\nORIGINAL OBSERVATIONS:\n${originalPrompt}\n\nCite only the temporary observation ID ${SINGLE_SOURCE_CITATION_ALIAS} in this regeneration.`;
 }
 
 const HEURISTIC_EDGE_WEIGHT = 0.4;
@@ -3541,7 +3554,8 @@ export function registerGraphFunction(
             if (inputBudget && graphPromptInputTokens(repairPrompt) > inputBudget) throw parseError;
             semanticRepairAttempted = true;
             const repaired = await provider.compress(GRAPH_EXTRACTION_SYSTEM, repairPrompt);
-            parsed = parseGraphXml(repaired, obsIds, true);
+            parsed = parseGraphXml(repaired, obsIds, true,
+              regenerateFromSource ? SINGLE_SOURCE_CITATION_ALIAS : undefined);
           }
           nodes = nodes.concat(parsed.nodes.map((node) => ({
             ...node,
@@ -3816,29 +3830,54 @@ export function registerGraphFunction(
         };
       }
 
-      if (snapshot) {
+      let querySnapshot = snapshot;
+      let queryArchive: ArchiveVisibility = archived;
+      let querySources = sourceCache;
+      const retryDeadline = performance.now() + GRAPH_QUERY_RETRY_WINDOW_MS;
+      for (let attempt = 0; attempt < GRAPH_QUERY_MAX_ATTEMPTS && querySnapshot; attempt++) {
+        let indexed: Awaited<ReturnType<typeof ensureGraphQueryIndex>>;
         try {
-          const indexed = await ensureGraphQueryIndex(kv, snapshot);
-          if (indexed) {
-            return queryGraphFromIndex(
-              kv,
-              data,
-              indexed.snapshot,
-              indexed.manifest,
-              project,
-              maxDepth,
-              limit,
-              offset,
-              indexed.rebuilt,
-              archived,
-              sourceCache,
-            );
-          }
+          indexed = await ensureGraphQueryIndex(kv, querySnapshot);
         } catch (error) {
           logger.warn("Graph query index unavailable; using bounded legacy path", {
             error: error instanceof Error ? error.message : String(error),
           });
+          break;
         }
+        if (indexed) {
+          const result = await queryGraphFromIndex(
+            kv,
+            data,
+            indexed.snapshot,
+            indexed.manifest,
+            project,
+            maxDepth,
+            limit,
+            offset,
+            indexed.rebuilt,
+            queryArchive,
+            querySources,
+          );
+          const [currentSnapshot, currentManifest] = await Promise.all([
+            readSnapshot(kv),
+            readGraphQueryIndexManifest(kv),
+          ]);
+          if (currentSnapshot &&
+              queryIndexMatchesSnapshot(currentManifest, currentSnapshot) &&
+              queryIndexMatchesSnapshot(currentManifest, indexed.snapshot) &&
+              currentManifest.revision === indexed.manifest.revision) {
+            return result;
+          }
+        }
+        if (attempt + 1 === GRAPH_QUERY_MAX_ATTEMPTS ||
+            !await waitForGraphPublication(retryDeadline)) break;
+        const nextSnapshot = await readSnapshot(kv);
+        querySources = new Map<string, boolean>();
+        querySnapshot = nextSnapshot ? { ...nextSnapshot,
+          topNodes: await filterCodexGraphSources(kv, nextSnapshot.topNodes, querySources),
+          topEdges: await filterCodexGraphSources(kv, nextSnapshot.topEdges, querySources),
+        } : null;
+        queryArchive = await readArchiveVisibility(kv);
       }
 
       // The timeout around kv.list never cancelled the underlying state
@@ -3847,15 +3886,15 @@ export function registerGraphFunction(
       // derived query index is now the only exact read path; while it is dirty
       // or unavailable, degrade from the bounded snapshot without touching
       // canonical graph scopes.
-      if (snapshot) {
+      if (querySnapshot) {
         return queryGraphFromSnapshotFallback(
           data,
-          snapshot,
+          querySnapshot,
           project,
           maxDepth,
           limit,
           offset,
-          archived,
+          queryArchive,
         );
       }
       return {

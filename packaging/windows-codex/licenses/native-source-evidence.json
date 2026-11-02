@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "partial-native-source-evidence",
+  "archive_name": "NATIVE-SOURCE-EVIDENCE.zip",
+  "archive_size_bytes": 95754646,
+  "archive_sha256": "feb32a6ee7f17de11c9eb9bb6cbf38ff497d9d55a6cc3927e911ddbfabb7029d",
+  "coverage": "sources-and-notices-with-selected-and-conditional-rust",
+  "unresolved": [
+    "recipient-source-delivery-review"
+  ],
+  "complete": false
+}

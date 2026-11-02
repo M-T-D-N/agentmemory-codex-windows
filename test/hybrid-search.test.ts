@@ -71,6 +71,23 @@ describe("HybridSearch", () => {
     expect(embed).toHaveBeenCalledTimes(mode === "provider-down" ? 1 : 0);
   });
 
+  it.each(["disabled", "missing-provider", "empty-index", "search-failed", "empty-results"])("distinguishes automatic vector %s from a failed lookup", async (mode) => {
+    const observation = makeObs(); bm25.add(observation); await kv.set("mem:obs:ses_1", observation.id, observation);
+    const embed = vi.fn(async () => new Float32Array([1, 0]));
+    const vectorSearch = vi.fn(() => { if (mode === "search-failed") throw Error("vector search offline"); return []; });
+    const vector = mode === "disabled" ? null : { size: mode === "empty-index" ? 0 : 1, search: vectorSearch };
+    const provider = ["disabled", "missing-provider"].includes(mode) ? null : { embed };
+    const channels: Record<string, string> = {};
+    const hybrid = new HybridSearch(bm25, vector as never, provider as never, kv as never);
+    const result = await hybrid.search("auth", 8, undefined, { maxVectorScan: 4096, channels });
+    expect(result[0].observation.id).toBe(observation.id);
+    expect(channels.vector).toBe(mode === "disabled" ? "disabled" : mode === "search-failed" ? "failed"
+      : mode === "empty-results" ? "available" : "unavailable");
+    const attempted = ["search-failed", "empty-results"].includes(mode) ? 1 : 0;
+    expect(embed).toHaveBeenCalledTimes(attempted);
+    expect(vectorSearch).toHaveBeenCalledTimes(attempted);
+  });
+
   it("retains labelled semantic candidates below the automatic vector scan cap and leaves manual vector behavior unchanged", async () => {
     const observation = makeObs({narrative:"Preserve pennies until aggregation.",title:"Original user request"});
     await kv.set("mem:obs:ses_1", observation.id, observation);

@@ -1,3 +1,5 @@
+import { WorkerMutationLifecycle, bindWorkerMutationLifecycle } from "./worker-lifecycle.js";
+import { createWorkerRuntimeShutdown } from "./worker-runtime-shutdown.js";
 import { attachRuntimeDiagnostics, executingPackageIdentity } from "./telemetry/runtime-diagnostics.js";
 import { registerArchiveFunctions } from "./functions/archive-tools.js";
 import { startCodexSourceScheduler } from "./functions/codex-source-backlog.js";
@@ -35,7 +37,7 @@ import { StateKV } from "./state/kv.js";
 import { VectorIndex } from "./state/vector-index.js";
 import { HybridSearch } from "./state/hybrid-search.js";
 import { IndexPersistence } from "./state/index-persistence.js";
-import { SHUTDOWN_FLUSH_TIMEOUT_MS, SHUTDOWN_HARD_EXIT_MS, settleWithin } from "./shutdown.js";
+import { NativeSourceLifecycle, createWorkerShutdown, SHUTDOWN_FLUSH_TIMEOUT_MS, settleWithin } from "./shutdown.js";
 import { registerPrivacyFunction, withWriteScrubbing } from "./functions/privacy.js";
 import { registerObserveFunction } from "./functions/observe.js";
 import { registerCaptureFunctions } from "./functions/capture.js";
@@ -186,6 +188,12 @@ async function main() {
   // or raw process.env. Only-if-unset, so real process.env still wins.
   hydrateProcessEnvFromFile();
 
+  const stateDurability = getEnvVar("AGENTMEMORY_STATE_DURABILITY");
+  if (stateDurability !== undefined && stateDurability !== "file-flush-v1") {
+    throw new Error("Unsupported AGENTMEMORY_STATE_DURABILITY mode");
+  }
+  const workerLifecycle = new WorkerMutationLifecycle({ managed: stateDurability === "file-flush-v1" });
+  return workerLifecycle.run(async () => {
   const config = loadConfig();
   setHttpOriginPorts(() => [config.restPort, getBoundViewerPort()]);
   const embeddingConfig = loadEmbeddingConfig();
@@ -213,6 +221,7 @@ async function main() {
       ? createFallbackProvider(generalProviderConfig, fallbackConfig)
       : createProvider(generalProviderConfig);
   const graphShutdown = new AbortController();
+  const nativeSourceLifecycle = new NativeSourceLifecycle();
   const graphProvider = localQwenGraphOnly
     ? createProvider(config.provider, graphShutdown.signal)
     : provider;
@@ -259,7 +268,7 @@ async function main() {
   );
   bootLog(`Streams: ws://localhost:${config.streamsPort}`);
 
-  const sdk = withWriteScrubbing(registerWorker(config.engineUrl, {
+  const rawSdk = withWriteScrubbing(registerWorker(config.engineUrl, {
     workerName: "agentmemory",
     // The adapter's 32K output ceiling is an emergency runaway fuse, not a
     // normal generation target. Keep the invocation layer above Qwen's 20m
@@ -284,18 +293,17 @@ async function main() {
     },
   }));
 
-  const runtimeDiagnostics = attachRuntimeDiagnostics(sdk, {
+  const runtimeDiagnostics = attachRuntimeDiagnostics(rawSdk, {
     file: process.env.AGENTMEMORY_DIAGNOSTICS_FILE,
     runId: process.env.AGENTMEMORY_DIAGNOSTICS_RUN_ID,
     packageIdentity: executingPackageIdentity(import.meta.url),
   });
+  const sdk = workerLifecycle.wrap(rawSdk);
+  bindWorkerMutationLifecycle(sdk, workerLifecycle);
   writeWorkerPidfile();
 
-  const stateDurability = getEnvVar("AGENTMEMORY_STATE_DURABILITY");
-  if (stateDurability !== undefined && stateDurability !== "file-flush-v1") {
-    throw new Error("Unsupported AGENTMEMORY_STATE_DURABILITY mode");
-  }
   const kv = new StateKV(sdk, { backend: getStateBackend(), requireDurability: stateDurability === "file-flush-v1" });
+  bindWorkerMutationLifecycle(kv, workerLifecycle);
   await kv.flush();
   await kv.initializeObservationRecovery();
   await resumeGraphWritePlan(kv);
@@ -317,7 +325,7 @@ async function main() {
   registerPrivacyFunction(sdk);
   registerObserveFunction(sdk, kv, dedupMap, config.maxObservationsPerSession,
     () => semanticGraphBacklogScheduler?.wake());
-  const capture = registerCaptureFunctions(sdk, kv, { restPort: config.restPort });
+  const capture = registerCaptureFunctions(sdk, kv, { lifecycle: workerLifecycle, restPort: config.restPort });
   registerImageQuotaCleanup(sdk, kv);
   registerVisionSearchFunctions(sdk, kv, imageEmbeddingProvider);
   if (isSlotsEnabled()) {
@@ -328,7 +336,7 @@ async function main() {
   registerSearchFunction(sdk, kv);
   const readContext = registerContextFunction(sdk, kv, config.tokenBudget);
   registerSessionIndexMaintenanceFunction(sdk, kv);
-  void rebuildSessionIndexIfStale(kv).catch(error => bootWarn(`Session index rebuild failed: ${error instanceof Error ? error.message : String(error)}`));
+  workerLifecycle.spawn(() => rebuildSessionIndexIfStale(kv).catch(error => bootWarn(`Session index rebuild failed: ${error instanceof Error ? error.message : String(error)}`)));
   registerSummarizeFunction(sdk, kv, provider, metricsStore);
   registerMigrateFunction(sdk, kv);
   registerFileIndexFunction(sdk, kv);
@@ -452,7 +460,7 @@ async function main() {
     // never keeps the process alive), mirroring the auto-forget timer.
     // mem::snapshot-create serializes overlapping runs internally (git-lock
     // safety), so the timer can stay a simple fire-and-forget tick.
-    const snapshotTimer = setInterval(() => {
+    const snapshotTimer = workerLifecycle.interval(() => {
       sdk
         .trigger({
           function_id: "mem::snapshot-create",
@@ -485,16 +493,18 @@ async function main() {
   setHybridRanker(hybridRanker);
   registerRecentSearchesSweepFunction(sdk, kv);
 
-  let nativeSourceScheduler: ReturnType<typeof startCodexSourceScheduler> | null = null;
+  const nativeSourceScheduler = process.env.AGENTMEMORY_CODEX_SOURCE_ROOT
+    ? startCodexSourceScheduler(sdk, { deferStart: true }) : null;
+  let shutdownController: ReturnType<typeof createWorkerShutdown> | undefined;
   registerApiTriggers(sdk, kv, readContext, secret, metricsStore, provider, () => semanticGraphBacklogScheduler?.wake(),
-    process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? page => nativeSourceScheduler?.status(page) ?? { status: "starting" } : undefined);
+    process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? page => nativeSourceScheduler?.status(page) ?? { status: "starting" } : undefined, nativeSourceLifecycle, () => shutdownController?.status(), input => nativeSourceScheduler?.requestPromptCapture(input) ?? false);
   registerEventTriggers(sdk, kv, readContext);
   markKeywordRebuildPending();
   registerViewerStreamTriggers(sdk, kv, { secret, metricsStore,
     provider: "circuitState" in provider ? provider : undefined });
   registerMcpEndpoints(sdk, kv, secret, process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? page => nativeSourceScheduler?.status(page) : undefined);
 
-  const healthMonitor = registerHealthMonitor(sdk, kv, {
+  const healthMonitor = registerHealthMonitor(sdk, kv, { lifecycle: workerLifecycle,
     maintainGraphQueryIndex: true,
     streamRelayProbe: kv.backend === "redis" ? createStreamRelayProbe(sdk, { url: `ws://localhost:${config.streamsPort}` }) : undefined,
   });
@@ -574,7 +584,7 @@ async function main() {
     }
   }
 
-  const auditMigration = startAuditMigration(kv).catch(() => {});
+  const auditMigration = workerLifecycle.run(() => startAuditMigration(kv)).catch(() => {});
 
   const vectorCountShortfall =
     Boolean(loaded?.vector) &&
@@ -616,7 +626,7 @@ async function main() {
       bootLog(
         `Re-embedding ${keyword.vectorJobs.length} vectors missing since the last index save, ${getVectorBackfillMax()} per batch in the background`,
       );
-      void backfillVectorBacklog(keyword.vectorJobs)
+      workerLifecycle.spawn(() => backfillVectorBacklog(keyword.vectorJobs)
         .then(async (result) => {
           if (result.complete && backlogScanComplete) await indexPersistence.clearBackfillMarker();
           setVectorBackfillState(result.complete ? "idle" : "paused");
@@ -630,11 +640,11 @@ async function main() {
         .catch((err) => {
           setVectorBackfillState("paused");
           console.warn(`[agentmemory] Failed to backfill vectors:`, err);
-        });
+        }));
     } else if (keyword.vectorJobs.length > 0) {
       setVectorBackfillState("running");
       bootLog(`Backfilling ${keyword.vectorJobs.length} missing vectors in the background`);
-      void backfillVectors(keyword.vectorJobs)
+      workerLifecycle.spawn(() => backfillVectors(keyword.vectorJobs)
         .then((count) => {
           const remaining = Math.max(0, keyword.vectorJobs.length - count);
           setPendingVectorBackfillCount(keyword.fullBackfillPending + remaining);
@@ -644,7 +654,7 @@ async function main() {
         .catch((err) => {
           setVectorBackfillState("paused");
           console.warn(`[agentmemory] Failed to backfill vectors:`, err);
-        });
+        }));
     }
   } catch (err) {
     console.warn(`[agentmemory] Failed to rebuild the BM25 index:`, err);
@@ -664,7 +674,7 @@ async function main() {
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,
   );
 
-  void (async () => {
+  workerLifecycle.spawn(async () => {
     try {
       const drained = await capture.drainLocalSpool();
       const delivered = drained.reduce((n, r) => n + r.delivered, 0);
@@ -682,7 +692,7 @@ async function main() {
       bootWarn(`Capture recovery at boot failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     capture.start();
-  })();
+  });
 
   const viewerServer = startViewerServer(
     config.viewerPort,
@@ -692,10 +702,10 @@ async function main() {
     config.restPort,
   );
 
-  nativeSourceScheduler = process.env.AGENTMEMORY_CODEX_SOURCE_ROOT ? startCodexSourceScheduler(sdk) : null;
+  nativeSourceScheduler?.start();
   if (isGraphCompactOnBootEnabled()) {
-    const timer = setTimeout(() => {
-      void runGraphCompactOnBoot(kv, { log: bootLog, warn: bootWarn }).catch(error =>
+    const timer = workerLifecycle.timeout(() => {
+      return runGraphCompactOnBoot(kv, { log: bootLog, warn: bootWarn }).catch(error =>
         bootWarn(`Graph compaction failed: ${error instanceof Error ? error.message : String(error)}`));
     }, GRAPH_COMPACT_BOOT_DELAY_MS);
     timer.unref();
@@ -704,7 +714,7 @@ async function main() {
   const consolidationIntervalMs = getConsolidationIntervalMs();
 
   if (process.env.AUTO_FORGET_ENABLED !== "false") {
-    const autoForgetTimer = setInterval(async () => {
+    const autoForgetTimer = workerLifecycle.interval(async () => {
       try {
         await sdk.trigger({ function_id: "mem::auto-forget", payload: { dryRun: false } });
       } catch {}
@@ -721,8 +731,8 @@ async function main() {
         await sdk.trigger({ function_id: "mem::audit-retention-sweep", payload: {} });
       } catch {}
     };
-    void runAuditSweep();
-    const auditRetentionTimer = setInterval(runAuditSweep, 86400000);
+    workerLifecycle.spawn(runAuditSweep);
+    const auditRetentionTimer = workerLifecycle.interval(runAuditSweep, 86400000);
     auditRetentionTimer.unref();
     bootLog(
       `Audit retention sweep: enabled (drop month scopes older than ${auditRetentionMonths}mo, every 24h)`,
@@ -735,8 +745,8 @@ async function main() {
         await sdk.trigger({ function_id: "mem::lesson-decay-sweep", payload: {} });
       } catch {}
     };
-    void runLessonDecay();
-    const lessonDecayTimer = setInterval(runLessonDecay, 86400000);
+    workerLifecycle.spawn(runLessonDecay);
+    const lessonDecayTimer = workerLifecycle.interval(runLessonDecay, 86400000);
     lessonDecayTimer.unref();
     bootLog(`Lesson decay sweep: enabled (every 24h)`);
   }
@@ -747,8 +757,8 @@ async function main() {
         await sdk.trigger({ function_id: "mem::insight-decay-sweep", payload: {} });
       } catch {}
     };
-    void runInsightDecay();
-    const insightDecayTimer = setInterval(runInsightDecay, 86400000);
+    workerLifecycle.spawn(runInsightDecay);
+    const insightDecayTimer = workerLifecycle.interval(runInsightDecay, 86400000);
     insightDecayTimer.unref();
   }
 
@@ -763,8 +773,8 @@ async function main() {
         await sdk.trigger({ function_id: "mem::retention-score", payload: {} });
       } catch {}
     };
-    void runRetentionScoring();
-    const retentionScoringTimer = setInterval(
+    workerLifecycle.spawn(runRetentionScoring);
+    const retentionScoringTimer = workerLifecycle.interval(
       runRetentionScoring,
       retentionIntervalMs,
     );
@@ -778,7 +788,7 @@ async function main() {
   // recent-searches scope only needs the last entry per session;
   // sweeping anything older than the retention window keeps the scope
   // from growing unbounded across long-lived deployments.
-  const recentSearchesSweepTimer = setInterval(async () => {
+  const recentSearchesSweepTimer = workerLifecycle.interval(async () => {
     try {
       await sdk.trigger({
         function_id: "mem::diagnostic::recent-searches-sweep",
@@ -788,10 +798,10 @@ async function main() {
   }, 60 * 60 * 1000);
   recentSearchesSweepTimer.unref();
 
-  void seedViewerStreamTracker(sdk, { unorderedListing: kv.backend === "redis", managedState: kv.usesManagedState }).catch(() => {});
+  workerLifecycle.spawn(() => seedViewerStreamTracker(sdk, { unorderedListing: kv.backend === "redis", managedState: kv.usesManagedState }));
 
   if (isSessionSweepEnabled()) {
-    const sessionSweepTimer = setInterval(async () => {
+    const sessionSweepTimer = workerLifecycle.interval(async () => {
       try {
         await sdk.trigger({ function_id: "mem::session-sweep", payload: {} });
       } catch (err) {
@@ -803,7 +813,7 @@ async function main() {
   }
 
   if (isConsolidationEnabled()) {
-    const consolidationTimer = setInterval(async () => {
+    const consolidationTimer = workerLifecycle.interval(async () => {
       try {
         await sdk.trigger({ function_id: "mem::consolidate-pipeline", payload: {} });
       } catch {}
@@ -812,47 +822,32 @@ async function main() {
     bootLog(`Auto-consolidation: enabled (every ${consolidationIntervalMs / 60000}m)`);
   }
 
-  let shuttingDown = false;
-  const shutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    const hardExit = setTimeout(() => {
-      console.warn(`[agentmemory] Shutdown exceeded ${SHUTDOWN_HARD_EXIT_MS}ms; exiting.`);
-      clearWorkerPidfile();
-      process.exit(1);
-    }, SHUTDOWN_HARD_EXIT_MS);
-    hardExit.unref();
-    console.log(`\n[agentmemory] Shutting down...`);
-    graphShutdown.abort();
-    await nativeSourceScheduler?.stop();
-    await semanticGraphBacklogScheduler?.stop();
-    healthMonitor.stop();
-    dedupMap.stop();
-    capture.stop();
-    indexPersistence.stop();
-    const viewerClosed = new Promise<void>((resolve) =>
-      viewerServer.close(() => resolve()),
-    );
-    viewerServer.closeAllConnections();
-    await viewerClosed;
-    const flushed = await settleWithin(
-      indexPersistence.save(),
-      SHUTDOWN_FLUSH_TIMEOUT_MS,
-    );
-    if (!flushed) {
-      console.warn(
-        `[agentmemory] Search index flush did not finish within ${SHUTDOWN_FLUSH_TIMEOUT_MS}ms; the engine is probably gone. Observations are already in the engine's state store and the index reconciles them on the next boot.`,
-      );
-    }
-    await settleWithin(sdk.shutdown(), SHUTDOWN_FLUSH_TIMEOUT_MS).catch((err) => {
-      console.warn(`[agentmemory] SDK shutdown failed:`, err);
-    });
-    await runtimeDiagnostics?.stop();
-    clearWorkerPidfile();
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  const managedShutdown = stateDurability === "file-flush-v1";
+  shutdownController = createWorkerRuntimeShutdown({
+    lifecycle: workerLifecycle,
+    managed: managedShutdown,
+    stopTimers: () => { graphShutdown.abort(); dedupMap.stop(); indexPersistence.stop(); },
+    stopProducers: [() => capture.stop(), () => healthMonitor.stop(), () => nativeSourceLifecycle.stop(), () => nativeSourceScheduler?.stop(), () => semanticGraphBacklogScheduler?.stop()],
+    persistIndexes: async () => {
+      if (managedShutdown) await indexPersistence.save({ requireSuccess: true });
+      else if (!await settleWithin(indexPersistence.save(), SHUTDOWN_FLUSH_TIMEOUT_MS)) {
+        console.warn(`[agentmemory] Search index flush did not finish within ${SHUTDOWN_FLUSH_TIMEOUT_MS}ms; the index reconciles canonical observations on the next boot.`);
+      }
+    },
+    flushWrites: async () => { if (managedShutdown) await kv.closeWrites(); },
+    closeTransports: async () => {
+      const viewerClosed = new Promise<void>(resolve => viewerServer.close(() => resolve()));
+      viewerServer.closeAllConnections(); await viewerClosed;
+      if (managedShutdown) await sdk.shutdown();
+      else await settleWithin(sdk.shutdown(), SHUTDOWN_FLUSH_TIMEOUT_MS).catch(() => console.warn("[agentmemory] SDK shutdown failed"));
+      await runtimeDiagnostics?.stop();
+    },
+    clearPidfile: clearWorkerPidfile,
+    report: status => console.warn("[agentmemory] shutdown " + JSON.stringify(status)),
+  });
+  process.on("SIGINT", shutdownController.request);
+  process.on("SIGTERM", shutdownController.request);
+  });
 }
 
 main().catch((err) => {

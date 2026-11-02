@@ -62,6 +62,14 @@ export default defineConfig([
     banner: { js: "#!/usr/bin/env node" },
   },
   {
+    entry: ["src/diagnostics.ts"],
+    outDir: "dist",
+    ...shared,
+    dts: true,
+    clean: false,
+    sourcemap: true,
+  },
+  {
     entry: ["src/cli.ts"],
     outDir: "dist",
     ...shared,
@@ -101,4 +109,12 @@ export default defineConfig([
     clean: false,
     sourcemap: false,
   })),
+  {
+    entry: ["src/providers/index.ts"],
+    outDir: "dist/providers",
+    ...shared,
+    clean: false,
+    dts: false,
+    sourcemap: true,
+  },
 ]);

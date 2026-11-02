@@ -1,3 +1,4 @@
+import { throwIfNativeSourceStopping } from "../shutdown.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
@@ -8,7 +9,7 @@ import { KV } from "../state/schema.js";
 import { withObservationWrite } from "../state/observation-write.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { prepareSessionStart, seedSourceSessionActivity, sessionLifecycleLockKey } from "./session-lifecycle.js";
-import { canonicalCodexCwd, readCodexSourceIdentity } from "./codex-source-identity.js";
+import { canonicalCodexCwd, readCodexSourceIdentity, validateCodexContinuation } from "./codex-source-identity.js";
 import { isExcludedCodexAmbientSession } from "./observation-visibility.js";
 import { recordAudit } from "./audit.js";
 import { readCodexWindow } from "../replay/codex-window.js";
@@ -44,7 +45,7 @@ export function existingCodexDiscoveryStatus(session: Session, candidate: CodexT
 }
 
 async function relocateCodexSource(kv: StateKV, candidate: CodexThreadCandidate,
-  managed: { sourceRoot: string; agentId: string },
+  managed: { sourceRoot: string; agentId: string; signal?: AbortSignal },
 ) {
   return withObservationWrite(() => withKeyedLock(sessionLifecycleLockKey(candidate.sessionId), async () => {
     const session = await kv.get<Session>(KV.sessions, candidate.sessionId);
@@ -52,7 +53,7 @@ async function relocateCodexSource(kv: StateKV, candidate: CodexThreadCandidate,
     const status = existingCodexDiscoveryStatus(session, candidate, managed.agentId);
     if (status !== "relocate") return { status: status === "inspect" ? "reconcile_required" as const : status };
     const state = session.codexNativeCapture!;
-    const verified = await readCodexWindow({ sourceRoot: managed.sourceRoot, sourcePath: candidate.sourcePath,
+    const verified = await readCodexWindow({ sourceRoot: managed.sourceRoot, signal: managed.signal, sourcePath: candidate.sourcePath,
       sessionId: session.id, cursor: state.cursor, sourceHolds: state.sourceHolds, maxBytes: 1, maxMessages: 1 });
     if (verified.source.source !== candidate.source ||
         (state.captureCwd !== undefined && typeof state.captureCwd !== "string") ||
@@ -60,6 +61,7 @@ async function relocateCodexSource(kv: StateKV, candidate: CodexThreadCandidate,
         !isDeepStrictEqual({ ...state.source, relativePath: verified.source.relativePath }, verified.source)) {
       return { status: "reconcile_required" as const, reason: "relocated_source_identity_changed" };
     }
+    throwIfNativeSourceStopping(managed.signal);
     await recordAudit(kv, "observe", "mem::codex-source-discover", [session.id], { phase: "source-relocation", project: session.project });
     await kv.set(KV.sessions, session.id, { ...session, codexNativeCapture: {
       ...state, source: verified.source, status: "pending", issue: undefined,
@@ -69,7 +71,7 @@ async function relocateCodexSource(kv: StateKV, candidate: CodexThreadCandidate,
 }
 
 async function rediscoverArchivedMissingSource(kv: StateKV, candidate: CodexThreadCandidate,
-  managed: { sourceRoot: string; agentId: string },
+  managed: { sourceRoot: string; agentId: string; signal?: AbortSignal },
 ) {
   return withObservationWrite(() => withKeyedLock(sessionLifecycleLockKey(candidate.sessionId), async () => {
     const session = await kv.get<Session>(KV.sessions, candidate.sessionId);
@@ -79,9 +81,10 @@ async function rediscoverArchivedMissingSource(kv: StateKV, candidate: CodexThre
         !(await readArchiveVisibility(kv))({ kind: "session", id: session.id })) return { status: "managed" as const };
     let verified: Awaited<ReturnType<typeof readCodexWindow>>;
     try {
-      verified = await readCodexWindow({ sourceRoot: managed.sourceRoot, sourcePath: candidate.sourcePath,
+      verified = await readCodexWindow({ sourceRoot: managed.sourceRoot, signal: managed.signal, sourcePath: candidate.sourcePath,
         sessionId: session.id, cursor: state.cursor, sourceHolds: state.sourceHolds, maxBytes: 1, maxMessages: 1 });
     } catch (error) {
+      throwIfNativeSourceStopping(managed.signal);
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "managed" as const };
       const replaced = error instanceof Error && error.message === "Codex source cursor is invalid, replaced or truncated; reconciliation is required";
       const reason = replaced ? "returned_source_requires_reconciliation" : "native_source_read_failed";
@@ -95,6 +98,7 @@ async function rediscoverArchivedMissingSource(kv: StateKV, candidate: CodexThre
         status: "reconcile_required", issue: "returned_source_identity_changed", checkedAt: new Date().toISOString() } });
       return { status: "reconcile_required" as const, reason: "returned_source_identity_changed" };
     }
+    throwIfNativeSourceStopping(managed.signal);
     await recordAudit(kv, "observe", "mem::codex-source-discover", [session.id], {
       phase: "archived-source-return-verified", project: session.project,
     });
@@ -104,8 +108,9 @@ async function rediscoverArchivedMissingSource(kv: StateKV, candidate: CodexThre
 }
 
 export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCandidate,
-  managed: { sourceRoot: string; agentId: string; projectForCwd: (cwd: string) => string },
+  managed: { sourceRoot: string; agentId: string; signal?: AbortSignal; projectForCwd: (cwd: string) => string },
 ) {
+  throwIfNativeSourceStopping(managed.signal);
   if (candidate.status !== "candidate" || !exact(candidate.sessionId) || !exact(managed.agentId)) throw Error("Exact native discovery identity is required");
   const existing = await kv.get<Session>(KV.sessions, candidate.sessionId);
   if (existing) {
@@ -122,9 +127,22 @@ export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCa
           if (error.code === "ENOENT") return null;
           throw error;
         }) : null;
-      if (plain ? previousCompressed && plain.isFile() && !plain.isSymbolicLink()
-          : !previousCompressed && compressed?.isFile() && !compressed.isSymbolicLink()) {
-          const source = await readCodexSourceIdentity(managed.sourceRoot, candidate.sourcePath, candidate.sessionId);
+      const continuation = existing.codexNativeCapture.source.continuation;
+      const basePath = continuation ? validateCodexContinuation(continuation).sourcePath : undefined;
+      let compressedBase = false;
+      if (basePath && existing.codexNativeCapture.cursorDiagnostic?.reason === "file_identity") {
+        const stat = (path: string) => lstat(join(managed.sourceRoot, path)).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        if (!await stat(basePath)) {
+          const base = await stat(basePath + ".zst");
+          compressedBase = Boolean(base?.isFile() && !base.isSymbolicLink());
+        }
+      }
+      if (compressedBase || (plain ? previousCompressed && plain.isFile() && !plain.isSymbolicLink()
+          : !previousCompressed && compressed?.isFile() && !compressed.isSymbolicLink())) {
+          const source = await readCodexSourceIdentity(managed.sourceRoot, candidate.sourcePath, candidate.sessionId, managed.signal);
           if (!isDeepStrictEqual(source, { ...existing.codexNativeCapture.source, relativePath: source.relativePath })) return { status: "reconcile_required" as const,
             reason: "source_identity_changed" };
           const scope = { sessionId: candidate.sessionId, project: existing.project, sourcePath: candidate.sourcePath };
@@ -143,7 +161,7 @@ export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCa
   }
   let first: Awaited<ReturnType<typeof readCodexWindow>>;
   try {
-    first = await readCodexWindow({ sourceRoot: managed.sourceRoot, sourcePath: candidate.sourcePath,
+    first = await readCodexWindow({ sourceRoot: managed.sourceRoot, signal: managed.signal, sourcePath: candidate.sourcePath,
       sessionId: candidate.sessionId, maxBytes: 16 * 1024 * 1024, maxMessages: 1 });
   } catch (error) {
     if (!existing && candidate.hasConversationEvidence === false && (error as NodeJS.ErrnoException).code === "ENOENT" &&
@@ -174,7 +192,7 @@ export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCa
   if (existing) {
     if (existing.project !== project) return { status: "reconcile_required" as const, reason: "existing_project_does_not_match_source" };
     const scope = { sessionId: candidate.sessionId, project, sourcePath: candidate.sourcePath };
-    const bounded = { sourceRoot: managed.sourceRoot, agentId: managed.agentId, maxInventoryWindows: 4 };
+    const bounded = { sourceRoot: managed.sourceRoot, agentId: managed.agentId, maxInventoryWindows: 4, signal: managed.signal };
     const preview = await initializeCodexSourceCapture(kv, { ...scope, dryRun: true }, bounded);
     if (!("expectedVersion" in preview)) throw Error("Native initialization did not produce a correspondence preview");
     await initializeCodexSourceCapture(kv, { ...scope, dryRun: false, expectedVersion: preview.expectedVersion,
@@ -204,6 +222,7 @@ export async function discoverCodexSession(kv: StateKV, candidate: CodexThreadCa
         cursor: { ...first.cursor, byteOffset: 0, ordinal: 0,
           anchor: createHash("sha256").update("").digest("hex"), parser: initialCodexParseState(Boolean(first.source.fork)) },
       } };
+    throwIfNativeSourceStopping(managed.signal);
     await recordAudit(kv, "observe", "mem::codex-source-discover", [session.id], { phase: "new-source", project });
     await kv.set(KV.sessions, session.id, session);
     return { status: "created" as const, project };

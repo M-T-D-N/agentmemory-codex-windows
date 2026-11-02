@@ -1,3 +1,4 @@
+import { runWorkerMutation } from "../worker-lifecycle.js";
 import type { IIIClient } from "iii-sdk";
 import type { MemorySlot, CompressedObservation } from "../types.js";
 import { KV } from "../state/schema.js";
@@ -221,7 +222,7 @@ export function renderPinnedContext(slots: MemorySlot[]): string {
 }
 
 export function registerSlotsFunctions(sdk: IIIClient, kv: StateKV): void {
-  void seedDefaults(kv).catch((err) => {
+  void runWorkerMutation(kv, () => seedDefaults(kv)).catch((err) => {
     logger.warn("slot defaults seed failed", {
       error: err instanceof Error ? err.message : String(err),
     });

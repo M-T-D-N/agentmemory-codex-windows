@@ -29,6 +29,47 @@ async function closed(kv: ReturnType<typeof mockKV>, id: string) {
   return observation;
 }
 describe("read-only native capture reporting", () => {
+  it("reports exact numeric read budgets without private values or guessing a legacy reason", async () => {
+    const kv = mockKV(), row = session("budget-stop");
+    const usage = { physicalBytes: 10942208, decodedBytes: 0, elapsedMilliseconds: 30003,
+      maxPhysicalBytes: 8589934592, maxDecodedBytes: 8589934592, maxMilliseconds: 30000, maxWindowBytes: 134217728 };
+    Object.assign(row.codexNativeCapture!, { status: "unknown", issue: "native_source_read_budget_exceeded",
+      readBudgetReason: "elapsed_time", readBudget: { ...usage, privatePath: "private/source" } });
+    await kv.set(KV.sessions, row.id, row); const before = structuredClone(kv.store);
+    const report = await readCodexSourceStatus(kv as never, "mine");
+    expect(report.issues[0].readBudget).toEqual({ ...usage, reason: "elapsed_time" });
+    expect(JSON.stringify(report)).not.toContain("private"); expect(kv.store).toEqual(before);
+    delete row.codexNativeCapture!.readBudgetReason;
+    expect((await readCodexSourceStatus(kv as never, "mine")).issues[0].readBudget).toEqual(usage);
+    row.codexNativeCapture!.readBudgetReason = "private/source" as never;
+    expect((await readCodexSourceStatus(kv as never, "mine")).issues[0].readBudget).toEqual(usage);
+    for (const value of [-1, "private/source", Number.NaN, Number.POSITIVE_INFINITY]) {
+      row.codexNativeCapture!.readBudget = { ...usage, physicalBytes: value } as never;
+      const invalid = await readCodexSourceStatus(kv as never, "mine");
+      expect(invalid.status).toBe("attention"); expect(invalid.issues[0].readBudget).toBeUndefined();
+      expect(JSON.stringify(invalid)).not.toContain("private");
+    }
+  });
+  it("exposes only validated cursor rejection metadata and preserves the warning and canonical state", async () => {
+    const kv = mockKV(), row = session("cursor-stop");
+    row.codexNativeCapture!.status = "reconcile_required";
+    row.codexNativeCapture!.issue = "native_source_cursor_invalid";
+    row.codexNativeCapture!.cursorDiagnostic = { reason: "file_identity", snapshotBytes: 4096,
+      expectedDigest: "a".repeat(64), observedDigest: "b".repeat(64), privatePath: "private/source", original: "private text" } as never;
+    await kv.set(KV.sessions, row.id, row); const before = structuredClone(kv.store);
+    const report = await readCodexSourceStatus(kv as never, "mine");
+    expect(report).toMatchObject({ status: "attention", uniqueSessionCount: 1 });
+    expect(report.issues[0].cursorDiagnostic).toEqual({ reason: "file_identity", snapshotBytes: 4096,
+      expectedDigest: "a".repeat(64), observedDigest: "b".repeat(64) });
+    expect(JSON.stringify(report)).not.toContain("private"); expect(kv.store).toEqual(before);
+    for (const patch of [{ reason: "private/source" }, { snapshotBytes: -1 }, { expectedDigest: "private original" }, { observedDigest: undefined }, { expectedDigest: ["a".repeat(64)] }]) {
+      await kv.set(KV.sessions, row.id, { ...row, codexNativeCapture: { ...row.codexNativeCapture,
+        cursorDiagnostic: { ...row.codexNativeCapture!.cursorDiagnostic, ...patch } } });
+      const invalid = await readCodexSourceStatus(kv as never, "mine");
+      expect(invalid.status).toBe("attention"); expect(invalid.issues[0].cursorDiagnostic).toBeUndefined();
+      expect(JSON.stringify(invalid)).not.toContain("private");
+    }
+  });
   it("reports unsupported record type and boundary without source text or private paths", async () => {
     const kv = mockKV(), row = session("schema-stop");
     row.codexNativeCapture!.status = "unknown"; row.codexNativeCapture!.issue = "unsupported_response_type";
@@ -130,5 +171,19 @@ describe("read-only native capture reporting", () => {
       expect((await readCodexSourceStatus(kv as never, "mine")).uniqueSessionCount).toBe(0);
     }
     await expect(readCodexSourceStatus(kv as never, "mine", { project: "*" })).rejects.toThrow("Invalid capture status selection");
+  });
+});
+
+
+describe("bounded final-message conflict diagnostics", () => {
+  it.each(["conflicting_final_message_identity", "conflicting_final_item_identity", "completion_without_matching_final_message",
+    "previous_turn_has_unmatched_message_mirrors", "completion_has_unmatched_message_mirrors"])("preserves the non-sensitive reason %s", async reason => {
+    const kv = mockKV(), row = session("citation-conflict");
+    Object.assign(row.codexNativeCapture!, { status: "unknown", issue: reason,
+      recordDiagnostic: { ordinal: 8, byteOffset: 1024, recordType: "response_item", payloadType: "message" } });
+    await kv.set(KV.sessions, row.id, row); const before = structuredClone(kv.store);
+    const result = await readCodexSourceStatus(kv as never, "mine");
+    expect(result.issues[0]).toMatchObject({ reason, record: { ordinal: 8, byteOffset: 1024 }, action: "update_adapter_and_retry_saved_cursor" });
+    expect(JSON.stringify(result)).not.toContain("private/path"); expect(kv.store).toEqual(before);
   });
 });
